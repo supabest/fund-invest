@@ -233,7 +233,7 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" async></script>
 <script>
 const STORE_KEY = 'dinvest_funds_v1';
 const THEME_CAP_KEY = 'dinvest_theme_caps_v1';
@@ -362,9 +362,14 @@ function cloudErrHint(e){
   return '配置或网络问题';
 }
 
-function initCloud(){
+function initCloud(tries){
+  // SDK 为 async 加载：网络慢时轮询等待，不阻塞页面渲染；超时则云同步降级为不可用
   const hasSdk = !!(window.supabase && window.supabase.createClient);
-  if(!hasSdk){ setSyncUI(); return; }
+  if(!hasSdk){
+    if((tries||0) < 20){ setTimeout(()=>initCloud((tries||0)+1), 500); return; }
+    setSyncUI();
+    return;
+  }
   try{
     sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
     cloudReady = true;
