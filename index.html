@@ -119,8 +119,7 @@
   .mkt-text{flex:1; min-width:0;}
   .mkt-items{display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; flex:1; min-width:0;}
   .mkt-item{display:inline-flex; align-items:center; gap:5px;}
-  .mkt-toggle{display:flex; align-items:center; gap:5px; cursor:pointer; font-size:12px; color:var(--muted); white-space:nowrap;}
-  .mkt-toggle input{width:auto;}
+  .mkt-label{white-space:nowrap; color:var(--ivory);}
   .mkt-strip.off{opacity:.45;}
 
   .sync-strip{display:flex; align-items:center; gap:10px; margin-top:10px; font-size:12px; color:var(--muted);}
@@ -164,7 +163,7 @@
     .small-note{font-size:13px;}
     .mkt-strip{font-size:13.5px;}
     .mkt-strip .signal-pill{font-size:13px;}
-    .mkt-toggle{font-size:13px;}
+    .mkt-label{font-size:13px;}
     .sync-strip{font-size:13.5px;}
     .sync-btn{font-size:13px;}
     .modal h2{font-size:20px;}
@@ -195,8 +194,8 @@
   </div>
   <div class="progress-track"><div class="progress-fill" id="goalBar" style="width:0%"></div></div>
   <div class="mkt-strip" id="mktStrip">
+    <span class="mkt-label">大盘参考</span>
     <span class="mkt-items" id="mktItems"></span>
-    <label class="mkt-toggle"><input type="checkbox" id="mktToggle" checked> 参与调节</label>
   </div>
   <div class="sync-strip" id="syncStrip">
     <span id="syncText">云同步：检测中…</span>
@@ -237,7 +236,6 @@
 <script>
 const STORE_KEY = 'dinvest_funds_v1';
 const THEME_CAP_KEY = 'dinvest_theme_caps_v1';
-const MKT_ADJUST_KEY = 'dinvest_mkt_adjust_v1';
 const SYNC_TS_KEY = 'dinvest_sync_ts_v1';
 const GOAL = 200000;
 
@@ -272,8 +270,7 @@ let editingId = null;
 // fund id → 「自动获取」按完整历史回算出的连续站上MA60天数，保存时同步后清除
 const fetchedStreaks = {};
 
-// 大盘参考：按各基金自选指数独立计算档位（key → 行情状态）；mktAdjust 为全局参与调节开关
-let mktAdjust = true;
+// 大盘参考：按各基金自选指数独立计算档位（key → 行情状态）；每只基金选「不参考」即豁免
 let mktMap = {};
 let mktFetching = {};
 
@@ -325,10 +322,6 @@ async function loadAll(){
     const r2 = await store.get(THEME_CAP_KEY);
     themeCaps = r2 ? JSON.parse(r2.value) : {...DEFAULT_CAPS};
   }catch(e){ themeCaps = {...DEFAULT_CAPS}; }
-  try{
-    const r3 = await store.get(MKT_ADJUST_KEY);
-    mktAdjust = r3 ? JSON.parse(r3.value) : true;
-  }catch(e){ mktAdjust = true; }
   migrateFunds();
   render();
   ensureBenchmarkData();
@@ -342,11 +335,6 @@ async function saveFunds(){
 }
 async function saveCaps(){
   try{ await store.set(THEME_CAP_KEY, JSON.stringify(themeCaps)); }
-  catch(e){}
-  pushCloud();
-}
-async function saveMktAdjust(){
-  try{ await store.set(MKT_ADJUST_KEY, JSON.stringify(mktAdjust)); }
   catch(e){}
   pushCloud();
 }
@@ -435,12 +423,10 @@ async function syncOnOpen(){
       const d = data.data;
       if(Array.isArray(d.funds)) funds = d.funds;
       if(d.themeCaps && typeof d.themeCaps==='object') themeCaps = {...DEFAULT_CAPS, ...d.themeCaps};
-      if(typeof d.mktAdjust==='boolean') mktAdjust = d.mktAdjust;
       migrateFunds();
       try{
         await store.set(STORE_KEY, JSON.stringify(funds));
         await store.set(THEME_CAP_KEY, JSON.stringify(themeCaps));
-        await store.set(MKT_ADJUST_KEY, JSON.stringify(mktAdjust));
         await markLocalSaved();
       }catch(e){}
       render();
@@ -461,7 +447,7 @@ async function pushCloud(silent){
   if(!cloudReady || !sbUser) return;
   syncState = 'syncing'; setSyncUI();
   try{
-    const { error } = await sb.from(TABLE_NAME).upsert({ user_id: sbUser.id, data: { funds, themeCaps, mktAdjust } });
+    const { error } = await sb.from(TABLE_NAME).upsert({ user_id: sbUser.id, data: { funds, themeCaps } });
     if(error) throw error;
     await markLocalSaved();
     syncState = 'ok'; syncErrMsg='';
@@ -562,21 +548,16 @@ function fetchBenchmark(key){
 }
 
 function renderMktStrip(){
-  const strip = document.getElementById('mktStrip');
   const itemsEl = document.getElementById('mktItems');
-  const toggle = document.getElementById('mktToggle');
-  if(!strip || !itemsEl || !toggle) return;
-  toggle.checked = mktAdjust;
-  strip.classList.toggle('off', !mktAdjust);
+  if(!itemsEl) return;
   itemsEl.innerHTML = benchmarksInUse().map(k=>{
     const b = BENCHMARKS[k];
     const m = mktMap[k];
     if(!m || !m.ready){
       return '<span class="mkt-item">'+b.name+'：'+(m && m.failed ? '获取失败' : '获取中…')+'</span>';
     }
-    const pillCls = mktAdjust ? mktPillClass(m.level) : 'pill-normal';
-    return '<span class="mkt-item"><span class="signal-pill '+pillCls+'">'+b.name+'·'+m.label+'</span>'
-      + m.close.toFixed(2) + '（' + fmtSigned(m.dev) + (mktAdjust ? '，×'+m.coef : '') + '）</span>';
+    return '<span class="mkt-item"><span class="signal-pill '+mktPillClass(m.level)+'">'+b.name+'·'+m.label+'</span>'
+      + m.close.toFixed(2) + '（' + fmtSigned(m.dev) + '，×'+m.coef+'）</span>';
   }).join('');
 }
 
@@ -817,7 +798,7 @@ function renderFundList(){
     // 大盘档位系数：按各基金自选的参考指数计算；只作用于可买入的信号（暂停类金额本就为 0）
     const bkey = f.benchmark || 'HS300';
     const bm = BENCHMARKS[bkey] ? mktMap[bkey] : null;
-    const mktOn = mktAdjust && !!(bm && bm.ready);
+    const mktOn = !!(bm && bm.ready);
     const coef = mktOn ? bm.coef : 1;
     if(mktOn && sig.multiplier>0){
       sig.reasons = sig.reasons.concat(['大盘参考：'+BENCHMARKS[bkey].name+' '+bm.label+'（'+fmtSigned(bm.dev)+'），系数 ×'+coef]);
@@ -1156,12 +1137,6 @@ document.getElementById('loginSubmitBtn').addEventListener('click', async ()=>{
 });
 document.getElementById('loginModalBackdrop').addEventListener('click', e=>{
   if(e.target.id==='loginModalBackdrop') closeLoginModal();
-});
-
-document.getElementById('mktToggle').addEventListener('change', async (e)=>{
-  mktAdjust = e.target.checked;
-  await saveMktAdjust();
-  render();
 });
 
 document.getElementById('addFundBtn').addEventListener('click', async ()=>{
