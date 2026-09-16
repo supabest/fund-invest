@@ -121,6 +121,12 @@
   .mkt-toggle input{width:auto;}
   .mkt-strip.off{opacity:.45;}
 
+  .sync-strip{display:flex; align-items:center; gap:10px; margin-top:10px; font-size:12px; color:var(--muted);}
+  .sync-spacer{flex:1;}
+  .sync-btn{background:transparent; border:1px solid var(--line-strong); color:var(--ivory); font-size:12px; padding:4px 12px; border-radius:14px; cursor:pointer; font-family:var(--sans);}
+  .sync-strip.err #syncText{color:var(--brick);}
+  .sync-strip.off{opacity:.45;}
+
   /* 桌面端：内容限宽居中并放大字体（手机端不受影响） */
   @media (min-width: 768px){
     .masthead, .section{max-width:780px; margin:0 auto;}
@@ -157,6 +163,8 @@
     .mkt-strip{font-size:13.5px;}
     .mkt-strip .signal-pill{font-size:13px;}
     .mkt-toggle{font-size:13px;}
+    .sync-strip{font-size:13.5px;}
+    .sync-btn{font-size:13px;}
     .modal h2{font-size:20px;}
     .toast{font-size:14px;}
   }
@@ -189,6 +197,11 @@
     <span class="mkt-text" id="mktText">沪深300 行情获取中…</span>
     <label class="mkt-toggle"><input type="checkbox" id="mktToggle" checked> 参与调节</label>
   </div>
+  <div class="sync-strip" id="syncStrip">
+    <span id="syncText">云同步：检测中…</span>
+    <span class="sync-spacer"></span>
+    <button class="sync-btn" id="syncActionBtn" style="display:none;">登录</button>
+  </div>
 </div>
 
 <div class="section">
@@ -206,13 +219,31 @@
   <div class="modal" id="fundModal"></div>
 </div>
 
+<div class="modal-backdrop" id="loginModalBackdrop">
+  <div class="modal">
+    <h2>登录云同步</h2>
+    <div class="field"><label>邮箱</label><input type="email" id="loginEmail" placeholder="you@example.com"></div>
+    <div class="field" style="margin-top:10px;"><label>密码（至少6位，首次输入即自动注册）</label><input type="password" id="loginPass" placeholder="••••••"></div>
+    <div class="btn-row"><button class="btn primary" id="loginSubmitBtn">登录 / 注册</button></div>
+    <div class="small-note" id="loginMsg" style="margin-top:10px;"></div>
+    <div class="small-note">数据按账号隔离存储在 Supabase，每台设备登录一次后长期保持；登录后本地数据自动合并上传。</div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 const STORE_KEY = 'dinvest_funds_v1';
 const THEME_CAP_KEY = 'dinvest_theme_caps_v1';
 const MKT_ADJUST_KEY = 'dinvest_mkt_adjust_v1';
+const SYNC_TS_KEY = 'dinvest_sync_ts_v1';
 const GOAL = 200000;
+
+// Supabase 云同步配置（publishable key 设计为公开嵌入页面，安全靠登录+行级权限）
+const SUPABASE_URL = 'https://sfauluwxmdginezbluvo.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_ogx_OZOqR0tEgr24Dt1DSg_VZasrzuM';
+const TABLE_NAME = 'dingtou_state';
 
 const DEFAULT_THEMES = ['电力/新能源','全球资源','机器人/先进制造','日本股票','均衡配置','其他'];
 const DEFAULT_CAPS = {'电力/新能源':20,'全球资源':20,'机器人/先进制造':15,'日本股票':15,'均衡配置':30,'其他':15};
@@ -234,6 +265,14 @@ const fetchedStreaks = {};
 let mktAdjust = true;
 let mkt = {ready:false, failed:false, close:null, dev:null, level:'neutral', label:'中性', coef:1};
 
+// 云同步状态
+let sb = null;            // supabase client
+let sbUser = null;        // 当前登录用户
+let cloudReady = false;   // SDK 加载成功
+let syncState = 'none';   // none | syncing | ok | error
+let syncErrMsg = '';
+let lastPullAt = 0;
+
 // 数据存取：artifact 宿主的 window.storage 优先；本地浏览器直接打开时回退到 localStorage
 const store = {
   async get(key){
@@ -252,16 +291,22 @@ const store = {
 
 function uid(){ return 'f' + Math.random().toString(36).slice(2,10); }
 
+function migrateFunds(){
+  funds.forEach(f=>{
+    // 迁移：旧数据只有市值没有份额，按 市值÷当前净值 反推份额
+    if((f.shares===undefined||f.shares==='') && f.marketValue>0 && f.currentNav>0){
+      f.shares = Math.round(f.marketValue/f.currentNav*10000)/10000;
+    }
+    if(!f.profitTiers) f.profitTiers = DEFAULT_TIERS;
+    if(!f.profitTaken) f.profitTaken = [];
+    if(!f.resumeRule) f.resumeRule = {requireDays:3, mode:'ma_only', targetDrawdown:''};
+  });
+}
+
 async function loadAll(){
   try{
     const r = await store.get(STORE_KEY);
     funds = r ? JSON.parse(r.value) : [];
-    // 迁移：旧数据只有市值没有份额，按 市值÷当前净值 反推份额
-    funds.forEach(f=>{
-      if((f.shares===undefined||f.shares==='') && f.marketValue>0 && f.currentNav>0){
-        f.shares = Math.round(f.marketValue/f.currentNav*10000)/10000;
-      }
-    });
   }catch(e){ funds = []; }
   try{
     const r2 = await store.get(THEME_CAP_KEY);
@@ -271,21 +316,156 @@ async function loadAll(){
     const r3 = await store.get(MKT_ADJUST_KEY);
     mktAdjust = r3 ? JSON.parse(r3.value) : true;
   }catch(e){ mktAdjust = true; }
+  migrateFunds();
   render();
   fetchMarketIndex();
+  initCloud();
 }
 
 async function saveFunds(){
   try{ await store.set(STORE_KEY, JSON.stringify(funds)); }
   catch(e){ showToast('保存失败，请重试'); }
+  pushCloud();
 }
 async function saveCaps(){
   try{ await store.set(THEME_CAP_KEY, JSON.stringify(themeCaps)); }
   catch(e){}
+  pushCloud();
 }
 async function saveMktAdjust(){
   try{ await store.set(MKT_ADJUST_KEY, JSON.stringify(mktAdjust)); }
   catch(e){}
+  pushCloud();
+}
+
+// ===================== 云同步（Supabase） =====================
+// 数据按 auth.uid() 行级隔离；页面只需 publishable key（公开），安全靠登录+RLS。
+function localSavedAt(){ try{ return localStorage.getItem(SYNC_TS_KEY); }catch(e){ return null; } }
+async function markLocalSaved(){ try{ localStorage.setItem(SYNC_TS_KEY, new Date().toISOString()); }catch(e){} }
+function cloudErrHint(e){
+  const m = String(e && e.message || e || '');
+  if(/does not exist|PGRST205|relation/.test(m)) return '数据表未创建';
+  if(/Failed to fetch|fetch/i.test(m)) return '网络不通';
+  return '配置或网络问题';
+}
+
+function initCloud(){
+  const hasSdk = !!(window.supabase && window.supabase.createClient);
+  if(!hasSdk){ setSyncUI(); return; }
+  try{
+    sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+    cloudReady = true;
+  }catch(e){ setSyncUI(); return; }
+  sb.auth.getSession().then(({data})=>{
+    sbUser = (data && data.session && data.session.user) || null;
+    setSyncUI();
+    if(sbUser) syncOnOpen();
+  }).catch(()=>{ setSyncUI(); });
+  sb.auth.onAuthStateChange((_event, session)=>{
+    const wasLoggedOut = !sbUser;
+    sbUser = (session && session.user) || null;
+    setSyncUI();
+    if(sbUser && wasLoggedOut){
+      closeLoginModal();
+      syncOnOpen();
+    }
+  });
+  // 切回页面时顺手拉一次（限频60秒），捕捉其他设备的改动
+  window.addEventListener('focus', ()=>{
+    if(sbUser && Date.now()-lastPullAt > 60000) syncOnOpen();
+  });
+  setSyncUI();
+}
+
+function setSyncUI(){
+  const textEl = document.getElementById('syncText');
+  const btn = document.getElementById('syncActionBtn');
+  const strip = document.getElementById('syncStrip');
+  if(!textEl || !btn || !strip) return;
+  if(!cloudReady){
+    strip.classList.add('off');
+    textEl.textContent = '云同步不可用（离线或脚本被拦截）';
+    btn.style.display = 'none';
+    return;
+  }
+  strip.classList.remove('off');
+  strip.classList.toggle('err', syncState==='error');
+  btn.style.display = '';
+  if(!sbUser){
+    textEl.textContent = '云同步：未登录';
+    btn.textContent = '登录';
+  } else {
+    if(syncState==='syncing') textEl.textContent = '云同步：同步中…';
+    else if(syncState==='ok') textEl.textContent = '云同步：已同步 ' + new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
+    else if(syncState==='error') textEl.textContent = '云同步：同步失败，本地已保存' + (syncErrMsg ? '（'+syncErrMsg+'）' : '');
+    else textEl.textContent = '云同步：已登录';
+    btn.textContent = '退出';
+  }
+}
+
+// 打开页面/登录后：按更新时间取新——云端新则采用，本地新或云端为空则推送
+async function syncOnOpen(){
+  if(!cloudReady || !sbUser) return;
+  if(Date.now()-lastPullAt < 3000) return;
+  lastPullAt = Date.now();
+  syncState = 'syncing'; setSyncUI();
+  try{
+    const { data, error } = await sb.from(TABLE_NAME).select('data,updated_at').eq('user_id', sbUser.id).maybeSingle();
+    if(error) throw error;
+    const localTs = localSavedAt();
+    if(data && data.data && (!localTs || new Date(data.updated_at) >= new Date(localTs))){
+      const d = data.data;
+      if(Array.isArray(d.funds)) funds = d.funds;
+      if(d.themeCaps && typeof d.themeCaps==='object') themeCaps = {...DEFAULT_CAPS, ...d.themeCaps};
+      if(typeof d.mktAdjust==='boolean') mktAdjust = d.mktAdjust;
+      migrateFunds();
+      try{
+        await store.set(STORE_KEY, JSON.stringify(funds));
+        await store.set(THEME_CAP_KEY, JSON.stringify(themeCaps));
+        await store.set(MKT_ADJUST_KEY, JSON.stringify(mktAdjust));
+        await markLocalSaved();
+      }catch(e){}
+      render();
+      syncState = 'ok'; syncErrMsg=''; setSyncUI();
+      return;
+    }
+    await pushCloud(true);
+  }catch(e){
+    syncState = 'error';
+    syncErrMsg = cloudErrHint(e);
+    setSyncUI();
+  }
+}
+
+// 整包推送到云端（最后保存者胜）
+async function pushCloud(silent){
+  if(!cloudReady || !sbUser) return;
+  syncState = 'syncing'; setSyncUI();
+  try{
+    const { error } = await sb.from(TABLE_NAME).upsert({ user_id: sbUser.id, data: { funds, themeCaps, mktAdjust } });
+    if(error) throw error;
+    await markLocalSaved();
+    syncState = 'ok'; syncErrMsg='';
+  }catch(e){
+    syncState = 'error';
+    syncErrMsg = cloudErrHint(e);
+  }
+  setSyncUI();
+}
+
+// ---------- 登录 ----------
+function openLoginModal(){
+  document.getElementById('loginModalBackdrop').classList.add('open');
+  document.getElementById('loginMsg').textContent='';
+  document.getElementById('loginMsg').style.color='var(--muted)';
+  document.getElementById('loginEmail').value='';
+  document.getElementById('loginPass').value='';
+}
+function closeLoginModal(){ document.getElementById('loginModalBackdrop').classList.remove('open'); }
+function loginMsg(text, color){
+  const m = document.getElementById('loginMsg');
+  m.textContent = text;
+  m.style.color = color || 'var(--muted)';
 }
 
 // 大盘档位：指数波动小于个股，阈值比基金信号收紧（±3% / ±8%）
@@ -873,6 +1053,42 @@ async function deleteFund(id){
   render();
   showToast('已删除');
 }
+
+document.getElementById('syncActionBtn').addEventListener('click', async ()=>{
+  if(sbUser){
+    try{ await sb.auth.signOut(); }catch(e){}
+    sbUser = null; syncState = 'none'; setSyncUI();
+    showToast('已退出登录');
+  } else {
+    openLoginModal();
+  }
+});
+document.getElementById('loginSubmitBtn').addEventListener('click', async ()=>{
+  const email = document.getElementById('loginEmail').value.trim();
+  const pass = document.getElementById('loginPass').value;
+  if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ loginMsg('请输入有效邮箱','var(--brick)'); return; }
+  if(pass.length<6){ loginMsg('密码至少6位','var(--brick)'); return; }
+  loginMsg('正在登录…');
+  // 先尝试登录；凭据不存在则自动注册
+  const { error } = await sb.auth.signInWithPassword({ email, password: pass });
+  if(!error){ return; } // 成功由 onAuthStateChange 接管
+  if(/Invalid login credentials/i.test(error.message)){
+    loginMsg('新邮箱？正在自动注册…');
+    const signup = await sb.auth.signUp({ email, password: pass });
+    if(signup.error){
+      if(/already registered/i.test(signup.error.message)) loginMsg('该邮箱已注册，密码不对','var(--brick)');
+      else loginMsg('注册失败：'+signup.error.message,'var(--brick)');
+      return;
+    }
+    if(signup.data.session){ return; } // 注册即登录成功
+    loginMsg('项目开启了邮箱确认：请点开邮箱里的确认链接，然后回来重新点「登录 / 注册」','var(--gold)');
+    return;
+  }
+  loginMsg('登录失败：'+error.message,'var(--brick)');
+});
+document.getElementById('loginModalBackdrop').addEventListener('click', e=>{
+  if(e.target.id==='loginModalBackdrop') closeLoginModal();
+});
 
 document.getElementById('mktToggle').addEventListener('change', async (e)=>{
   mktAdjust = e.target.checked;
