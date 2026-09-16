@@ -795,9 +795,9 @@ function renderFundList(){
     const sig = evalFundSignal(f);
     const ret = computeReturn(f);
 
-    // 大盘档位系数：按各基金自选的参考指数计算；只作用于可买入的信号（暂停类金额本就为 0）
-    const bkey = f.benchmark || 'HS300';
-    const bm = BENCHMARKS[bkey] ? mktMap[bkey] : null;
+    // 大盘档位系数：按各基金自选的参考指数计算；选「不参考」（空值）则豁免
+    const bkey = f.benchmark === '' ? '' : (f.benchmark || 'HS300');
+    const bm = (bkey && BENCHMARKS[bkey]) ? mktMap[bkey] : null;
     const mktOn = !!(bm && bm.ready);
     const coef = mktOn ? bm.coef : 1;
     if(mktOn && sig.multiplier>0){
