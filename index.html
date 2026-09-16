@@ -310,6 +310,7 @@ function migrateFunds(){
     if(!f.profitTaken) f.profitTaken = [];
     if(!f.resumeRule) f.resumeRule = {requireDays:3, mode:'ma_only', targetDrawdown:''};
     if(f.benchmark===undefined || f.benchmark===null) f.benchmark = 'HS300';
+    if(f.name && detectFundTraits(f.name).isQDII) f.isQDII = true;
   });
 }
 
@@ -887,10 +888,8 @@ function fundBodyHtml(f){
         <div class="small-note" id="autoFetchStatus-${f.id}"></div>
       </div>
       <div class="field full"><label>估值百分位（0-100，越低越便宜）</label><input type="number" data-k="valuationPercentile" value="${f.valuationPercentile??''}"></div>
-      <div class="field full">
-        <div class="checkline"><input type="checkbox" data-k="isQDII" ${f.isQDII?'checked':''}> 这是 QDII 基金</div>
-      </div>
-      ${f.isQDII ? `<div class="field full"><label>QDII 溢价率（%，≥2% 独立触发暂停）</label><input type="number" step="0.1" data-k="qdiiPremium" value="${f.qdiiPremium??''}"></div>` : ''}
+      <div class="field full"><div class="small-note" data-wrap="qdiiNote">${f.isQDII ? '✓ 已自动识别为 QDII 基金（可填溢价率参与暂停规则）' : 'QDII 身份自动识别，无需手动勾选'}</div></div>
+      <div class="field full" data-wrap="qdiiWrap" style="${f.isQDII?'':'display:none;'}"><label>QDII 场内溢价率（%，≥2% 独立触发暂停）</label><input type="number" step="0.1" data-k="qdiiPremium" value="${f.qdiiPremium??''}"></div>
     </div>
 
     <div class="divider-label">暂停 / 恢复规则</div>
@@ -961,6 +960,51 @@ function bindFundBody(id){
   ctEl.addEventListener('input', ()=>syncCostPair('total'));
 }
 
+// ---------- 基金特征自动识别 ----------
+// 名称特征：QDII 基金名称含 (QDII) 或海外市场标识；沪港深/港股通基金非 QDII
+function detectFundTraits(name){
+  const n = String(name||'');
+  const overseas = /(QDII|美元|纳斯达克|纳指|标普|道琼斯|日经|美国|亚太|海外|新兴市场|欧洲|德国|法国|印度|越南|原油|黄金|大宗商品|全球)/i.test(n);
+  const hkConnect = /(沪港深|港股通)/.test(n);
+  let benchmark = null;
+  if(/纳斯达克|纳指/.test(n)) benchmark = 'NDX';
+  else if(/标普/.test(n)) benchmark = 'SPX';
+  else if(/道琼斯/.test(n)) benchmark = 'DJIA';
+  else if(/恒生科技/.test(n)) benchmark = 'HSTECH';
+  else if(/恒生/.test(n)) benchmark = 'HSI';
+  return { isQDII: overseas && !hkConnect, benchmark };
+}
+// 应用识别结果：QDII 标记只置真不撤销（保留历史手动标记）；指数建议仅在仍是默认沪深300时生效
+function applyFundTraits(id, traits, source){
+  const f = funds.find(x=>x.id===id);
+  if(!f) return;
+  const body = document.getElementById('body-'+id);
+  f.isQDII = (traits.isQDII===true) || f.isQDII === true;
+  const wrap = body && body.querySelector('[data-wrap="qdiiWrap"]');
+  if(wrap) wrap.style.display = f.isQDII ? '' : 'none';
+  const note = body && body.querySelector('[data-wrap="qdiiNote"]');
+  if(note) note.textContent = f.isQDII ? '✓ 已自动识别为 QDII 基金（'+source+'）' : 'QDII 身份自动识别，无需手动勾选';
+  if(traits.benchmark){
+    const sel = body && body.querySelector('select[data-k="benchmark"]');
+    if(sel && sel.value==='HS300'){
+      f.benchmark = traits.benchmark;
+      sel.value = traits.benchmark;
+      ensureBenchmarkData();
+      if(note) note.textContent += '；参考指数已按名称设为'+BENCHMARKS[traits.benchmark].name;
+    }
+  }
+}
+// 权威基金类型：天天基金 App 接口（CORS 开放，FTYPE 如"指数型-海外股票"/"QDII"）
+function fetchFundType(id, code){
+  fetch('https://fundmobapi.eastmoney.com/FundMNewApi/FundMNDetailInformation?FCODE='+code+'&deviceid=wap&plat=Wap&product=EFund&version=6.2.8')
+    .then(r=>r.json())
+    .then(j=>{
+      const ftype = j && j.Datas && j.Datas.FTYPE || '';
+      if(ftype) applyFundTraits(id, { isQDII: /QDII|海外/i.test(ftype), benchmark: null }, '类型：'+ftype);
+    })
+    .catch(()=>{});
+}
+
 // 数据源：天天基金静态文件 fund.eastmoney.com/pingzhongdata/<6位代码>.js。
 // 用 <script> 标签加载不受 CORS 限制，该文件也无 Referer 校验，因此本地直接
 // 打开本页面即可自动获取。内容为 var 声明：fS_name（基金名）、fS_code、
@@ -1010,6 +1054,10 @@ function autoFetchFundData(id){
 
       const nameInput = body.querySelector('[data-k="name"]');
       if(fname && !nameInput.value.trim()) nameInput.value = fname;
+      if(fname){
+        applyFundTraits(id, detectFundTraits(fname), '名称特征');
+        fetchFundType(id, code);
+      }
       body.querySelector('[data-k="currentNav"]').value = current.toFixed(4);
       body.querySelector('[data-k="currentNav"]').dispatchEvent(new Event('input'));
       if(ma60!==null) body.querySelector('[data-k="ma60"]').value = ma60.toFixed(4);
@@ -1059,7 +1107,6 @@ async function saveFundForm(id){
   f.ma60 = parseFloat(get('ma60').value)||0;
   f.ma120 = parseFloat(get('ma120').value)||0;
   f.valuationPercentile = get('valuationPercentile').value;
-  f.isQDII = get('isQDII').checked;
   const qdiiEl = body.querySelector('[data-k="qdiiPremium"]');
   f.qdiiPremium = qdiiEl ? qdiiEl.value : '';
   f.manualPause = get('manualPause').checked;
