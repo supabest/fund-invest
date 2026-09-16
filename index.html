@@ -410,6 +410,32 @@ function setSyncUI(){
   }
 }
 
+// 云端每日快照：把比本地新的净值/均线/连续天数静默应用到基金（定时任务更新后，打开页面即最新）
+async function applyServerSnapshots(){
+  if(!cloudReady || !sbUser) return;
+  try{
+    const { data, error } = await sb.from('fund_latest').select('code,nav,nav_date,ma60,ma120,streak').eq('user_id', sbUser.id);
+    if(error || !data || !data.length) return;
+    let applied = 0;
+    for(const row of data){
+      const f = funds.find(x=>(x.fundCode||'').trim()===row.code);
+      if(!f || !row.nav) continue;
+      if(f.navDate && row.nav_date && String(row.nav_date) <= String(f.navDate)) continue;
+      f.currentNav = parseFloat(row.nav);
+      if(row.ma60!==null && row.ma60!==undefined) f.ma60 = parseFloat(row.ma60);
+      if(row.ma120!==null && row.ma120!==undefined) f.ma120 = parseFloat(row.ma120);
+      if(row.nav_date) f.navDate = String(row.nav_date);
+      if(row.streak!==null && row.streak!==undefined) f.aboveMaStreak = row.streak;
+      applied++;
+    }
+    if(applied>0){
+      await saveFunds();
+      render();
+      showToast('已自动更新 '+applied+' 只基金的净值数据');
+    }
+  }catch(e){}
+}
+
 // 打开页面/登录后：按更新时间取新——云端新则采用，本地新或云端为空则推送
 async function syncOnOpen(){
   if(!cloudReady || !sbUser) return;
@@ -433,9 +459,11 @@ async function syncOnOpen(){
       render();
       ensureBenchmarkData();
       syncState = 'ok'; syncErrMsg=''; setSyncUI();
+      applyServerSnapshots();
       return;
     }
     await pushCloud(true);
+    applyServerSnapshots();
   }catch(e){
     syncState = 'error';
     syncErrMsg = cloudErrHint(e);
@@ -1054,6 +1082,8 @@ function autoFetchFundData(id){
 
       const nameInput = body.querySelector('[data-k="name"]');
       if(fname && !nameInput.value.trim()) nameInput.value = fname;
+      const fundObj = funds.find(x=>x.id===id);
+      if(fundObj) fundObj.navDate = dateStr;
       if(fname){
         applyFundTraits(id, detectFundTraits(fname), '名称特征');
         fetchFundType(id, code);
