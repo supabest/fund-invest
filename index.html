@@ -117,6 +117,8 @@
   .mkt-strip{display:flex; align-items:center; gap:10px; margin-top:14px; font-size:12px; color:var(--muted); flex-wrap:wrap;}
   .mkt-strip .signal-pill{font-size:11.5px;}
   .mkt-text{flex:1; min-width:0;}
+  .mkt-items{display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; flex:1; min-width:0;}
+  .mkt-item{display:inline-flex; align-items:center; gap:5px;}
   .mkt-toggle{display:flex; align-items:center; gap:5px; cursor:pointer; font-size:12px; color:var(--muted); white-space:nowrap;}
   .mkt-toggle input{width:auto;}
   .mkt-strip.off{opacity:.45;}
@@ -193,8 +195,7 @@
   </div>
   <div class="progress-track"><div class="progress-fill" id="goalBar" style="width:0%"></div></div>
   <div class="mkt-strip" id="mktStrip">
-    <span class="signal-pill pill-normal" id="mktPill">大盘</span>
-    <span class="mkt-text" id="mktText">沪深300 行情获取中…</span>
+    <span class="mkt-items" id="mktItems"></span>
     <label class="mkt-toggle"><input type="checkbox" id="mktToggle" checked> 参与调节</label>
   </div>
   <div class="sync-strip" id="syncStrip">
@@ -245,6 +246,16 @@ const SUPABASE_URL = 'https://sfauluwxmdginezbluvo.supabase.co';
 const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_ogx_OZOqR0tEgr24Dt1DSg_VZasrzuM';
 const TABLE_NAME = 'dingtou_state';
 
+// 每只基金可选的大盘参考指数（secid 为东方财富行情代码；th=[深度低位,低位,高位,明显高位] 阈值，波动大的指数放宽）
+const BENCHMARKS = {
+  HS300:  {secid:'1.000300',   name:'沪深300',  th:[-8,-3,3,8]},
+  NDX:    {secid:'100.NDX',    name:'纳斯达克',  th:[-8,-3,3,8]},
+  SPX:    {secid:'100.SPX',    name:'标普500',  th:[-8,-3,3,8]},
+  DJIA:   {secid:'100.DJIA',   name:'道琼斯',   th:[-8,-3,3,8]},
+  HSI:    {secid:'100.HSI',    name:'恒生指数',  th:[-8,-3,3,8]},
+  HSTECH: {secid:'124.HSTECH', name:'恒生科技',  th:[-12,-5,5,12]}
+};
+
 const DEFAULT_THEMES = ['电力/新能源','全球资源','机器人/先进制造','日本股票','均衡配置','其他'];
 const DEFAULT_CAPS = {'电力/新能源':20,'全球资源':20,'机器人/先进制造':15,'日本股票':15,'均衡配置':30,'其他':15};
 
@@ -261,9 +272,10 @@ let editingId = null;
 // fund id → 「自动获取」按完整历史回算出的连续站上MA60天数，保存时同步后清除
 const fetchedStreaks = {};
 
-// 沪深300 大盘档位（冻结阈值按指数波动收紧：±3% / ±8%）
+// 大盘参考：按各基金自选指数独立计算档位（key → 行情状态）；mktAdjust 为全局参与调节开关
 let mktAdjust = true;
-let mkt = {ready:false, failed:false, close:null, dev:null, level:'neutral', label:'中性', coef:1};
+let mktMap = {};
+let mktFetching = {};
 
 // 云同步状态
 let sb = null;            // supabase client
@@ -300,6 +312,7 @@ function migrateFunds(){
     if(!f.profitTiers) f.profitTiers = DEFAULT_TIERS;
     if(!f.profitTaken) f.profitTaken = [];
     if(!f.resumeRule) f.resumeRule = {requireDays:3, mode:'ma_only', targetDrawdown:''};
+    if(f.benchmark===undefined || f.benchmark===null) f.benchmark = 'HS300';
   });
 }
 
@@ -318,7 +331,7 @@ async function loadAll(){
   }catch(e){ mktAdjust = true; }
   migrateFunds();
   render();
-  fetchMarketIndex();
+  ensureBenchmarkData();
   initCloud();
 }
 
@@ -426,6 +439,7 @@ async function syncOnOpen(){
         await markLocalSaved();
       }catch(e){}
       render();
+      ensureBenchmarkData();
       syncState = 'ok'; syncErrMsg=''; setSyncUI();
       return;
     }
@@ -468,12 +482,13 @@ function loginMsg(text, color){
   m.style.color = color || 'var(--muted)';
 }
 
-// 大盘档位：指数波动小于个股，阈值比基金信号收紧（±3% / ±8%）
-function marketLevel(dev){
-  if(dev<=-8) return {level:'deep-low',  label:'深度低位', coef:1.5};
-  if(dev<=-3) return {level:'low',       label:'低位',     coef:1.25};
-  if(dev>=8)  return {level:'deep-high', label:'明显高位', coef:0.5};
-  if(dev>=3)  return {level:'high',      label:'高位',     coef:0.75};
+// 大盘档位：阈值按指数波动设定（波动大的指数放宽），dev 为较双均线平均偏离
+function marketLevel(dev, th){
+  th = th || [-8,-3,3,8];
+  if(dev<=th[0]) return {level:'deep-low',  label:'深度低位', coef:1.5};
+  if(dev<=th[1]) return {level:'low',       label:'低位',     coef:1.25};
+  if(dev>=th[3]) return {level:'deep-high', label:'明显高位', coef:0.5};
+  if(dev>=th[2]) return {level:'high',      label:'高位',     coef:0.75};
   return {level:'neutral', label:'中性', coef:1};
 }
 function mktPillClass(level){
@@ -490,17 +505,30 @@ function fmtSigned(n, digits=1){
 }
 
 // 沪深300 日K（JSONP，本地浏览器可用；artifact 沙盒会被 CSP 拦截）
-function fetchMarketIndex(){
+function benchmarksInUse(){
+  const set = new Set();
+  funds.forEach(f=>{ const k = f.benchmark || 'HS300'; if(BENCHMARKS[k]) set.add(k); });
+  if(set.size===0) set.add('HS300');
+  return [...set];
+}
+function ensureBenchmarkData(){
+  benchmarksInUse().forEach(k=>{
+    if(!mktMap[k] && !mktFetching[k]) fetchBenchmark(k);
+  });
+}
+function fetchBenchmark(key){
+  const b = BENCHMARKS[key];
+  if(!b) return;
+  mktFetching[key] = true;
   const cbName = 'mktcb' + Math.random().toString(36).slice(2,10);
   let settled = false;
   const script = document.createElement('script');
-  const cleanup = ()=>{ try{ delete window[cbName]; }catch(e){} if(script.parentNode) script.parentNode.removeChild(script); };
-  const timeoutId = setTimeout(()=>{
-    if(settled) return;
-    settled = true; cleanup();
-    mkt.failed = true;
+  const cleanup = ()=>{ try{ delete window[cbName]; }catch(e){} if(script.parentNode) script.parentNode.removeChild(script); mktFetching[key]=false; };
+  const markFailed = ()=>{
+    mktMap[key] = {ready:false, failed:true, close:null, dev:null, level:'neutral', label:'中性', coef:1};
     renderMktStrip();
-  }, 10000);
+  };
+  const timeoutId = setTimeout(()=>{ if(settled) return; settled=true; cleanup(); markFailed(); }, 10000);
   window[cbName] = function(res){
     if(settled) return;
     settled = true; clearTimeout(timeoutId); cleanup();
@@ -510,46 +538,41 @@ function fetchMarketIndex(){
       const closes = klines.map(s=>parseFloat(s.split(',')[1])).filter(n=>!isNaN(n));
       if(closes.length < 60) throw new Error('no data');
       const close = closes[closes.length-1];
-      const ma60 = closes.slice(-60).reduce((a,b)=>a+b,0)/60;
-      const ma120 = closes.length>=120 ? closes.slice(-120).reduce((a,b)=>a+b,0)/120 : null;
+      const ma60 = closes.slice(-60).reduce((a,x)=>a+x,0)/60;
+      const ma120 = closes.length>=120 ? closes.slice(-120).reduce((a,x)=>a+x,0)/120 : null;
       const devs = [(close-ma60)/ma60*100];
       if(ma120!==null) devs.push((close-ma120)/ma120*100);
-      const dev = devs.reduce((a,b)=>a+b,0)/devs.length;
-      mkt = {ready:true, failed:false, close, dev, ...marketLevel(dev)};
+      const dev = devs.reduce((a,x)=>a+x,0)/devs.length;
+      mktMap[key] = {ready:true, failed:false, close, dev, ...marketLevel(dev, b.th)};
     }catch(e){
-      mkt = {ready:false, failed:true, close:null, dev:null, level:'neutral', label:'中性', coef:1};
+      markFailed();
+      return;
     }
     renderMktStrip();
     renderFundList();
   };
-  script.src = 'https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=1.000300&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f53&klt=101&fqt=1&lmt=130&end=20500101&cb='+cbName+'&_='+Date.now();
-  script.onerror = ()=>{
-    if(settled) return;
-    settled = true; clearTimeout(timeoutId); cleanup();
-    mkt.failed = true;
-    renderMktStrip();
-  };
+  script.src = 'https://push2his.eastmoney.com/api/qt/stock/kline/get?secid='+b.secid+'&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f53&klt=101&fqt=1&lmt=130&end=20500101&cb='+cbName+'&_='+Date.now();
+  script.onerror = ()=>{ if(settled) return; settled=true; clearTimeout(timeoutId); cleanup(); markFailed(); };
   document.head.appendChild(script);
 }
 
 function renderMktStrip(){
   const strip = document.getElementById('mktStrip');
-  const pill = document.getElementById('mktPill');
-  const text = document.getElementById('mktText');
+  const itemsEl = document.getElementById('mktItems');
   const toggle = document.getElementById('mktToggle');
-  if(!strip || !pill || !text || !toggle) return;
+  if(!strip || !itemsEl || !toggle) return;
   toggle.checked = mktAdjust;
   strip.classList.toggle('off', !mktAdjust);
-  if(!mkt.ready){
-    pill.className = 'signal-pill pill-normal';
-    pill.textContent = '大盘';
-    text.textContent = mkt.failed ? '沪深300 获取失败（无网络？），未应用大盘系数' : '沪深300 行情获取中…';
-    return;
-  }
-  pill.className = 'signal-pill ' + mktPillClass(mkt.level);
-  pill.textContent = mkt.label;
-  text.textContent = '沪深300 ' + mkt.close.toFixed(2) + '，较均线 ' + fmtSigned(mkt.dev)
-    + (mktAdjust ? '，系数 ×' + mkt.coef : '（调节已关）');
+  itemsEl.innerHTML = benchmarksInUse().map(k=>{
+    const b = BENCHMARKS[k];
+    const m = mktMap[k];
+    if(!m || !m.ready){
+      return '<span class="mkt-item">'+b.name+'：'+(m && m.failed ? '获取失败' : '获取中…')+'</span>';
+    }
+    const pillCls = mktAdjust ? mktPillClass(m.level) : 'pill-normal';
+    return '<span class="mkt-item"><span class="signal-pill '+pillCls+'">'+b.name+'·'+m.label+'</span>'
+      + m.close.toFixed(2) + '（' + fmtSigned(m.dev) + (mktAdjust ? '，×'+m.coef : '') + '）</span>';
+  }).join('');
 }
 
 function showToast(msg){
@@ -782,15 +805,17 @@ function renderFundList(){
     return;
   }
   list.innerHTML = '';
-  const mktOn = mktAdjust && mkt.ready;
   funds.forEach(f=>{
     const sig = evalFundSignal(f);
     const ret = computeReturn(f);
 
-    // 大盘档位系数：只作用于可买入的信号（暂停类金额本就为 0）
-    const coef = mktOn ? mkt.coef : 1;
+    // 大盘档位系数：按各基金自选的参考指数计算；只作用于可买入的信号（暂停类金额本就为 0）
+    const bkey = f.benchmark || 'HS300';
+    const bm = BENCHMARKS[bkey] ? mktMap[bkey] : null;
+    const mktOn = mktAdjust && !!(bm && bm.ready);
+    const coef = mktOn ? bm.coef : 1;
     if(mktOn && sig.multiplier>0){
-      sig.reasons = sig.reasons.concat(['大盘档位：'+mkt.label+'（'+fmtSigned(mkt.dev)+'），系数 ×'+mkt.coef]);
+      sig.reasons = sig.reasons.concat(['大盘参考：'+BENCHMARKS[bkey].name+' '+bm.label+'（'+fmtSigned(bm.dev)+'），系数 ×'+coef]);
     }
     const card = document.createElement('div');
     card.className = 'fund-card';
@@ -850,12 +875,23 @@ function fundBodyHtml(f){
           ${DEFAULT_THEMES.map(t=>`<option value="${t}" ${f.theme===t?'selected':''}>${t}</option>`).join('')}
         </select>
       </div>
+      <div class="field"><label>大盘参考指数（QDII/港股选对应市场）</label>
+        <select data-k="benchmark">
+          <option value="HS300" ${(!f.benchmark||f.benchmark==='HS300')?'selected':''}>沪深300（A股默认）</option>
+          <option value="NDX" ${f.benchmark==='NDX'?'selected':''}>纳斯达克（美股）</option>
+          <option value="SPX" ${f.benchmark==='SPX'?'selected':''}>标普500（美股）</option>
+          <option value="DJIA" ${f.benchmark==='DJIA'?'selected':''}>道琼斯（美股）</option>
+          <option value="HSI" ${f.benchmark==='HSI'?'selected':''}>恒生指数（港股）</option>
+          <option value="HSTECH" ${f.benchmark==='HSTECH'?'selected':''}>恒生科技（港股科技）</option>
+          <option value="" ${f.benchmark===''?'selected':''}>不参考</option>
+        </select>
+      </div>
       <div class="field"><label>持有份额（份）</label><input type="number" step="0.0001" data-k="shares" value="${f.shares??''}"></div>
       <div class="field"><label>当前市值（元，自动 =份额×净值）</label><input type="text" readonly data-k="mvDisplay" value="${fmtMoney(f.shares>0&&f.currentNav>0 ? f.shares*f.currentNav : (f.marketValue||0))}" style="opacity:.75;"></div>
       <div class="field"><label>每期定投基数（元）</label><input type="number" data-k="baseAmount" value="${f.baseAmount??''}"></div>
       <div class="field"><label>持仓成本净值（每份成本，如 1.0523）</label><input type="number" step="0.0001" data-k="costBasis" value="${f.costBasis??''}"></div>
       <div class="field"><label>持仓总成本（元，与左边二选一）</label><input type="number" data-k="costTotal" value="${f.costTotal??''}"></div>
-      <div class="field full"><div class="small-note">成本二选一：不知道每份成本、只知道总共投入多少元，就只填「持仓总成本」，系统按 份额=市值÷当前净值 自动折算。不要把总金额填进成本净值（收益率会接近 -100%）。</div></div>
+      <div class="field full"><div class="small-note">成本二选一：填「持仓总成本」会按 份额 自动折算出每份成本净值，填「成本净值」则反算总成本，两边保持一致。注意不要把总金额填进成本净值（收益率会接近 -100%）。折算需要先填「持有份额」。</div></div>
       <div class="field"><label>基金代码（6位，用于自动获取）</label><input type="text" data-k="fundCode" maxlength="6" placeholder="如 020973" value="${escapeHtml(f.fundCode||'')}"></div>
       <div class="field"><label>当前净值</label><input type="number" step="0.0001" data-k="currentNav" value="${f.currentNav??''}"></div>
       <div class="field"><label>60日均线</label><input type="number" step="0.0001" data-k="ma60" value="${f.ma60??''}"></div>
@@ -908,15 +944,35 @@ function bindFundBody(id){
   body.querySelector('[data-action="delete"]').addEventListener('click', ()=> deleteFund(id));
   const fetchBtn = document.getElementById('autoFetchBtn-'+id);
   if(fetchBtn) fetchBtn.addEventListener('click', ()=> autoFetchFundData(id));
-  // 市值 = 份额×净值，实时联动
+  // 市值 = 份额×净值，实时联动；成本两栏二选一，另一栏自动折算
   const mvInput = body.querySelector('[data-k="mvDisplay"]');
+  const sharesEl = body.querySelector('[data-k="shares"]');
+  const navEl = body.querySelector('[data-k="currentNav"]');
+  const cbEl = body.querySelector('[data-k="costBasis"]');
+  const ctEl = body.querySelector('[data-k="costTotal"]');
   const recalc = ()=>{
-    const sh = parseFloat(body.querySelector('[data-k="shares"]').value)||0;
-    const nav = parseFloat(body.querySelector('[data-k="currentNav"]').value)||0;
-    mvInput.value = fmtMoney(sh*nav);
+    mvInput.value = fmtMoney((parseFloat(sharesEl.value)||0) * (parseFloat(navEl.value)||0));
   };
-  body.querySelector('[data-k="shares"]').addEventListener('input', recalc);
-  body.querySelector('[data-k="currentNav"]').addEventListener('input', recalc);
+  const syncCostPair = (source)=>{
+    const sh = parseFloat(sharesEl.value)||0;
+    if(source==='basis'){
+      const v = parseFloat(cbEl.value);
+      if(!isNaN(v) && sh>0) ctEl.value = (v*sh).toFixed(2);
+      else if(cbEl.value==='') ctEl.value='';
+    } else {
+      const v = parseFloat(ctEl.value);
+      if(!isNaN(v) && sh>0) cbEl.value = (v/sh).toFixed(4);
+      else if(ctEl.value==='') cbEl.value='';
+    }
+  };
+  sharesEl.addEventListener('input', ()=>{
+    recalc();
+    if(cbEl.value!=='' ) syncCostPair('basis');
+    else if(ctEl.value!=='') syncCostPair('total');
+  });
+  navEl.addEventListener('input', recalc);
+  cbEl.addEventListener('input', ()=>syncCostPair('basis'));
+  ctEl.addEventListener('input', ()=>syncCostPair('total'));
 }
 
 // 数据源：天天基金静态文件 fund.eastmoney.com/pingzhongdata/<6位代码>.js。
@@ -1006,6 +1062,7 @@ async function saveFundForm(id){
 
   f.name = get('name').value.trim();
   f.theme = get('theme').value;
+  f.benchmark = get('benchmark').value;
   f.shares = parseFloat(get('shares').value)||0;
   f.baseAmount = parseFloat(get('baseAmount').value)||0;
   f.costBasis = parseFloat(get('costBasis').value)||0;
@@ -1040,6 +1097,7 @@ async function saveFundForm(id){
   }
 
   await saveFunds();
+  ensureBenchmarkData();
   showToast('已保存');
   toggleFundBody(id);
   toggleFundBody(id);
@@ -1103,7 +1161,7 @@ document.getElementById('mktToggle').addEventListener('change', async (e)=>{
 
 document.getElementById('addFundBtn').addEventListener('click', async ()=>{
   const f = {
-    id: uid(), name:'', theme: DEFAULT_THEMES[0], isQDII:false, qdiiPremium:'', fundCode:'',
+    id: uid(), name:'', theme: DEFAULT_THEMES[0], benchmark:'HS300', isQDII:false, qdiiPremium:'', fundCode:'',
     shares:0, marketValue:0, baseAmount:0, costBasis:0, costTotal:0, currentNav:0, ma60:0, ma120:0,
     valuationPercentile:'', manualPause:false, aboveMaStreak:0,
     resumeRule:{requireDays:3, mode:'ma_only', targetDrawdown:''},
