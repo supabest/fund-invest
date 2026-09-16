@@ -1077,14 +1077,19 @@ document.getElementById('loginSubmitBtn').addEventListener('click', async ()=>{
     const signup = await sb.auth.signUp({ email, password: pass });
     if(signup.error){
       if(/already registered/i.test(signup.error.message)) loginMsg('该邮箱已注册，密码不对','var(--brick)');
+      else if(/email_address_invalid|is invalid/i.test(signup.error.message)) loginMsg('邮箱无效：请使用真实存在的邮箱（QQ/163/Gmail 等），不能随便编一个域名','var(--brick)');
+      else if(/[Rr]ate limit/i.test(signup.error.message)) loginMsg('尝试太频繁，请等几分钟再试','var(--brick)');
       else loginMsg('注册失败：'+signup.error.message,'var(--brick)');
       return;
     }
     if(signup.data.session){ return; } // 注册即登录成功
-    loginMsg('项目开启了邮箱确认：请点开邮箱里的确认链接，然后回来重新点「登录 / 注册」','var(--gold)');
+    loginMsg('项目开启了邮箱确认：请点开邮箱里的确认邮件（可能藏在垃圾箱），点确认链接后回来重新点「登录 / 注册」','var(--gold)');
     return;
   }
-  loginMsg('登录失败：'+error.message,'var(--brick)');
+  if(/email_address_invalid|is invalid/i.test(error.message)) loginMsg('邮箱无效：请使用真实存在的邮箱（QQ/163/Gmail 等）','var(--brick)');
+  else if(/not confirmed/i.test(error.message)) loginMsg('邮箱未确认：请先完成注册时发给你的确认邮件，再回来登录','var(--brick)');
+  else if(/[Rr]ate limit/i.test(error.message)) loginMsg('尝试太频繁，请等几分钟再试','var(--brick)');
+  else loginMsg('登录失败：'+error.message,'var(--brick)');
 });
 document.getElementById('loginModalBackdrop').addEventListener('click', e=>{
   if(e.target.id==='loginModalBackdrop') closeLoginModal();
