@@ -1179,7 +1179,7 @@ function fundBodyHtml(f){
     </div>
 
     <div class="divider-label">暂停 / 恢复规则</div>
-    <div class="checkline"><input type="checkbox" data-k="manualPause" ${f.manualPause?'checked':''}> 手动暂停该基金的定投</div>
+    <div class="checkline"><input type="checkbox" data-k="manualPause" ${f.manualPause?'checked':''}> 暂停此基金定投，按以下恢复条件提醒我</div>
     <div class="field-grid" style="margin-top:10px;">
       <div class="field"><label>恢复所需连续站上60日线的交易日数</label><input type="number" data-k="reqDays" value="${rr.requireDays??3}"></div>
       <div class="field"><label>今日是否收盘站上60日线</label>
