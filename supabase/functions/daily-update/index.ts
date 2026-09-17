@@ -486,7 +486,7 @@ Deno.serve(async (req: Request) => {
           + '<p style="color:#707C8C;">' + dateStr + ' 收盘数据已自动更新</p>'
           + (items.length
             ? '<ul style="padding-left:18px;margin:12px 0;">' + items.map(i => '<li style="margin:8px 0;">' + i + '</li>').join('') + '</ul>'
-            : '<p>各基金当前信号：</p><ul style="padding-left:18px;">' + today.map(t => '<li>【' + t.code + '】' + (t.name || '') + '：<b>' + String(t.label).split('｜')[0] + '</b>' + (t.dev === null ? '' : '（偏离 ' + fmtSigned(t.dev) + '）') + '</li>').join('') + '</ul>')
+            : '<p>各基金当前信号：</p><ul style="padding-left:18px;">' + stateRows.map(r => { const meta = fundMeta[r.code]; return '<li>【' + r.code + (meta && meta.name ? ' ' + meta.name : '') + '】：<b>' + String(r.label).split('｜')[0] + '</b>' + (meta ? '（净值 ' + meta.nav + '，' + meta.navDate + '）' : '') + '</li>'; }).join('') + '</ul>')
           + '<hr style="border:none;border-top:1px solid #eee;margin:16px 0;">'
           + '<p style="color:#707C8C;font-size:12px;">本邮件由定投信号台自动发送 · 每日 20:30/22:30 自动更新 · 仅信号变化时提醒</p>'
           + '</div>';
