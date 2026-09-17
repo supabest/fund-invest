@@ -643,6 +643,16 @@ function fmtSigned(n, digits=1){
   return (n>=0?'+':'') + n.toFixed(digits) + '%';
 }
 
+function profitTiersText(f){
+  const t = (f.profitTiers && f.profitTiers.length) ? f.profitTiers : DEFAULT_TIERS;
+  return t.map(x=>x.ret+':'+x.sell).join(',');
+}
+function nextProfitTier(f){
+  const t = (f.profitTiers && f.profitTiers.length) ? f.profitTiers : DEFAULT_TIERS;
+  const taken = f.profitTaken || [];
+  return t.find(x=>!taken.includes(x.ret)) || null;
+}
+
 // 沪深300 日K（JSONP，本地浏览器可用；artifact 沙盒会被 CSP 拦截）
 function benchmarksInUse(){
   const set = new Set();
@@ -972,6 +982,7 @@ function renderFundList(){
     if(mktOn && sig.multiplier>0){
       sig.reasons = sig.reasons.concat(['大盘参考：'+BENCHMARKS[bkey].name+' '+bm.label+'（'+fmtSigned(bm.dev)+'），系数 ×'+coef]);
     }
+    const nextTier = nextProfitTier(f);
     const card = document.createElement('div');
     card.className = 'fund-card';
 
@@ -981,7 +992,7 @@ function renderFundList(){
       <div class="fund-head" data-id="${f.id}">
         <div class="fund-head-left">
           <div class="fund-name">${escapeHtml(f.name || '未命名基金')}</div>
-          <div class="fund-meta">${escapeHtml(f.theme||'未分类')}${f.isQDII?' · QDII':''} · 市值 ${fmtMoney(f.marketValue||0)}</div>
+          <div class="fund-meta">${escapeHtml(f.theme||'未分类')}${f.isQDII?' · QDII':''} · 市值 ${fmtMoney(f.marketValue||0)}${nextTier?' · 下一止盈档 +'+nextTier.ret+'%（卖'+nextTier.sell+'%）':''}</div>
         </div>
         <div class="fund-return ${ret>=0?'ret-pos':'ret-neg'}">${fmtPct(ret,1)}</div>
         <div class="chevron" id="chev-${f.id}">▸</div>
@@ -1025,14 +1036,15 @@ function renderStockSection(){
   stocks.forEach(s=>{
     const dev = (s.ma60 && s.ma120) ? ((s.currentPrice-s.ma60)/s.ma60 + (s.currentPrice-s.ma120)/s.ma120)/2*100 : (s.ma60 ? (s.currentPrice-s.ma60)/s.ma60*100 : null);
     const tier = stockTierLabel(dev);
-    const ret = (parseFloat(s.cost)>0 && s.currentPrice>0) ? (s.currentPrice-parseFloat(s.cost))/parseFloat(s.cost)*100 : null;    const pillCls = dev===null ? 'pill-normal' : (dev<=-5 ? 'pill-strong' : (dev>=3 ? 'pill-half' : 'pill-normal'));
+    const ret = (parseFloat(s.cost)>0 && s.currentPrice>0) ? (s.currentPrice-parseFloat(s.cost))/parseFloat(s.cost)*100 : null;
+    const nextTier = nextProfitTier(s);    const pillCls = dev===null ? 'pill-normal' : (dev<=-5 ? 'pill-strong' : (dev>=3 ? 'pill-half' : 'pill-normal'));
     const card = document.createElement('div');
     card.className = 'fund-card';
     card.innerHTML = `
       <div class="fund-head" data-sid="${s.id}">
         <div class="fund-head-left">
           <div class="fund-name">${escapeHtml(s.name || '未命名股票')}</div>
-          <div class="fund-meta">${exchangeLabel(s.code)} · ${s.shares||0} 股 · 市值 ${fmtMoney(stockMvOf(s))}${s.priceDate?' · '+s.priceDate:''}</div>
+          <div class="fund-meta">${exchangeLabel(s.code)} · ${s.shares||0} 股 · 市值 ${fmtMoney(stockMvOf(s))}${s.priceDate?' · '+s.priceDate:''}${nextTier?' · 下一止盈档 +'+nextTier.ret+'%（卖'+nextTier.sell+'%）':''}</div>
         </div>
         <div class="fund-return ${ret!==null&&ret>=0?'ret-pos':'ret-neg'}">${fmtPct(ret,1)}</div>
         <div class="chevron" id="schev-${s.id}">▸</div>
@@ -1064,6 +1076,7 @@ function stockFormHtml(s){
       <div class="field"><label>代码（A股6位 / 港股5位）</label><input type="text" data-sk="code" maxlength="6" value="${escapeHtml(s.code||'')}"></div>
       <div class="field"><label>持股数（股）</label><input type="number" data-sk="shares" value="${s.shares??0}"></div>
       <div class="field"><label>成本价（元/股）</label><input type="number" step="0.001" data-sk="cost" value="${s.cost??''}"></div>
+      <div class="field full"><label>止盈档位（收益率%:建议卖出%，逗号分隔，留空用默认 20:10,40:20,60:30,80:50）</label><input type="text" data-sk="profitTiersText" value="${profitTiersText(s)}"></div>
     </div>
     <div class="small-note" style="margin-top:8px;">行情每日自动更新（沪/深/港股均支持，港股按港币计价）；买卖提醒将同步到每日邮件。</div>
     <div class="btn-row">
@@ -1087,6 +1100,17 @@ async function saveStockForm(id){
   if(!/^\d{5,6}$/.test(s.code)){ showToast('代码须为5-6位数字'); return; }
   s.shares = parseFloat(get('shares').value)||0;
   s.cost = parseFloat(get('cost').value)||0;
+  const ptStock = get('profitTiersText').value.trim();
+  if(ptStock === ''){ s.profitTiers = DEFAULT_TIERS; }
+  else {
+    const parsed = ptStock.split(/[,，]/).map(x=>{
+      const seg = x.split(/[:：]/).map(Number);
+      return (seg[0]>0 && seg[1]>0) ? { ret: seg[0], sell: seg[1] } : null;
+    }).filter(Boolean);
+    if(parsed.length){ s.profitTiers = parsed.sort((a,b)=>a.ret-b.ret); }
+    else showToast('止盈档位格式有误，已保留原设置');
+  }
+  if(!s.profitTiers || !s.profitTiers.length) s.profitTiers = DEFAULT_TIERS;
   if(s.shares>0 && s.currentPrice>0) s.marketValue = stockMvOf(s);
   await saveStocks();
   showToast('已保存，行情将于下一轮自动更新');
@@ -1182,6 +1206,7 @@ function fundBodyHtml(f){
         </select>
       </div>
       <div class="field full"><label>目标跌幅安全垫（%，可选，如 20 表示 -20%）</label><input type="number" data-k="targetDrawdown" value="${rr.targetDrawdown??''}"></div>
+      <div class="field full"><label>止盈档位（收益率%:建议卖出%，逗号分隔，留空用默认 20:10,40:20,60:30,80:50）</label><input type="text" data-k="profitTiersText" value="${profitTiersText(f)}"></div>
     </div>
     <div class="resume-box">
       当前连续站上60日线：<strong>${f.aboveMaStreak||0}</strong> 个交易日。点上方「自动获取净值与均线」会按完整历史回算该天数，保存时自动同步；也可用「今日是否收盘站上60日线」手动累计或清零。
@@ -1383,6 +1408,18 @@ async function saveFundForm(id){
   const qdiiEl = body.querySelector('[data-k="qdiiPremium"]');
   f.qdiiPremium = qdiiEl ? qdiiEl.value : '';
   f.manualPause = get('manualPause').checked;
+  const ptText = get('profitTiersText').value.trim();
+  if(ptText === ''){
+    f.profitTiers = DEFAULT_TIERS;
+  } else {
+    const parsed = ptText.split(/[,，]/).map(x=>{
+      const seg = x.split(/[:：]/).map(Number);
+      return (seg[0]>0 && seg[1]>0) ? { ret: seg[0], sell: seg[1] } : null;
+    }).filter(Boolean);
+    if(parsed.length){ f.profitTiers = parsed.sort((a,b)=>a.ret-b.ret); }
+    else showToast('止盈档位格式有误，已保留原设置');
+  }
+  if(!f.profitTiers || !f.profitTiers.length) f.profitTiers = DEFAULT_TIERS;
 
   const reqDays = parseInt(get('reqDays').value)||3;
   const mode = get('resumeMode').value;
