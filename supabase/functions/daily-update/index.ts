@@ -1,5 +1,5 @@
 // daily-update: 每日自动更新基金净值/均线、股票收盘行情与参考指数行情（pg_cron 经 HTTP 调用）
-// v3: + 股票(沪深/港股)行情/买卖信号/总额限制 + 基金卖出维度(止损线/破位天数) + 日经225基准
+// v3: + 股票(沪深/港股)行情/买卖信号/总额限制 + 日经225基准
 // 触发方式: POST /functions/v1/daily-update，Authorization: Bearer <DAILY_UPDATE_TOKEN>
 const GOAL_DEFAULT = 200000;
 const DEFAULT_TIERS = [{ ret: 20, sell: 10 }, { ret: 40, sell: 20 }, { ret: 60, sell: 30 }, { ret: 80, sell: 50 }];
@@ -305,17 +305,9 @@ Deno.serve(async (req: Request) => {
           if (ret !== null && ret > 0) {
             for (const t of tiers) { if (ret >= t.ret && !(f.profitTaken || []).includes(t.ret)) newTier = t.ret; }
           }
-          // 卖出维度：止损线 / 破位减仓
-          const stopPct = parseFloat(f.stopPct);
-          const breakDays = parseInt(f.breakDays);
-          const stopHit = (!isNaN(stopPct) && stopPct > 0 && ret !== null && ret <= -stopPct);
-          const breakHit = (!isNaN(breakDays) && breakDays > 0 && belowStreak !== null && belowStreak >= breakDays);
-          if (stopHit) (perUserFundItems[userId] = perUserFundItems[userId] || []).push('【' + code + '】' + (nameMatch ? nameMatch[1] : f.name || '') + '：<b>止损提醒</b>，收益率 ' + fmtSigned(ret) + ' 已低于止损线 -' + stopPct + '%');
-          if (breakHit) (perUserFundItems[userId] = perUserFundItems[userId] || []).push('【' + code + '】' + (nameMatch ? nameMatch[1] : f.name || '') + '：<b>破位提醒</b>，已连续 ' + belowStreak + ' 个交易日低于60日均线，可考虑减仓');
-
           (perUserFundItems[userId] = perUserFundItems[userId] || []);
-          const label = sig.label + (newTier !== null ? '｜止盈' + newTier + '%达标' : '') + (stopHit ? '｜止损触发' : '') + (breakHit ? '｜破位提醒' : '');
-          fundSignalRows.push({ user_id: userId, code, label, profit_tier: newTier, stop_hit: stopHit, break_hit: breakHit, updated_at: new Date().toISOString() });
+          const label = sig.label + (newTier !== null ? '｜止盈' + newTier + '%达标' : '');
+          fundSignalRows.push({ user_id: userId, code, label, profit_tier: newTier, updated_at: new Date().toISOString() });
 
           await post('fund_nav_history', 'user_id,code,nav_date', [{ user_id: userId, code, nav_date: navDate, nav: close, ma60, ma120, dev_pct: dev, above_ma60: above }]);
           await post('fund_latest', 'user_id,code', [{
@@ -356,16 +348,12 @@ Deno.serve(async (req: Request) => {
           const s = arr.find((x: any) => String(x.code || '').trim() === code) || {};
           const smv = (s.shares > 0) ? s.shares * close : 0;
           const ret = stockReturn(s, close);
-          const stopPct = parseFloat(s.stopPct); const stopPctOk = !isNaN(stopPct) && stopPct > 0;
-          const breakDays = parseInt(s.breakDays); const breakDaysOk = !isNaN(breakDays) && breakDays > 0;
           const tier = baseSignalLabel(dev);
-          const stopHit = stopPctOk && ret !== null && ret <= -stopPct;
-          const breakHit = breakDaysOk && below >= breakDays;
           const tiers = (s.profitTiers && s.profitTiers.length) ? s.profitTiers : DEFAULT_TIERS;
           let newTier: number | null = null;
           if (ret !== null && ret > 0) { for (const t of tiers) { if (ret >= t.ret && !(s.profitTaken || []).includes(t.ret)) newTier = t.ret; } }
 
-          const label = tier.label + (breakHit ? '｜破位' : '') + (stopHit ? '｜止损' : '') + (newTier !== null ? '｜止盈' + newTier + '%' : '');
+          const label = tier.label + (newTier !== null ? '｜止盈' + newTier + '%' : '');
           const prevRes = await fetch(sbUrl + '/rest/v1/stock_signal_state?select=tier,break_hit,stop_hit,profit_tier&user_id=eq.' + userId + '&code=eq.' + code, { headers: H });
           const prevArr: any[] = prevRes.ok ? await prevRes.json() : [];
           const p = prevArr[0] || null;
@@ -374,14 +362,10 @@ Deno.serve(async (req: Request) => {
           if (!p) {
             (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：买入参考档位 <b>' + tier.label + '</b>' + (dev === null ? '' : '（偏离 ' + fmtSigned(dev) + '）'));
           } else {
-            const prevTierOk = p.tier === tier.label;
-            if (!prevTierOk) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：买入参考档位变化 ' + p.tier + ' → <b>' + tier.label + '</b>' + (dev === null ? '' : '（偏离 ' + fmtSigned(dev) + '）'));
-            if (!p.break_hit && breakHit) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：<b>趋势破位提醒</b>，已连续 ' + below + ' 个交易日低于60日均线，可考虑减仓');
-            if (p.break_hit && !breakHit) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：趋势修复，重新站上60日均线');
-            if (!p.stop_hit && stopHit) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：<b>止损提醒</b>，收益率 ' + fmtSigned(ret) + ' 已低于止损线 -' + stopPct + '%');
+            if (p.tier !== tier.label) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：买入参考档位变化 ' + p.tier + ' → <b>' + tier.label + '</b>' + (dev === null ? '' : '（偏离 ' + fmtSigned(dev) + '）'));
             if (newTier !== null && p.profit_tier !== newTier) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：收益率 <b>' + fmtSigned(ret) + '</b> 达到止盈档 +' + newTier + '%，建议分批止盈');
           }
-          stockSignalRows.push({ user_id: userId, code, tier: tier.label, break_hit: breakHit, stop_hit: stopHit, profit_tier: newTier, updated_at: new Date().toISOString() });
+          stockSignalRows.push({ user_id: userId, code, tier: tier.label, profit_tier: newTier, updated_at: new Date().toISOString() });
 
           await post('stock_history', 'user_id,code,price_date', [{ user_id: userId, code, price_date: k.date, close, ma20, ma60, ma120, dev_pct: dev }]);
           await post('stock_latest', 'user_id,code', [{
@@ -454,7 +438,7 @@ Deno.serve(async (req: Request) => {
       prev.forEach((p: any) => prevMap[p.code] = p.label);
       const isFirstRun = prev.length === 0;
 
-      const stateRows = todayRows.map(r => ({ user_id: userId, code: r.code, label: r.label, profit_tier: r.profit_tier, stop_hit: r.stop_hit, break_hit: r.break_hit, updated_at: new Date().toISOString() }));
+      const stateRows = todayRows.map(r => ({ user_id: userId, code: r.code, label: r.label, profit_tier: r.profit_tier, updated_at: new Date().toISOString() }));
       await post('signal_state', 'user_id,code', stateRows);
 
       // 基金常规信号变化（label 前半段变化，不含卖出标记）

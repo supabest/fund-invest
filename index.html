@@ -972,11 +972,6 @@ function renderFundList(){
     if(mktOn && sig.multiplier>0){
       sig.reasons = sig.reasons.concat(['大盘参考：'+BENCHMARKS[bkey].name+' '+bm.label+'（'+fmtSigned(bm.dev)+'），系数 ×'+coef]);
     }
-    // 卖出维度：止损线 / 破位减仓
-    const fStopPct = parseFloat(f.stopPct);
-    const fundStopHit = !isNaN(fStopPct) && fStopPct>0 && ret!==null && ret<=-fStopPct;
-    const fBreakDays = parseInt(f.breakDays);
-    const fundBreakHit = !isNaN(fBreakDays) && fBreakDays>0 && (f.belowStreak||0)>=fBreakDays;
     const card = document.createElement('div');
     card.className = 'fund-card';
 
@@ -996,8 +991,6 @@ function renderFundList(){
         <span class="signal-amount">${sig.multiplier!==undefined ? '建议金额 '+fmtMoney((f.baseAmount||0)*sig.multiplier*coef)+'/期' : ''}</span>
       </div>
       <div class="signal-reason">${sig.reasons.join('；')}</div>
-      ${fundStopHit ? '<div class="stock-alert" style="margin:0 16px 10px 16px;">⚠️ 止损提醒：收益率 '+fmtPct(ret,1)+' 已低于止损线 -'+fStopPct+'%，可考虑减仓</div>' : ''}
-      ${fundBreakHit ? '<div class="stock-alert" style="margin:0 16px 10px 16px;">⚠️ 破位提醒：已连续 '+(f.belowStreak||0)+' 个交易日低于60日均线，可考虑减仓</div>' : ''}
       ${alert ? `<div class="profit-alert" style="margin:0 16px 14px 16px;">📌 已达到止盈档位：收益率 ${alert.ret.toFixed(1)}% ≥ ${alert.tier.ret}%，建议止盈 ${alert.tier.sell}% 份额</div>` : ''}
       <div class="fund-body" id="body-${f.id}"></div>
     `;
@@ -1032,9 +1025,7 @@ function renderStockSection(){
   stocks.forEach(s=>{
     const dev = (s.ma60 && s.ma120) ? ((s.currentPrice-s.ma60)/s.ma60 + (s.currentPrice-s.ma120)/s.ma120)/2*100 : (s.ma60 ? (s.currentPrice-s.ma60)/s.ma60*100 : null);
     const tier = stockTierLabel(dev);
-    const ret = (parseFloat(s.cost)>0 && s.currentPrice>0) ? (s.currentPrice-parseFloat(s.cost))/parseFloat(s.cost)*100 : null;
-    const stopPct = parseFloat(s.stopPct); const stopHit = !isNaN(stopPct) && stopPct>0 && ret!==null && ret<=-stopPct;
-    const breakDays = parseInt(s.breakDays); const breakHit = !isNaN(breakDays) && breakDays>0 && (s.belowStreak||0)>=breakDays;    const pillCls = dev===null ? 'pill-normal' : (dev<=-5 ? 'pill-strong' : (dev>=3 ? 'pill-half' : 'pill-normal'));
+    const ret = (parseFloat(s.cost)>0 && s.currentPrice>0) ? (s.currentPrice-parseFloat(s.cost))/parseFloat(s.cost)*100 : null;    const pillCls = dev===null ? 'pill-normal' : (dev<=-5 ? 'pill-strong' : (dev>=3 ? 'pill-half' : 'pill-normal'));
     const card = document.createElement('div');
     card.className = 'fund-card';
     card.innerHTML = `
@@ -1050,8 +1041,6 @@ function renderStockSection(){
         <span class="signal-pill ${pillCls}">买入参考·${tier}</span>
         <span class="signal-amount">现价 ${s.currentPrice||'--'}${s.ma60?' · MA60 '+Number(s.ma60).toFixed(2):''}${s.ma120?' · MA120 '+Number(s.ma120).toFixed(2):''}</span>
       </div>
-      ${stopHit ? '<div class="stock-alert" style="margin:0 16px 10px 16px;">⚠️ 止损提醒：收益率 '+fmtPct(ret,1)+' 已低于止损线 -'+stopPct+'%</div>' : ''}
-      ${breakHit ? '<div class="stock-alert" style="margin:0 16px 10px 16px;">⚠️ 破位提醒：已连续 '+(s.belowStreak||0)+' 个交易日低于60日均线，可考虑减仓</div>' : ''}
       <div class="fund-body" id="sbody-${s.id}"></div>
     `;
     list.appendChild(card);
@@ -1075,8 +1064,6 @@ function stockFormHtml(s){
       <div class="field"><label>代码（A股6位 / 港股5位）</label><input type="text" data-sk="code" maxlength="6" value="${escapeHtml(s.code||'')}"></div>
       <div class="field"><label>持股数（股）</label><input type="number" data-sk="shares" value="${s.shares??0}"></div>
       <div class="field"><label>成本价（元/股）</label><input type="number" step="0.001" data-sk="cost" value="${s.cost??''}"></div>
-      <div class="field"><label>止损线%（可选，如 10 = -10% 提醒）</label><input type="number" data-sk="stopPct" value="${s.stopPct??10}"></div>
-      <div class="field"><label>破位减仓天数（如 3 = 连续3日低于60日线提醒）</label><input type="number" data-sk="breakDays" value="${s.breakDays??3}"></div>
     </div>
     <div class="small-note" style="margin-top:8px;">行情每日自动更新（沪/深/港股均支持，港股按港币计价）；买卖提醒将同步到每日邮件。</div>
     <div class="btn-row">
@@ -1100,8 +1087,6 @@ async function saveStockForm(id){
   if(!/^\d{5,6}$/.test(s.code)){ showToast('代码须为5-6位数字'); return; }
   s.shares = parseFloat(get('shares').value)||0;
   s.cost = parseFloat(get('cost').value)||0;
-  s.stopPct = parseFloat(get('stopPct').value)||0;
-  s.breakDays = parseInt(get('breakDays').value)||0;
   if(s.shares>0 && s.currentPrice>0) s.marketValue = stockMvOf(s);
   await saveStocks();
   showToast('已保存，行情将于下一轮自动更新');
@@ -1197,8 +1182,6 @@ function fundBodyHtml(f){
         </select>
       </div>
       <div class="field full"><label>目标跌幅安全垫（%，可选，如 20 表示 -20%）</label><input type="number" data-k="targetDrawdown" value="${rr.targetDrawdown??''}"></div>
-      <div class="field"><label>止损线%（可选，如 15 = 收益率-15%时邮件提醒）</label><input type="number" data-k="stopPct" value="${f.stopPct??''}"></div>
-      <div class="field"><label>破位减仓天数（可选，如 10 = 连续10日<60日线提醒）</label><input type="number" data-k="breakDays" value="${f.breakDays??''}"></div>
     </div>
     <div class="resume-box">
       当前连续站上60日线：<strong>${f.aboveMaStreak||0}</strong> 个交易日。点上方「自动获取净值与均线」会按完整历史回算该天数，保存时自动同步；也可用「今日是否收盘站上60日线」手动累计或清零。
@@ -1400,8 +1383,6 @@ async function saveFundForm(id){
   const qdiiEl = body.querySelector('[data-k="qdiiPremium"]');
   f.qdiiPremium = qdiiEl ? qdiiEl.value : '';
   f.manualPause = get('manualPause').checked;
-  f.stopPct = parseFloat(get('stopPct').value)||0;
-  f.breakDays = parseInt(get('breakDays').value)||0;
 
   const reqDays = parseInt(get('reqDays').value)||3;
   const mode = get('resumeMode').value;
@@ -1500,7 +1481,7 @@ document.getElementById('stockCapInput').addEventListener('change', async (e)=>{
 });
 document.getElementById('addStockBtn').addEventListener('click', async ()=>{
   const s = { id:'s'+Math.random().toString(36).slice(2,10), code:'', name:'', shares:0, cost:0,
-    stopPct:10, breakDays:3, currentPrice:0, priceDate:'', belowStreak:0 };
+    currentPrice:0, priceDate:'', belowStreak:0 };
   stocks.push(s);
   await saveStocks();
   renderStockSection();
