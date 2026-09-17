@@ -174,6 +174,9 @@ Deno.serve(async (req: Request) => {
   if (!token || auth !== 'Bearer ' + token) {
     return new Response(JSON.stringify({ ok: false, error: 'unauthorized' }), { status: 401 });
   }
+  // force=true（测试用）：即使无信号变化也发送当前信号一览
+  let force = false;
+  try { const b = await req.json(); if (b && (b as any).force) force = true; } catch (e) { /* body 可为空 */ }
   const sbUrl = Deno.env.get('SUPABASE_URL') || '';
   const serviceKey = Deno.env.get('SB_SERVICE_KEY') || Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
   const H = { apikey: serviceKey, Authorization: 'Bearer ' + serviceKey, 'Content-Type': 'application/json' };
@@ -255,6 +258,7 @@ Deno.serve(async (req: Request) => {
     const fundUniq = [...new Set(fundJobs.map(j => j.code))];
     const perUserFundItems: Record<string, string[]> = {};
     const fundSignalRows: any[] = [];
+    const fundMeta: Record<string, { name: string; nav: number; navDate: string }> = {};
     for (const code of fundUniq) {
       try {
         const pzRes = await fetchRetry('https://fund.eastmoney.com/pingzhongdata/' + code + '.js?dt=' + Date.now(), {
@@ -285,6 +289,7 @@ Deno.serve(async (req: Request) => {
           }
         }
         const users = [...new Set(fundJobs.filter(j => j.code === code).map(j => j.userId))];
+        fundMeta[code] = { name: nameMatch ? nameMatch[1] : '', nav: close, navDate };
         for (const userId of users) {
           const st = states.find((s: any) => s.user_id === userId);
           const goal = (st.data && st.data.goal) || GOAL_DEFAULT;
@@ -447,10 +452,13 @@ Deno.serve(async (req: Request) => {
         const p = prevMap[r.code];
         const curBase = String(r.label).split('｜')[0];
         const prevBase = p ? String(p).split('｜')[0] : null;
+        const meta = fundMeta[r.code];
+        const nameStr = meta && meta.name ? ' ' + meta.name : '';
+        const navStr = meta ? '（净值 ' + meta.nav + '，' + meta.navDate + '）' : '';
         if (p && prevBase !== curBase) {
-          items.unshift('【' + r.code + '】基金信号变化：' + prevBase + ' → <b>' + curBase + '</b>');
+          items.unshift('【' + r.code + nameStr + '】基金信号变化：' + prevBase + ' → <b>' + curBase + '</b>' + navStr);
         } else if (!p) {
-          items.unshift('【' + r.code + '】基金当前信号：<b>' + curBase + '</b>');
+          items.unshift('【' + r.code + nameStr + '】基金当前信号：<b>' + curBase + '</b>' + navStr);
         }
       }
 
@@ -469,15 +477,15 @@ Deno.serve(async (req: Request) => {
 
       summary.notifications.push({ userId: userId.slice(0, 8), items: items.length, sent: false });
 
-      if (items.length > 0 || isFirstRun) {
+      if (items.length > 0 || isFirstRun || force) {
         const dateStr = new Date().toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
-        const title = isFirstRun ? '定投信号基线快照（首次启用通知）' : '定投信号变化提醒（' + items.length + ' 条）';
+        const title = isFirstRun ? '定投信号基线快照（首次启用通知）' : (items.length ? '定投信号变化提醒（' + items.length + ' 条）' : '定投信号一览（无变化）');
         const html = '<div style="font-family:-apple-system,PingFang SC,Arial;max-width:560px;margin:0 auto;font-size:14px;color:#1B2436;line-height:1.7;">'
           + '<h2 style="font-size:18px;border-bottom:2px solid #A87C2E;padding-bottom:8px;">定投信号台 · ' + title + '</h2>'
           + '<p style="color:#707C8C;">' + dateStr + ' 收盘数据已自动更新</p>'
           + (items.length
             ? '<ul style="padding-left:18px;margin:12px 0;">' + items.map(i => '<li style="margin:8px 0;">' + i + '</li>').join('') + '</ul>'
-            : '<p>暂无信号变化。</p>')
+            : '<p>各基金当前信号：</p><ul style="padding-left:18px;">' + today.map(t => '<li>【' + t.code + '】' + (t.name || '') + '：<b>' + String(t.label).split('｜')[0] + '</b>' + (t.dev === null ? '' : '（偏离 ' + fmtSigned(t.dev) + '）') + '</li>').join('') + '</ul>')
           + '<hr style="border:none;border-top:1px solid #eee;margin:16px 0;">'
           + '<p style="color:#707C8C;font-size:12px;">本邮件由定投信号台自动发送 · 每日 20:30/22:30 自动更新 · 仅信号变化时提醒</p>'
           + '</div>';
