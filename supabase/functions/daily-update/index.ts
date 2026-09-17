@@ -436,6 +436,7 @@ Deno.serve(async (req: Request) => {
 
     for (const userId of Object.keys(perUserAll)) {
       const items = perUserAll[userId];
+      const today = perUser[userId] || [];
       const todayRows = fundSignalRows.filter(r => r.user_id === userId).concat(stockSignalRows.filter(r => r.user_id === userId && r.code !== '__STOCK_CAP__'));
       const prevRes = await fetch(sbUrl + '/rest/v1/signal_state?select=code,label&user_id=eq.' + userId, { headers: H });
       const prev: any[] = prevRes.ok ? await prevRes.json() : [];
