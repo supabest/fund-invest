@@ -1,8 +1,7 @@
-// daily-update: 每日自动更新基金净值/均线与参考指数行情（由 Supabase pg_cron 经 HTTP 调用）
-// v2: + 服务端信号引擎（复刻页面规则）+ 信号变化对比 + QQ 邮箱通知（手写 SMTP，零依赖）
+// daily-update: 每日自动更新基金净值/均线、股票收盘行情与参考指数行情（pg_cron 经 HTTP 调用）
+// v3: + 股票(沪深/港股)行情/买卖信号/总额限制 + 基金卖出维度(止损线/破位天数) + 日经225基准
 // 触发方式: POST /functions/v1/daily-update，Authorization: Bearer <DAILY_UPDATE_TOKEN>
-
-const GOAL = 200000;
+const GOAL_DEFAULT = 200000;
 const DEFAULT_TIERS = [{ ret: 20, sell: 10 }, { ret: 40, sell: 20 }, { ret: 60, sell: 30 }, { ret: 80, sell: 50 }];
 const DEFAULT_CAPS: Record<string, number> = { '电力/新能源': 20, '全球资源': 20, '机器人/先进制造': 15, '日本股票': 15, '均衡配置': 30, '其他': 15 };
 const BENCH: Record<string, { secid: string; name: string; th: number[] }> = {
@@ -11,8 +10,10 @@ const BENCH: Record<string, { secid: string; name: string; th: number[] }> = {
   SPX: { secid: '100.SPX', name: '标普500', th: [-8, -3, 3, 8] },
   DJIA: { secid: '100.DJIA', name: '道琼斯', th: [-8, -3, 3, 8] },
   HSI: { secid: '100.HSI', name: '恒生指数', th: [-8, -3, 3, 8] },
-  HSTECH: { secid: '124.HSTECH', name: '恒生科技', th: [-12, -5, 5, 12] }
+  HSTECH: { secid: '124.HSTECH', name: '恒生科技', th: [-12, -5, 5, 12] },
+  N225: { secid: '100.N225', name: '日经225', th: [-8, -3, 3, 8] }
 };
+const KLINE_HOSTS = ['push2his.eastmoney.com', '1.push2his.eastmoney.com', '23.push2his.eastmoney.com', '92.push2his.eastmoney.com'];
 
 function marketLevel(dev: number | null, th: number[]) {
   if (dev === null) return { level: 'neutral', label: '中性', coef: 1 };
@@ -23,63 +24,58 @@ function marketLevel(dev: number | null, th: number[]) {
   return { level: 'neutral', label: '中性', coef: 1 };
 }
 
-function computeReturn(f: any, nav: number): number | null {
+function computeReturn(price: number, f: any): number | null {
   const cb = (f.costBasis && f.costBasis > 0) ? f.costBasis
-    : ((f.costTotal && f.costTotal > 0 && nav > 0 && f.marketValue > 0) ? f.costTotal / (f.marketValue / f.currentNav) : 0);
+    : ((f.costTotal && f.costTotal > 0 && f.currentNav > 0 && f.marketValue > 0) ? f.costTotal / (f.marketValue / f.currentNav) : 0);
   if (!cb) return null;
-  return (nav - cb) / cb * 100;
+  return (price - cb) / cb * 100;
+}
+function stockReturn(f: any, close: number): number | null {
+  const cost = parseFloat(f.cost) || 0;
+  if (!cost) return null;
+  return (close - cost) / cost * 100;
 }
 
-// 复刻页面 baseSignal：偏离度 + 估值百分位打分
-function baseSignal(dev: number | null, f: any): { label: string; level: string; multiplier: number } {
+function baseSignalLabel(dev: number | null): { label: string; multiplier: number } {
+  if (dev === null) return { label: '中性(缺数据)', multiplier: 1 };
   let score = 0;
-  const pctRaw = f.valuationPercentile;
-  const pct = (pctRaw === '' || pctRaw === undefined || pctRaw === null) ? null : parseFloat(pctRaw);
-  if (dev !== null) {
-    if (dev <= -15) score += 2;
-    else if (dev <= -5) score += 1;
-    else if (dev >= 10) score -= 2;
-    else if (dev >= 3) score -= 1;
-  }
-  if (pct !== null && !isNaN(pct)) {
-    if (pct <= 20) score += 2;
-    else if (pct <= 40) score += 1;
-    else if (pct >= 80) score -= 2;
-    else if (pct >= 60) score -= 1;
-  }
-  if (score >= 3) return { label: '双倍', level: 'double', multiplier: 2 };
-  if (score >= 1) return { label: '加强', level: 'strong', multiplier: 1.5 };
-  if (score >= -1) return { label: '正常', level: 'normal', multiplier: 1 };
-  if (score >= -3) return { label: '减半', level: 'half', multiplier: 0.5 };
-  return { label: '暂停', level: 'pause', multiplier: 0 };
+  if (dev <= -15) score += 2;
+  else if (dev <= -5) score += 1;
+  else if (dev >= 10) score -= 2;
+  else if (dev >= 3) score -= 1;
+  if (score >= 3) return { label: '双倍', multiplier: 2 };
+  if (score >= 1) return { label: '加强', multiplier: 1.5 };
+  if (score >= -1) return { label: '正常', multiplier: 1 };
+  if (score >= -3) return { label: '减半', multiplier: 0.5 };
+  return { label: '暂停', multiplier: 0 };
 }
 
-// 复刻页面 evalFundSignal：QDII溢价 → 手动暂停/恢复 → 主题上限 → 常规信号
-function evalFundSignalServer(f: any, nav: number, ma60: number | null, ma120: number | null, dev: number | null, streak: number | null, themeCaps: Record<string, number>, themeWeight: number) {
+// 复刻页面 evalFundSignal：QDII溢价 → 手动暂停/恢复 → 主题上限(金额锚定) → 常规信号
+function evalFundSignalServer(f: any, nav: number, dev: number | null, streak: number | null, belowStreak: number | null, themeCaps: Record<string, number>, themeMv: number, goal: number) {
   if (f.isQDII && f.qdiiPremium !== '' && f.qdiiPremium !== undefined && !isNaN(parseFloat(f.qdiiPremium))) {
     const prem = parseFloat(f.qdiiPremium);
     if (prem >= 2) return { label: '暂停（QDII溢价）', level: 'pause', multiplier: 0 };
   }
-  const cap = themeCaps[f.theme] ?? 100;
-  if (themeWeight >= cap) return { label: '暂停（仓位超限）', level: 'pause', multiplier: 0 };
+  const capPct = themeCaps[f.theme] ?? 100;
+  if (themeMv >= capPct / 100 * goal) return { label: '暂停（仓位超限）', level: 'pause', multiplier: 0 };
   if (f.manualPause) {
     const rr = f.resumeRule || { requireDays: 3, mode: 'ma_only' };
     const need = rr.requireDays ?? 3;
     const st = streak ?? 0;
     const maOk = st >= need;
-    const ret = computeReturn(f, nav);
+    const ret = computeReturn(nav, f);
     let ddOk = true;
     if (rr.mode !== 'ma_only' && rr.targetDrawdown !== null && rr.targetDrawdown !== undefined && rr.targetDrawdown !== '') {
       ddOk = ret !== null && ret <= -Math.abs(parseFloat(rr.targetDrawdown));
     }
     const satisfied = rr.mode === 'ma_only' ? maOk : (rr.mode === 'ma_and_drawdown' ? (maOk && ddOk) : (maOk || ddOk));
     if (satisfied) {
-      const base = baseSignal(dev, f);
+      const base = baseSignalLabel(dev);
       return { label: '满足恢复条件 → 建议' + base.label, level: base.level, multiplier: base.multiplier, resumeReady: true };
     }
     return { label: '暂停中', level: 'pause', multiplier: 0 };
   }
-  return baseSignal(dev, f);
+  return baseSignalLabel(dev);
 }
 
 function fmtSigned(n: number): string {
@@ -181,7 +177,7 @@ Deno.serve(async (req: Request) => {
   const sbUrl = Deno.env.get('SUPABASE_URL') || '';
   const serviceKey = Deno.env.get('SB_SERVICE_KEY') || Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
   const H = { apikey: serviceKey, Authorization: 'Bearer ' + serviceKey, 'Content-Type': 'application/json' };
-  const summary: any = { funds: [], indices: [], notifications: [], users: 0 };
+  const summary: any = { funds: [], stocks: [], indices: [], notifications: [], users: 0 };
 
   const post = async (table: string, onConflict: string, rows: any[]) => {
     if (!rows.length) return;
@@ -193,7 +189,7 @@ Deno.serve(async (req: Request) => {
     if (!r.ok) throw new Error(table + ' upsert failed ' + r.status + ': ' + (await r.text()).slice(0, 200));
   };
 
-  // 东财接口偶发网络抖动（尤其 IPv6 路由），统一带重试
+  // 东财接口偶发网络抖动（IPv6 出口抽签），带重试 + 镜像域名轮换
   const fetchRetry = async (url: string, headers: any, tries = 3): Promise<Response> => {
     let lastErr: any = null;
     for (let i = 0; i < tries; i++) {
@@ -206,36 +202,65 @@ Deno.serve(async (req: Request) => {
     }
     throw lastErr;
   };
+  const fetchKline = async (secid: string, fqt: number, lmt: number): Promise<{ date: string; close: number; closes: number[] }> => {
+    let lastErr: any = null;
+    for (const host of KLINE_HOSTS) {
+      try {
+        const r = await fetchRetry('https://' + host + '/api/qt/stock/kline/get?secid=' + secid + '&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f53&klt=101&fqt=' + fqt + '&lmt=' + lmt + '&end=20500101', { headers: { 'User-Agent': 'Mozilla/5.0' } }, 2);
+        const j = await r.json();
+        const klines = (j && j.data && j.data.klines) || [];
+        if (!klines.length) { lastErr = new Error('no klines'); continue; }
+        const rows = klines.map((kl: string) => { const [dd, cc] = kl.split(','); return { date: dd, close: parseFloat(cc) }; });
+        return { date: rows[rows.length - 1].date, close: rows[rows.length - 1].close, closes: rows.map(x => x.close) };
+      } catch (e) { lastErr = e; }
+    }
+    throw lastErr || new Error('all kline hosts failed');
+  };
 
   try {
-    // 1. 读取所有用户的基金清单
+    // 1. 读取所有用户的资产清单（基金 + 股票）
     const stRes = await fetch(sbUrl + '/rest/v1/dingtou_state?select=user_id,data', { headers: H });
     if (!stRes.ok) throw new Error('state read failed ' + stRes.status);
     const states = await stRes.json();
     summary.users = states.length;
 
-    const jobs: { userId: string; code: string }[] = [];
+    const fundJobs: { userId: string; code: string }[] = [];
+    const stockJobs: { userId: string; code: string }[] = [];
     const idxSet = new Set<string>();
     for (const st of states) {
+      const goal = (st.data && st.data.goal) || GOAL_DEFAULT;
       const funds = (st.data && st.data.funds) || [];
       for (const f of funds) {
         const code = String(f.fundCode || '').trim();
-        if (/^\d{6}$/.test(code)) jobs.push({ userId: st.user_id, code });
+        if (/^\d{6}$/.test(code)) fundJobs.push({ userId: st.user_id, code });
         const k = f.benchmark || 'HS300';
         if (BENCH[k]) idxSet.add(k);
       }
+      const stocks = (st.data && st.data.stocks) || [];
+      for (const s of stocks) {
+        const code = String(s.code || '').trim();
+        if (/^\d{5,6}$/.test(code)) stockJobs.push({ userId: st.user_id, code });
+      }
     }
 
-    // 2. 逐基金抓取净值并计算（含信号）
-    const uniq = [...new Set(jobs.map(j => j.code))];
-    const perUser: Record<string, { code: string; label: string; profitTier: number | null; item: string | null }[]> = {};
-    for (const code of uniq) {
+    const ma = (closes: number[], n: number) => closes.length >= n ? closes.slice(-n).reduce((a, b) => a + b, 0) / n : null;
+    const avgDev = (close: number, ma60: number | null, ma120: number | null) => {
+      const devs: number[] = [];
+      if (ma60) devs.push((close - ma60) / ma60 * 100);
+      if (ma120) devs.push((close - ma120) / ma120 * 100);
+      return devs.length ? devs.reduce((a, b) => a + b, 0) / devs.length : null;
+    };
+
+    // 2. 基金：净值/均线/信号（含卖出维度）
+    const fundUniq = [...new Set(fundJobs.map(j => j.code))];
+    const perUserFundItems: Record<string, string[]> = {};
+    const fundSignalRows: any[] = [];
+    for (const code of fundUniq) {
       try {
-        const r = await fetchRetry('https://fund.eastmoney.com/pingzhongdata/' + code + '.js?dt=' + Date.now(), {
+        const pzRes = await fetchRetry('https://fund.eastmoney.com/pingzhongdata/' + code + '.js?dt=' + Date.now(), {
           headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://fund.eastmoney.com/' }
         });
-        if (!r.ok) throw new Error('fetch ' + r.status);
-        const txt = await r.text();
+        const txt = await pzRes.text();
         const nameMatch = txt.match(/var fS_name\s*=\s*"([^"]*)"/);
         const trendMatch = txt.match(/var Data_netWorthTrend\s*=\s*(\[[\s\S]*?\]);/);
         if (!trendMatch) throw new Error('no trend in source');
@@ -247,56 +272,55 @@ Deno.serve(async (req: Request) => {
         const d = new Date(last.x);
         const navDate = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
         const close = navs[navs.length - 1];
-        const ma60 = navs.length >= 60 ? navs.slice(-60).reduce((a: number, b: number) => a + b, 0) / 60 : null;
-        const ma120 = navs.length >= 120 ? navs.slice(-120).reduce((a: number, b: number) => a + b, 0) / 120 : null;
-        const devs: number[] = [];
-        if (ma60) devs.push((close - ma60) / ma60 * 100);
-        if (ma120) devs.push((close - ma120) / ma120 * 100);
-        const dev = devs.length ? devs.reduce((a, b) => a + b, 0) / devs.length : null;
+        const ma60 = ma(navs, 60);
+        const ma120 = ma(navs, 120);
+        const dev = avgDev(close, ma60, ma120);
         const above = ma60 === null ? null : close >= ma60;
-        let streak: number | null = null;
-        if (navs.length >= 60) {
-          streak = 0;
+        let streak: number | null = null, belowStreak: number | null = null;
+        if (ma60 !== null) {
+          streak = 0; belowStreak = 0;
           for (let i = navs.length - 1; i >= 59; i--) {
-            const ma = navs.slice(i - 59, i + 1).reduce((a: number, b: number) => a + b, 0) / 60;
-            if (navs[i] >= ma) streak++; else break;
+            const m = navs.slice(i - 59, i + 1).reduce((a: number, b: number) => a + b, 0) / 60;
+            if (navs[i] >= m) { if (belowStreak === 0) streak++; else break; } else { if (streak === 0) belowStreak++; else break; }
           }
         }
-
-        // 每个持有该基金的用户：算信号、对比昨日
-        const users = [...new Set(jobs.filter(j => j.code === code).map(j => j.userId))];
+        const users = [...new Set(fundJobs.filter(j => j.code === code).map(j => j.userId))];
         for (const userId of users) {
           const st = states.find((s: any) => s.user_id === userId);
+          const goal = (st.data && st.data.goal) || GOAL_DEFAULT;
           const funds = (st.data && st.data.funds) || [];
           const f = funds.find((x: any) => String(x.fundCode || '').trim() === code) || {};
-          const mv = (f.shares > 0 && close > 0) ? f.shares * close : (parseFloat(f.marketValue) || 0);
+          const fm = (f.shares > 0 && close > 0) ? f.shares * close : (parseFloat(f.marketValue) || 0);
           const themeCaps = { ...DEFAULT_CAPS, ...((st.data && st.data.themeCaps) || {}) };
           const themeSum = funds.reduce((s: number, x: any) => {
-            const xm = (x.shares > 0 && close > 0 && String(x.fundCode||'').trim() === code) ? mv : (x.marketValue || 0);
+            const isSelf = String(x.fundCode || '').trim() === code;
+            const xm = (isSelf && f.shares > 0 && close > 0) ? fm : (parseFloat(x.marketValue) || 0);
             return (x.theme === f.theme) ? s + (parseFloat(xm) || 0) : s;
           }, 0);
-          const totalMv = funds.reduce((s: number, x: any) => {
-            const isSelf = String(x.fundCode || '').trim() === code;
-            const xm = (isSelf && f.shares > 0 && close > 0) ? mv : (parseFloat(x.marketValue) || 0);
-            return s + xm;
-          }, 0);
-          const themeWeight = totalMv > 0 ? themeSum / totalMv * 100 : 0;
-
-          const sig = evalFundSignalServer(f, close, ma60, ma120, dev, streak, themeCaps, themeWeight);
-          const ret = computeReturn(f, close);
+          const themeMv = themeSum;
+          const sig = evalFundSignalServer(f, close, dev, streak, belowStreak, themeCaps, themeMv, goal);
+          const ret = computeReturn(close, f);
           const tiers = (f.profitTiers && f.profitTiers.length) ? f.profitTiers : DEFAULT_TIERS;
           let newTier: number | null = null;
           if (ret !== null && ret > 0) {
             for (const t of tiers) { if (ret >= t.ret && !(f.profitTaken || []).includes(t.ret)) newTier = t.ret; }
           }
+          // 卖出维度：止损线 / 破位减仓
+          const stopPct = parseFloat(f.stopPct);
+          const breakDays = parseInt(f.breakDays);
+          const stopHit = (!isNaN(stopPct) && stopPct > 0 && ret !== null && ret <= -stopPct);
+          const breakHit = (!isNaN(breakDays) && breakDays > 0 && belowStreak !== null && belowStreak >= breakDays);
+          if (stopHit) (perUserFundItems[userId] = perUserFundItems[userId] || []).push('【' + code + '】' + (nameMatch ? nameMatch[1] : f.name || '') + '：<b>止损提醒</b>，收益率 ' + fmtSigned(ret) + ' 已低于止损线 -' + stopPct + '%');
+          if (breakHit) (perUserFundItems[userId] = perUserFundItems[userId] || []).push('【' + code + '】' + (nameMatch ? nameMatch[1] : f.name || '') + '：<b>破位提醒</b>，已连续 ' + belowStreak + ' 个交易日低于60日均线，可考虑减仓');
 
-          (perUser[userId] = perUser[userId] || []).push({ code, label: sig.label, profitTier: newTier, item: null, ret, dev, name: nameMatch ? nameMatch[1] : (f.name || ''), resumeReady: !!sig.resumeReady, theme: f.theme || '' });
+          (perUserFundItems[userId] = perUserFundItems[userId] || []);
+          const label = sig.label + (newTier !== null ? '｜止盈' + newTier + '%达标' : '') + (stopHit ? '｜止损触发' : '') + (breakHit ? '｜破位提醒' : '');
+          fundSignalRows.push({ user_id: userId, code, label, profit_tier: newTier, stop_hit: stopHit, break_hit: breakHit, updated_at: new Date().toISOString() });
 
-          const histRow: any = { user_id: userId, code, nav_date: navDate, nav: close, ma60, ma120, dev_pct: dev, above_ma60: above };
-          await post('fund_nav_history', 'user_id,code,nav_date', [histRow]);
+          await post('fund_nav_history', 'user_id,code,nav_date', [{ user_id: userId, code, nav_date: navDate, nav: close, ma60, ma120, dev_pct: dev, above_ma60: above }]);
           await post('fund_latest', 'user_id,code', [{
             user_id: userId, code, name: nameMatch ? nameMatch[1] : null, nav: close, nav_date: navDate,
-            ma60, ma120, dev_pct: dev, streak, updated_at: new Date().toISOString()
+            ma60, ma120, dev_pct: dev, streak, below_streak: belowStreak, updated_at: new Date().toISOString()
           }]);
         }
         summary.funds.push({ code, ok: true, nav_date: navDate, nav: close, dev: dev === null ? null : Math.round(dev * 1000) / 1000, streak });
@@ -305,72 +329,146 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // 3. 指数行情 + 档位
+    // 3. 股票（A股/港股）：收盘价/均线/买卖信号
+    const stockUniq = [...new Set(stockJobs.map(j => j.code))];
+    const perUserStockItems: Record<string, string[]> = {};
+    const stockSignalRows: any[] = [];
+    for (const code of stockUniq) {
+      try {
+        const secid = code.length === 5 ? ('116.' + code) : (code.startsWith('6') ? ('1.' + code) : ('0.' + code));
+        const k = await fetchKline(secid, 1, 130);
+        const close = k.close;
+        const ma20 = ma(k.closes, 20);
+        const ma60 = ma(k.closes, 60);
+        const ma120 = ma(k.closes, 120);
+        const dev = avgDev(close, ma60, ma120);
+        let above = 0, below = 0;
+        if (ma60 !== null) {
+          for (let i = k.closes.length - 1; i >= 59; i--) {
+            const m = k.closes.slice(i - 59, i + 1).reduce((a, b) => a + b, 0) / 60;
+            if (k.closes[i] >= m) { if (below === 0) above++; else break; } else { if (above === 0) below++; else break; }
+          }
+        }
+        const users = [...new Set(stockJobs.filter(j => j.code === code).map(j => j.userId))];
+        for (const userId of users) {
+          const st = states.find((s: any) => s.user_id === userId);
+          const arr = (st.data && st.data.stocks) || [];
+          const s = arr.find((x: any) => String(x.code || '').trim() === code) || {};
+          const smv = (s.shares > 0) ? s.shares * close : 0;
+          const ret = stockReturn(s, close);
+          const stopPct = parseFloat(s.stopPct); const stopPctOk = !isNaN(stopPct) && stopPct > 0;
+          const breakDays = parseInt(s.breakDays); const breakDaysOk = !isNaN(breakDays) && breakDays > 0;
+          const tier = baseSignalLabel(dev);
+          const stopHit = stopPctOk && ret !== null && ret <= -stopPct;
+          const breakHit = breakDaysOk && below >= breakDays;
+          const tiers = (s.profitTiers && s.profitTiers.length) ? s.profitTiers : DEFAULT_TIERS;
+          let newTier: number | null = null;
+          if (ret !== null && ret > 0) { for (const t of tiers) { if (ret >= t.ret && !(s.profitTaken || []).includes(t.ret)) newTier = t.ret; } }
+
+          const label = tier.label + (breakHit ? '｜破位' : '') + (stopHit ? '｜止损' : '') + (newTier !== null ? '｜止盈' + newTier + '%' : '');
+          const prevRes = await fetch(sbUrl + '/rest/v1/stock_signal_state?select=tier,break_hit,stop_hit,profit_tier&user_id=eq.' + userId + '&code=eq.' + code, { headers: H });
+          const prevArr: any[] = prevRes.ok ? await prevRes.json() : [];
+          const p = prevArr[0] || null;
+          const sm = arr.find((x: any) => String(x.code || '').trim() === code);
+          const sname = s.name || sm?.name || code;
+          if (!p) {
+            (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：买入参考档位 <b>' + tier.label + '</b>' + (dev === null ? '' : '（偏离 ' + fmtSigned(dev) + '）'));
+          } else {
+            const prevTierOk = p.tier === tier.label;
+            if (!prevTierOk) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：买入参考档位变化 ' + p.tier + ' → <b>' + tier.label + '</b>' + (dev === null ? '' : '（偏离 ' + fmtSigned(dev) + '）'));
+            if (!p.break_hit && breakHit) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：<b>趋势破位提醒</b>，已连续 ' + below + ' 个交易日低于60日均线，可考虑减仓');
+            if (p.break_hit && !breakHit) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：趋势修复，重新站上60日均线');
+            if (!p.stop_hit && stopHit) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：<b>止损提醒</b>，收益率 ' + fmtSigned(ret) + ' 已低于止损线 -' + stopPct + '%');
+            if (newTier !== null && p.profit_tier !== newTier) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：收益率 <b>' + fmtSigned(ret) + '</b> 达到止盈档 +' + newTier + '%，建议分批止盈');
+          }
+          stockSignalRows.push({ user_id: userId, code, tier: tier.label, break_hit: breakHit, stop_hit: stopHit, profit_tier: newTier, updated_at: new Date().toISOString() });
+
+          await post('stock_history', 'user_id,code,price_date', [{ user_id: userId, code, price_date: k.date, close, ma20, ma60, ma120, dev_pct: dev }]);
+          await post('stock_latest', 'user_id,code', [{
+            user_id: userId, code, name: sname, close, price_date: k.date, ma20, ma60, ma120, dev_pct: dev,
+            below_streak: below, updated_at: new Date().toISOString()
+          }]);
+        }
+        summary.stocks.push({ code, ok: true, date: k.date, close });
+      } catch (e) {
+        summary.stocks.push({ code, ok: false, error: String((e as any)?.message || e).slice(0, 140) });
+      }
+    }
+
+    // 4. 股票总仓位上限提醒
+    for (const st of states) {
+      const userId = st.user_id;
+      const arr = (st.data && st.data.stocks) || [];
+      if (!arr.length) continue;
+      const cap = parseFloat(st.data.stockCap) || 0;
+      if (!cap) continue;
+      let total = 0;
+      for (const s of arr) {
+        const code = String(s.code || '').trim();
+        const lx = summary.stocks.find((x: any) => x.code === code && x.ok);
+        const px = lx ? lx.close : (parseFloat(s.currentPrice) || 0);
+        total += (parseFloat(s.shares) || 0) * px;
+      }
+      const over = total > cap;
+      const prevRes = await fetch(sbUrl + '/rest/v1/stock_signal_state?select=code,break_hit&user_id=eq.' + userId + '&code=eq.__STOCK_CAP__', { headers: H });
+      const prevArr: any[] = prevRes.ok ? await prevRes.json() : [];
+      const wasOver = prevArr.length ? !!prevArr[0].break_hit : false;
+      if (over && !wasOver) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('股票总仓位 <b>¥' + Math.round(total).toLocaleString() + '</b> 已超过总额上限 ¥' + Math.round(cap).toLocaleString() + '，建议暂停买入');
+      if (!over && wasOver) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('股票总仓位回落至上限内（当前 ¥' + Math.round(total).toLocaleString() + ' / ¥' + Math.round(cap).toLocaleString() + '）');
+      stockSignalRows.push({ user_id: userId, code: '__STOCK_CAP__', tier: 'cap', break_hit: over, stop_hit: false, profit_tier: null, updated_at: new Date().toISOString() });
+    }
+
+    // 5. 指数行情 + 档位
     const idxLevels: Record<string, string> = {};
     for (const k of idxSet) {
       try {
-        // push2his 有数字前缀镜像；不同函数实例的 IPv6 出口质量不同，轮换域名可绕过单实例网络故障
-        const hosts = ['push2his.eastmoney.com', '1.push2his.eastmoney.com', '23.push2his.eastmoney.com', '92.push2his.eastmoney.com'];
-        let j: any = null;
-        let lastErr: any = null;
-        for (const host of hosts) {
-          try {
-            const r = await fetchRetry('https://' + host + '/api/qt/stock/kline/get?secid=' + BENCH[k].secid + '&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f53&klt=101&fqt=1&lmt=130&end=20500101', { headers: { 'User-Agent': 'Mozilla/5.0' } }, 2);
-            j = await r.json();
-            if (j && j.data && j.data.klines && j.data.klines.length) { lastErr = null; break; }
-            lastErr = new Error('no klines');
-          } catch (e) { lastErr = e; }
-        }
-        if (lastErr) throw lastErr;
-        const klines = (j && j.data && j.data.klines) || [];
-        if (!klines.length) throw new Error('no klines');
-        const rows = klines.map((kl: string) => { const [dd, cc] = kl.split(','); return { idx_code: k, idx_date: dd, close: parseFloat(cc) }; });
-        await post('index_history', 'idx_code,idx_date', rows);
-        const closes = rows.map(x => x.close);
-        const close = closes[closes.length - 1];
-        const ma60 = closes.length >= 60 ? closes.slice(-60).reduce((a, b) => a + b, 0) / 60 : null;
-        const ma120 = closes.length >= 120 ? closes.slice(-120).reduce((a, b) => a + b, 0) / 120 : null;
+        const kk = await fetchKline(BENCH[k].secid, 1, 130);
+        const close = kk.close;
+        const ma60 = ma(kk.closes, 60);
+        const ma120 = ma(kk.closes, 120);
         const devs: number[] = [];
         if (ma60) devs.push((close - ma60) / ma60 * 100);
         if (ma120) devs.push((close - ma120) / ma120 * 100);
         const dev = devs.length ? devs.reduce((a, b) => a + b, 0) / devs.length : null;
         const lv = marketLevel(dev, BENCH[k].th);
         idxLevels[k] = lv.label;
-        const lastParts = klines[klines.length - 1].split(',');
-        summary.indices.push({ idx: k, ok: true, date: lastParts[0], close, level: lv.label });
+        await post('index_history', 'idx_code,idx_date', [{ idx_code: k, idx_date: kk.date, close }]);
+        summary.indices.push({ idx: k, ok: true, date: kk.date, close, level: lv.label });
       } catch (e) {
         summary.indices.push({ idx: k, ok: false, error: String((e as any)?.message || e).slice(0, 140) });
       }
     }
 
-    // 4. 与昨日信号对比，生成通知项并发邮件
-    for (const userId of Object.keys(perUser)) {
-      const items: string[] = [];
-      const today = perUser[userId];
-      const prevRes = await fetch(sbUrl + '/rest/v1/signal_state?select=code,label,profit_tier&user_id=eq.' + userId, { headers: H });
+    // 6. 与昨日信号对比，生成通知项并发邮件
+    const allItems: string[] = [];
+    const perUserAll: Record<string, string[]> = {};
+    for (const userId of Object.keys(perUserFundItems)) perUserAll[userId] = perUserFundItems[userId].concat(perUserStockItems[userId] || []);
+    for (const userId of Object.keys(perUserStockItems)) if (!perUserAll[userId]) perUserAll[userId] = perUserStockItems[userId];
+
+    for (const userId of Object.keys(perUserAll)) {
+      const items = perUserAll[userId];
+      const todayRows = fundSignalRows.filter(r => r.user_id === userId).concat(stockSignalRows.filter(r => r.user_id === userId && r.code !== '__STOCK_CAP__'));
+      const prevRes = await fetch(sbUrl + '/rest/v1/signal_state?select=code,label&user_id=eq.' + userId, { headers: H });
       const prev: any[] = prevRes.ok ? await prevRes.json() : [];
-      const prevMap: Record<string, any> = {};
-      prev.forEach((p: any) => prevMap[p.code] = p);
+      const prevMap: Record<string, string> = {};
+      prev.forEach((p: any) => prevMap[p.code] = p.label);
       const isFirstRun = prev.length === 0;
 
-      const stateRows: any[] = [];
-      for (const t of today) {
-        const p = prevMap[t.code];
-        if (!p) {
-          items.push('【' + t.code + '】' + t.name + '：当前信号 <b>' + t.label + '</b>' + (t.dev === null ? '' : '（偏离 ' + fmtSigned(t.dev) + '）'));
-        } else if (p.label !== t.label) {
-          items.push('【' + t.code + '】' + t.name + '：信号变化 ' + p.label + ' → <b>' + t.label + '</b>' + (t.dev === null ? '' : '（偏离 ' + fmtSigned(t.dev) + '）'));
-        }
-        if (t.profitTier !== null && p && p.profit_tier !== t.profitTier) {
-          const tier = DEFAULT_TIERS.find(x => x.ret === t.profitTier);
-          items.push('【' + t.code + '】' + t.name + '：收益率 <b>' + fmtSigned(t.ret) + '</b> 达到止盈档 +' + t.profitTier + '%，建议止盈 ' + (tier ? tier.sell : 10) + '% 份额');
-        }
-        if (t.resumeReady) {
-          items.push('【' + t.code + '】' + t.name + '：<b>满足恢复条件</b>，当前建议：' + t.label.replace('满足恢复条件 → 建议', ''));
-        }
-        stateRows.push({ user_id: userId, code: t.code, label: t.label, profit_tier: t.profitTier, updated_at: new Date().toISOString() });
-      }
+      const stateRows = todayRows.map(r => ({ user_id: userId, code: r.code, label: r.label, profit_tier: r.profit_tier, stop_hit: r.stop_hit, break_hit: r.break_hit, updated_at: new Date().toISOString() }));
       await post('signal_state', 'user_id,code', stateRows);
+
+      // 基金常规信号变化（label 前半段变化，不含卖出标记）
+      for (const r of stateRows) {
+        if (r.code === '__STOCK_CAP__') continue;
+        const p = prevMap[r.code];
+        const curBase = String(r.label).split('｜')[0];
+        const prevBase = p ? String(p).split('｜')[0] : null;
+        if (p && prevBase !== curBase) {
+          items.unshift('【' + r.code + '】基金信号变化：' + prevBase + ' → <b>' + curBase + '</b>');
+        } else if (!p) {
+          items.unshift('【' + r.code + '】基金当前信号：<b>' + curBase + '</b>');
+        }
+      }
 
       // 指数档位变化
       const idxPrevRes = await fetch(sbUrl + '/rest/v1/index_state?select=idx_code,label', { headers: H });
@@ -380,16 +478,13 @@ Deno.serve(async (req: Request) => {
       const idxRows: any[] = [];
       for (const k of Object.keys(idxLevels)) {
         const label = idxLevels[k];
-        if (idxPrevMap[k] && idxPrevMap[k] !== label) {
-          items.push('大盘参考：' + BENCH[k].name + ' 档位变化 ' + idxPrevMap[k] + ' → <b>' + label + '</b>');
-        }
+        if (idxPrevMap[k] && idxPrevMap[k] !== label) items.push('大盘参考：' + BENCH[k].name + ' 档位变化 ' + idxPrevMap[k] + ' → <b>' + label + '</b>');
         idxRows.push({ idx_code: k, label, updated_at: new Date().toISOString() });
       }
       if (idxRows.length) await post('index_state', 'idx_code', idxRows);
 
       summary.notifications.push({ userId: userId.slice(0, 8), items: items.length, sent: false });
 
-      // 有变化（或首次运行发基线）才发信
       if (items.length > 0 || isFirstRun) {
         const dateStr = new Date().toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
         const title = isFirstRun ? '定投信号基线快照（首次启用通知）' : '定投信号变化提醒（' + items.length + ' 条）';
@@ -398,9 +493,9 @@ Deno.serve(async (req: Request) => {
           + '<p style="color:#707C8C;">' + dateStr + ' 收盘数据已自动更新</p>'
           + (items.length
             ? '<ul style="padding-left:18px;margin:12px 0;">' + items.map(i => '<li style="margin:8px 0;">' + i + '</li>').join('') + '</ul>'
-            : '<p>以下为当前全部信号：</p><ul style="padding-left:18px;">' + today.map(t => '<li>【' + t.code + '】' + t.name + '：<b>' + t.label + '</b></li>').join('') + '</ul>')
+            : '<p>暂无信号变化。</p>')
           + '<hr style="border:none;border-top:1px solid #eee;margin:16px 0;">'
-          + '<p style="color:#707C8C;font-size:12px;">本邮件由定投信号台自动发送 · 每日 20:30/22:30 自动更新数据 · 仅信号变化时提醒</p>'
+          + '<p style="color:#707C8C;font-size:12px;">本邮件由定投信号台自动发送 · 每日 20:30/22:30 自动更新 · 仅信号变化时提醒</p>'
           + '</div>';
         try {
           await sendMail('【定投信号台】' + title + ' - ' + dateStr, html);
