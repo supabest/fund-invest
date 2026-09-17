@@ -399,12 +399,12 @@ Deno.serve(async (req: Request) => {
         total += (parseFloat(s.shares) || 0) * px;
       }
       const over = total > cap;
-      const prevRes = await fetch(sbUrl + '/rest/v1/stock_signal_state?select=code,break_hit&user_id=eq.' + userId + '&code=eq.__STOCK_CAP__', { headers: H });
+      const prevRes = await fetch(sbUrl + '/rest/v1/stock_signal_state?select=code,tier&user_id=eq.' + userId + '&code=eq.__STOCK_CAP__', { headers: H });
       const prevArr: any[] = prevRes.ok ? await prevRes.json() : [];
-      const wasOver = prevArr.length ? !!prevArr[0].break_hit : false;
+      const wasOver = prevArr.length ? prevArr[0].tier === 'over' : false;
       if (over && !wasOver) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('股票总仓位 <b>¥' + Math.round(total).toLocaleString() + '</b> 已超过总额上限 ¥' + Math.round(cap).toLocaleString() + '，建议暂停买入');
       if (!over && wasOver) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('股票总仓位回落至上限内（当前 ¥' + Math.round(total).toLocaleString() + ' / ¥' + Math.round(cap).toLocaleString() + '）');
-      stockSignalRows.push({ user_id: userId, code: '__STOCK_CAP__', tier: 'cap', break_hit: over, stop_hit: false, profit_tier: null, updated_at: new Date().toISOString() });
+      stockSignalRows.push({ user_id: userId, code: '__STOCK_CAP__', tier: over ? 'over' : 'ok', profit_tier: null, updated_at: new Date().toISOString() });
     }
 
     // 5. 指数行情 + 档位
@@ -436,7 +436,8 @@ Deno.serve(async (req: Request) => {
 
     for (const userId of Object.keys(perUserAll)) {
       const items = perUserAll[userId];
-      const todayRows = fundSignalRows.filter(r => r.user_id === userId).concat(stockSignalRows.filter(r => r.user_id === userId && r.code !== '__STOCK_CAP__'));
+      // signal_state 只存基金信号（股票信号有自己的 stock_signal_state）
+      const todayRows = fundSignalRows.filter(r => r.user_id === userId);
       const prevRes = await fetch(sbUrl + '/rest/v1/signal_state?select=code,label&user_id=eq.' + userId, { headers: H });
       const prev: any[] = prevRes.ok ? await prevRes.json() : [];
       const prevMap: Record<string, string> = {};
