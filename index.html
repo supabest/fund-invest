@@ -1074,6 +1074,7 @@ function stockFormHtml(s){
     <div class="field-grid">
       <div class="field"><label>名称</label><input type="text" data-sk="name" value="${escapeHtml(s.name||'')}"></div>
       <div class="field"><label>代码（A股6位 / 港股5位）</label><input type="text" data-sk="code" maxlength="6" value="${escapeHtml(s.code||'')}"></div>
+      <div class="field full"><button type="button" class="btn ghost" data-action="fetchStock" style="border:1px solid var(--line-strong); padding:9px; border-radius:6px;">⟳ 自动获取行情（名称/现价/均线）</button><div class="small-note" data-wrap="stockFetchStatus"></div></div>
       <div class="field"><label>持股数（股）</label><input type="number" data-sk="shares" value="${s.shares??0}"></div>
       <div class="field"><label>成本价（元/股）</label><input type="number" step="0.001" data-sk="cost" value="${s.cost??''}"></div>
       <div class="field full"><label>止盈档位（收益率%:建议卖出%，逗号分隔，留空用默认 20:10,40:20,60:30,80:50）</label><input type="text" data-sk="profitTiersText" value="${profitTiersText(s)}"></div>
@@ -1089,6 +1090,66 @@ function bindStockBody(id){
   const body = document.getElementById('sbody-'+id);
   body.querySelector('[data-action="save"]').addEventListener('click', ()=> saveStockForm(id));
   body.querySelector('[data-action="delete"]').addEventListener('click', ()=> deleteStock(id));
+  body.querySelector('[data-action="fetchStock"]').addEventListener('click', ()=> autoFetchStockData(id));
+}
+
+// 股票行情自动获取：东财 kline JSONP（浏览器直连），填名称/现价/均线并静默存档
+function autoFetchStockData(id){
+  const s = stocks.find(x=>x.id===id);
+  const body = document.getElementById('sbody-'+id);
+  const statusEl = body ? body.querySelector('[data-wrap="stockFetchStatus"]') : null;
+  const code = (body ? (body.querySelector('[data-sk="code"]').value||'') : (s?s.code:'')).trim();
+  const setStatus = (text, color)=>{ if(statusEl){ statusEl.textContent = text; statusEl.style.color = color || 'var(--muted)'; } };
+  if(!/^\d{5,6}$/.test(code)){ setStatus('请先填写 5-6 位代码（A股6位/港股5位）', 'var(--brick)'); return; }
+  const secid = code.length===5 ? ('116.'+code) : (code.startsWith('6') ? ('1.'+code) : ('0.'+code));
+  setStatus('正在获取行情…');
+  const cbName = 'skcb' + Math.random().toString(36).slice(2,10);
+  let settled = false;
+  const script = document.createElement('script');
+  const cleanup = ()=>{ try{ delete window[cbName]; }catch(e){} if(script.parentNode) script.parentNode.removeChild(script); };
+  const timeoutId = setTimeout(()=>{
+    if(settled) return; settled = true; cleanup();
+    setStatus('获取超时（无网络或代码不存在）。行情也会由每日定时任务自动更新。', 'var(--brick)');
+  }, 10000);
+  window[cbName] = function(j){
+    if(settled) return; settled = true; clearTimeout(timeoutId); cleanup();
+    try{
+      const klines = j && j.data && j.data.klines;
+      if(!klines || !klines.length) throw new Error('no klines');
+      const rows = klines.map(kl=>{ const [dd,cc]=kl.split(','); return { date:dd, close:parseFloat(cc) }; });
+      const closes = rows.map(x=>x.close);
+      const cur = rows[rows.length-1];
+      const ma20 = closes.length>=20 ? closes.slice(-20).reduce((a,b)=>a+b,0)/20 : null;
+      const ma60 = closes.length>=60 ? closes.slice(-60).reduce((a,b)=>a+b,0)/60 : null;
+      const ma120 = closes.length>=120 ? closes.slice(-120).reduce((a,b)=>a+b,0)/120 : null;
+      let above=0, below=0;
+      if(ma60!==null){
+        for(let i=closes.length-1;i>=59;i--){
+          const m = closes.slice(i-59,i+1).reduce((a,b)=>a+b,0)/60;
+          if(closes[i]>=m){ if(below===0) above++; else break; } else { if(above===0) below++; else break; }
+        }
+      }
+      const target = stocks.find(x=>x.id===id);
+      if(!target) return;
+      target.currentPrice = cur.close;
+      target.priceDate = cur.date;
+      if(ma20!==null) target.ma20 = ma20;
+      if(ma60!==null) target.ma60 = ma60;
+      if(ma120!==null) target.ma120 = ma120;
+      target.belowStreak = below;
+      const jname = (j.data && j.data.name) || '';
+      const nameInput = body ? body.querySelector('[data-sk="name"]') : null;
+      if(jname && nameInput && !nameInput.value.trim()) nameInput.value = jname;
+      if(jname && !target.name) target.name = jname;
+      saveStocks();
+      setStatus('已获取 '+cur.date+' 收盘价 '+cur.close.toFixed(2)+(ma60?'，MA60='+ma60.toFixed(2):'')+(ma120?'，MA120='+ma120.toFixed(2):'')+'。点击「保存」后卡片同步。', 'var(--jade)');
+    }catch(e){
+      setStatus('解析失败（可能不是有效股票代码），请检查后重试。', 'var(--brick)');
+    }
+  };
+  script.onerror = ()=>{ if(settled) return; settled = true; clearTimeout(timeoutId); setStatus('获取被浏览器拦截或代码不存在，请手动填写。', 'var(--brick)'); };
+  script.src = 'https://push2his.eastmoney.com/api/qt/stock/kline/get?secid='+secid+'&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f53&klt=101&fqt=1&lmt=130&end=20500101&cb='+cbName+'&_='+Date.now();
+  document.head.appendChild(script);
 }
 
 async function saveStockForm(id){
