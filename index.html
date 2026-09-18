@@ -315,6 +315,16 @@ const DEFAULT_TIERS = [
   {ret:80, sell:50}
 ];
 
+// 止盈策略预设：下拉选择后自动填入档位，可在文本框微调
+const TIER_PRESETS = {
+  invest:  { name:'投资式·长期少卖', tiers:'20:10,40:20,60:30,80:50' },
+  recycle: { name:'回收式·持续降成本', tiers:'25:10,40:15,60:20,100:25' },
+  swing:   { name:'波段式·快速锁盈', tiers:'10:30,20:30,35:20,50:20' }
+};
+function tierPresetFor(text){
+  return Object.keys(TIER_PRESETS).find(k=>TIER_PRESETS[k].tiers===String(text||'').trim()) || '';
+}
+
 let funds = [];
 let themeCaps = {...DEFAULT_CAPS};
 let editingId = null;
@@ -1091,7 +1101,13 @@ function stockFormHtml(s){
       <div class="field full"><button type="button" class="btn ghost" data-action="fetchStock" style="border:1px solid var(--line-strong); padding:9px; border-radius:6px;">⟳ 自动获取行情（名称/现价/均线）</button><div class="small-note" data-wrap="stockFetchStatus"></div></div>
       <div class="field"><label>持股数（股）</label><input type="number" data-sk="shares" value="${s.shares??0}"></div>
       <div class="field"><label>成本价（元/股）</label><input type="number" step="0.001" data-sk="cost" value="${s.cost??''}"></div>
-      <div class="field full"><label>止盈档位（收益率%:建议卖出%，逗号分隔，留空用默认 20:10,40:20,60:30,80:50）</label><input type="text" data-sk="profitTiersText" value="${profitTiersText(s)}"></div>
+      <div class="field full"><label>止盈策略（预设）</label>
+        <select data-sk="tierPreset">
+          <option value="" ${tierPresetFor(profitTiersText(s))===''?'selected':''}>自定义（使用下方档位）</option>
+          ${Object.keys(TIER_PRESETS).map(k=>`<option value="${k}" ${tierPresetFor(profitTiersText(s))===k?'selected':''}>${TIER_PRESETS[k].name}：${TIER_PRESETS[k].tiers}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field full"><label>止盈档位（收益率%:卖出%，逗号分隔，选预设后可微调）</label><input type="text" data-sk="profitTiersText" value="${profitTiersText(s)}"></div>
     </div>
     <div class="small-note" style="margin-top:8px;">行情每日自动更新（沪/深/港股均支持，港股按港币计价）；买卖提醒将同步到每日邮件。</div>
     <div class="btn-row">
@@ -1105,6 +1121,11 @@ function bindStockBody(id){
   body.querySelector('[data-action="save"]').addEventListener('click', ()=> saveStockForm(id));
   body.querySelector('[data-action="delete"]').addEventListener('click', ()=> deleteStock(id));
   body.querySelector('[data-action="fetchStock"]').addEventListener('click', ()=> autoFetchStockData(id));
+  const presetSel = body.querySelector('[data-sk="tierPreset"]');
+  if(presetSel) presetSel.addEventListener('change', ()=>{
+    const p = TIER_PRESETS[presetSel.value];
+    if(p) body.querySelector('[data-sk="profitTiersText"]').value = p.tiers;
+  });
 }
 
 // 股票行情自动获取：K线 JSONP 多线路轮换（浏览器直连），填名称/现价/均线并静默存档
@@ -1265,7 +1286,13 @@ function fundBodyHtml(f){
         </select>
       </div>
       <div class="field full"><label>目标跌幅安全垫（%，可选，如 20 表示 -20%）</label><input type="number" data-k="targetDrawdown" value="${rr.targetDrawdown??''}"></div>
-      <div class="field full"><label>止盈档位（收益率%:建议卖出%，逗号分隔，留空用默认 20:10,40:20,60:30,80:50）</label><input type="text" data-k="profitTiersText" value="${profitTiersText(f)}"></div>
+      <div class="field full"><label>止盈策略（预设）</label>
+        <select data-k="tierPreset">
+          <option value="" ${tierPresetFor(profitTiersText(f))===''?'selected':''}>自定义（使用下方档位）</option>
+          ${Object.keys(TIER_PRESETS).map(k=>`<option value="${k}" ${tierPresetFor(profitTiersText(f))===k?'selected':''}>${TIER_PRESETS[k].name}：${TIER_PRESETS[k].tiers}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field full"><label>止盈档位（收益率%:卖出%，逗号分隔，选预设后可微调）</label><input type="text" data-k="profitTiersText" value="${profitTiersText(f)}"></div>
     </div>
     <div class="resume-box">
       当前连续站上60日线：<strong>${f.aboveMaStreak||0}</strong> 个交易日。点上方「自动获取净值与均线」会按完整历史回算该天数，保存时自动同步；也可用「今日是否收盘站上60日线」手动累计或清零。
@@ -1284,6 +1311,11 @@ function bindFundBody(id){
   body.querySelector('[data-action="delete"]').addEventListener('click', ()=> deleteFund(id));
   const fetchBtn = document.getElementById('autoFetchBtn-'+id);
   if(fetchBtn) fetchBtn.addEventListener('click', ()=> autoFetchFundData(id));
+  const presetSel = body.querySelector('[data-k="tierPreset"]');
+  if(presetSel) presetSel.addEventListener('change', ()=>{
+    const p = TIER_PRESETS[presetSel.value];
+    if(p) body.querySelector('[data-k="profitTiersText"]').value = p.tiers;
+  });
   // 市值 = 份额×净值，实时联动；成本两栏二选一，另一栏自动折算
   const mvInput = body.querySelector('[data-k="mvDisplay"]');
   const sharesEl = body.querySelector('[data-k="shares"]');
