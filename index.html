@@ -538,13 +538,14 @@ async function applyStockSnapshots(){
     const { data, error } = await sb.from('stock_latest').select('code,name,close,price_date,ma20,ma60,ma120,below_streak').eq('user_id', sbUser.id);
     if(error || !data || !data.length) return;
     let applied = 0;
+    let nameFixed = 0;
     for(const row of data){
       const s = stocks.find(x=>(x.code||'').trim()===row.code);
       if(!s) continue;
       // 名称修复不受日期限制：云端旧数据曾用代码兜底当名称，纯数字名称一律以权威名称覆盖
-      if(row.name && (!s.name || /^\d+$/.test(s.name))) s.name = row.name;
+      if(row.name && (!s.name || /^\d+$/.test(s.name))){ s.name = row.name; nameFixed++; }
       if(!row.close) continue;
-      if(s.priceDate && row.price_date && String(row.price_date) <= String(s.priceDate)) continue;
+      if(s.priceDate && row.price_date && String(s.priceDate) >= String(row.price_date)) continue;
       s.currentPrice = parseFloat(row.close);
       if(row.ma20!==null && row.ma20!==undefined) s.ma20 = parseFloat(row.ma20);
       if(row.ma60!==null && row.ma60!==undefined) s.ma60 = parseFloat(row.ma60);
@@ -553,10 +554,10 @@ async function applyStockSnapshots(){
       if(row.price_date) s.priceDate = String(row.price_date);
       applied++;
     }
-    if(applied>0){
+    if(applied>0 || nameFixed>0){
       await saveStocks();
       render();
-      showToast('已自动更新 '+applied+' 只股票的行情数据');
+      if(applied>0) showToast('已自动更新 '+applied+' 只股票的行情数据');
     }
   }catch(e){}
 }
@@ -1163,8 +1164,10 @@ function autoFetchStockData(id){
     const nameInput = body ? body.querySelector('[data-sk="name"]') : null;
     if(jname && nameInput && (!nameInput.value.trim() || /^\d+$/.test(nameInput.value.trim()))) nameInput.value = jname;
     if(jname && (!target.name || /^\d+$/.test(target.name))) target.name = jname;
-    saveStocks();
-    setStatus('已获取 '+jname+' '+cur.date+' 收盘价 '+cur.close.toFixed(2)+(ma60?'，MA60='+ma60.toFixed(2):'')+(ma120?'，MA120='+ma120.toFixed(2):'')+'。点击「保存」后卡片同步。', 'var(--jade)');
+      saveStocks();
+      const titleEl = document.querySelector('.fund-head[data-sid="'+id+'"] .fund-name');
+      if(titleEl) titleEl.textContent = target.name || '未命名股票';
+      setStatus('已获取 '+jname+' '+cur.date+' 收盘价 '+cur.close.toFixed(2)+(ma60?'，MA60='+ma60.toFixed(2):'')+(ma120?'，MA120='+ma120.toFixed(2):'')+'。点击「保存」后卡片同步。', 'var(--jade)');
   }).catch(()=>{
     setStatus('多线路均获取失败（网络波动）。行情也会由每日定时任务自动更新，稍后打开即为最新。', 'var(--brick)');
   });
