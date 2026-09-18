@@ -1154,6 +1154,7 @@ function autoFetchStockData(id){
     }
     const target = stocks.find(x=>x.id===id);
     if(!target) return;
+    target.code = code;
     target.currentPrice = cur.close;
     target.priceDate = cur.date;
     if(ma20!==null) target.ma20 = ma20;
