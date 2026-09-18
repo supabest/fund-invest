@@ -205,7 +205,7 @@ Deno.serve(async (req: Request) => {
     }
     throw lastErr;
   };
-  const fetchKline = async (secid: string, fqt: number, lmt: number): Promise<{ date: string; close: number; closes: number[] }> => {
+  const fetchKline = async (secid: string, fqt: number, lmt: number): Promise<{ date: string; close: number; closes: number[]; name: string }> => {
     let lastErr: any = null;
     for (const host of KLINE_HOSTS) {
       try {
@@ -214,7 +214,7 @@ Deno.serve(async (req: Request) => {
         const klines = (j && j.data && j.data.klines) || [];
         if (!klines.length) { lastErr = new Error('no klines'); continue; }
         const rows = klines.map((kl: string) => { const [dd, cc] = kl.split(','); return { date: dd, close: parseFloat(cc) }; });
-        return { date: rows[rows.length - 1].date, close: rows[rows.length - 1].close, closes: rows.map(x => x.close) };
+        return { date: rows[rows.length - 1].date, close: rows[rows.length - 1].close, closes: rows.map(x => x.close), name: (j && j.data && j.data.name) || '' };
       } catch (e) { lastErr = e; }
     }
     throw lastErr || new Error('all kline hosts failed');
@@ -363,18 +363,20 @@ Deno.serve(async (req: Request) => {
           const prevArr: any[] = prevRes.ok ? await prevRes.json() : [];
           const p = prevArr[0] || null;
           const sm = arr.find((x: any) => String(x.code || '').trim() === code);
-          const sname = s.name || sm?.name || code;
+          // 名称：用户填写 > K线响应自带名称；绝不用代码兜底（避免"名称变编号"）
+          const sname = s.name || sm?.name || k.name || '';
+          const displayName = sname || code;
           if (!p) {
-            (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：买入参考档位 <b>' + tier.label + '</b>' + (dev === null ? '' : '（偏离 ' + fmtSigned(dev) + '）'));
+            (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + displayName + '：买入参考档位 <b>' + tier.label + '</b>' + (dev === null ? '' : '（偏离 ' + fmtSigned(dev) + '）'));
           } else {
-            if (p.tier !== tier.label) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：买入参考档位变化 ' + p.tier + ' → <b>' + tier.label + '</b>' + (dev === null ? '' : '（偏离 ' + fmtSigned(dev) + '）'));
-            if (newTier !== null && p.profit_tier !== newTier) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + sname + '：收益率 <b>' + fmtSigned(ret) + '</b> 达到止盈档 +' + newTier + '%，建议分批止盈');
+            if (p.tier !== tier.label) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + displayName + '：买入参考档位变化 ' + p.tier + ' → <b>' + tier.label + '</b>' + (dev === null ? '' : '（偏离 ' + fmtSigned(dev) + '）'));
+            if (newTier !== null && p.profit_tier !== newTier) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + displayName + '：收益率 <b>' + fmtSigned(ret) + '</b> 达到止盈档 +' + newTier + '%，建议分批止盈');
           }
           stockSignalRows.push({ user_id: userId, code, tier: tier.label, profit_tier: newTier, updated_at: new Date().toISOString() });
 
           await post('stock_history', 'user_id,code,price_date', [{ user_id: userId, code, price_date: k.date, close, ma20, ma60, ma120, dev_pct: dev }]);
           await post('stock_latest', 'user_id,code', [{
-            user_id: userId, code, name: sname, close, price_date: k.date, ma20, ma60, ma120, dev_pct: dev,
+            user_id: userId, code, name: sname || null, close, price_date: k.date, ma20, ma60, ma120, dev_pct: dev,
             below_streak: below, updated_at: new Date().toISOString()
           }]);
         }

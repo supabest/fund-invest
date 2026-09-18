@@ -531,7 +531,8 @@ async function applyStockSnapshots(){
       if(!s || !row.close) continue;
       if(s.priceDate && row.price_date && String(row.price_date) <= String(s.priceDate)) continue;
       s.currentPrice = parseFloat(row.close);
-      if(row.name && !s.name) s.name = row.name;
+      // 名称修复：云端旧数据曾用代码兜底当名称，纯数字名称一律以权威名称覆盖
+      if(row.name && (!s.name || /^\d+$/.test(s.name))) s.name = row.name;
       if(row.ma20!==null && row.ma20!==undefined) s.ma20 = parseFloat(row.ma20);
       if(row.ma60!==null && row.ma60!==undefined) s.ma60 = parseFloat(row.ma60);
       if(row.ma120!==null && row.ma120!==undefined) s.ma120 = parseFloat(row.ma120);
@@ -1140,8 +1141,8 @@ function autoFetchStockData(id){
     target.belowStreak = below;
     const jname = (j.data && j.data.name) || '';
     const nameInput = body ? body.querySelector('[data-sk="name"]') : null;
-    if(jname && nameInput && !nameInput.value.trim()) nameInput.value = jname;
-    if(jname && !target.name) target.name = jname;
+    if(jname && nameInput && (!nameInput.value.trim() || /^\d+$/.test(nameInput.value.trim()))) nameInput.value = jname;
+    if(jname && (!target.name || /^\d+$/.test(target.name))) target.name = jname;
     saveStocks();
     setStatus('已获取 '+jname+' '+cur.date+' 收盘价 '+cur.close.toFixed(2)+(ma60?'，MA60='+ma60.toFixed(2):'')+(ma120?'，MA120='+ma120.toFixed(2):'')+'。点击「保存」后卡片同步。', 'var(--jade)');
   }).catch(()=>{
