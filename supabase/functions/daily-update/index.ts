@@ -363,8 +363,9 @@ Deno.serve(async (req: Request) => {
           const prevArr: any[] = prevRes.ok ? await prevRes.json() : [];
           const p = prevArr[0] || null;
           const sm = arr.find((x: any) => String(x.code || '').trim() === code);
-          // 名称：用户填写 > K线响应自带名称；绝不用代码兜底（避免"名称变编号"）
-          const sname = s.name || sm?.name || k.name || '';
+          // 名称：用户填写 > K线响应自带名称；纯数字视为历史污染数据，忽略以打断"名称=代码"循环
+          const cleanName = (v: any) => { const t = String(v || '').trim(); return (t && !/^\d+$/.test(t)) ? t : ''; };
+          const sname = cleanName(s.name) || cleanName(sm?.name) || k.name || '';
           const displayName = sname || code;
           if (!p) {
             (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + displayName + '：买入参考档位 <b>' + tier.label + '</b>' + (dev === null ? '' : '（偏离 ' + fmtSigned(dev) + '）'));
