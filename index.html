@@ -393,6 +393,8 @@ async function loadAll(){
     const r4 = await store.get(STOCKS_KEY);
     stocks = r4 ? JSON.parse(r4.value) : [];
   }catch(e){ stocks = []; }
+  // 清除历史污染：名称为纯数字的（曾被代码兜底），置空等待云端/手动修复
+  stocks.forEach(s=>{ if(/^\d+$/.test(String(s.name||'').trim())) s.name=''; });
   try{
     const r5 = await store.get(SETTINGS_KEY);
     const s = r5 ? JSON.parse(r5.value) : {};
@@ -538,11 +540,12 @@ async function applyStockSnapshots(){
     let applied = 0;
     for(const row of data){
       const s = stocks.find(x=>(x.code||'').trim()===row.code);
-      if(!s || !row.close) continue;
+      if(!s) continue;
+      // 名称修复不受日期限制：云端旧数据曾用代码兜底当名称，纯数字名称一律以权威名称覆盖
+      if(row.name && (!s.name || /^\d+$/.test(s.name))) s.name = row.name;
+      if(!row.close) continue;
       if(s.priceDate && row.price_date && String(row.price_date) <= String(s.priceDate)) continue;
       s.currentPrice = parseFloat(row.close);
-      // 名称修复：云端旧数据曾用代码兜底当名称，纯数字名称一律以权威名称覆盖
-      if(row.name && (!s.name || /^\d+$/.test(s.name))) s.name = row.name;
       if(row.ma20!==null && row.ma20!==undefined) s.ma20 = parseFloat(row.ma20);
       if(row.ma60!==null && row.ma60!==undefined) s.ma60 = parseFloat(row.ma60);
       if(row.ma120!==null && row.ma120!==undefined) s.ma120 = parseFloat(row.ma120);
@@ -1101,13 +1104,14 @@ function stockFormHtml(s){
       <div class="field full"><button type="button" class="btn ghost" data-action="fetchStock" style="border:1px solid var(--line-strong); padding:9px; border-radius:6px;">⟳ 自动获取行情（名称/现价/均线）</button><div class="small-note" data-wrap="stockFetchStatus"></div></div>
       <div class="field"><label>持股数（股）</label><input type="number" data-sk="shares" value="${s.shares??0}"></div>
       <div class="field"><label>成本价（元/股）</label><input type="number" step="0.001" data-sk="cost" value="${s.cost??''}"></div>
-      <div class="field full"><label>止盈策略（预设）</label>
+      <div class="field full"><label>止盈策略（收益率%:卖出%）</label>
         <select data-sk="tierPreset">
-          <option value="" ${tierPresetFor(profitTiersText(s))===''?'selected':''}>自定义（使用下方档位）</option>
-          ${Object.keys(TIER_PRESETS).map(k=>`<option value="${k}" ${tierPresetFor(profitTiersText(s))===k?'selected':''}>${TIER_PRESETS[k].name}：${TIER_PRESETS[k].tiers}</option>`).join('')}
+          ${(()=>{ const cur = profitTiersText(s); const pk = tierPresetFor(cur);
+            let opts = Object.keys(TIER_PRESETS).map(k=>`<option value="${k}" ${pk===k?'selected':''}>${TIER_PRESETS[k].name}：${TIER_PRESETS[k].tiers}</option>`).join('');
+            if(!pk) opts = `<option value="__custom__" selected>自定义：${cur}</option>` + opts;
+            return opts; })()}
         </select>
       </div>
-      <div class="field full"><label>止盈档位（收益率%:卖出%，逗号分隔，选预设后可微调）</label><input type="text" data-sk="profitTiersText" value="${profitTiersText(s)}"></div>
     </div>
     <div class="small-note" style="margin-top:8px;">行情每日自动更新（沪/深/港股均支持，港股按港币计价）；买卖提醒将同步到每日邮件。</div>
     <div class="btn-row">
@@ -1121,11 +1125,6 @@ function bindStockBody(id){
   body.querySelector('[data-action="save"]').addEventListener('click', ()=> saveStockForm(id));
   body.querySelector('[data-action="delete"]').addEventListener('click', ()=> deleteStock(id));
   body.querySelector('[data-action="fetchStock"]').addEventListener('click', ()=> autoFetchStockData(id));
-  const presetSel = body.querySelector('[data-sk="tierPreset"]');
-  if(presetSel) presetSel.addEventListener('change', ()=>{
-    const p = TIER_PRESETS[presetSel.value];
-    if(p) body.querySelector('[data-sk="profitTiersText"]').value = p.tiers;
-  });
 }
 
 // 股票行情自动获取：K线 JSONP 多线路轮换（浏览器直连），填名称/现价/均线并静默存档
@@ -1180,17 +1179,13 @@ async function saveStockForm(id){
   if(!/^\d{5,6}$/.test(s.code)){ showToast('代码须为5-6位数字'); return; }
   s.shares = parseFloat(get('shares').value)||0;
   s.cost = parseFloat(get('cost').value)||0;
-  const ptStock = get('profitTiersText').value.trim();
-  if(ptStock === ''){ s.profitTiers = DEFAULT_TIERS; }
-  else {
-    const parsed = ptStock.split(/[,，]/).map(x=>{
-      const seg = x.split(/[:：]/).map(Number);
-      return (seg[0]>0 && seg[1]>0) ? { ret: seg[0], sell: seg[1] } : null;
-    }).filter(Boolean);
-    if(parsed.length){ s.profitTiers = parsed.sort((a,b)=>a.ret-b.ret); }
-    else showToast('止盈档位格式有误，已保留原设置');
+  const ptStock = get('tierPreset');
+  const psv = ptStock ? ptStock.value : '';
+  if(psv && TIER_PRESETS[psv]){
+    s.profitTiers = TIER_PRESETS[psv].tiers.split(',').map(x=>{ const seg = x.split(':').map(Number); return { ret: seg[0], sell: seg[1] }; });
+  } else if(!s.profitTiers || !s.profitTiers.length){
+    s.profitTiers = DEFAULT_TIERS;
   }
-  if(!s.profitTiers || !s.profitTiers.length) s.profitTiers = DEFAULT_TIERS;
   if(s.shares>0 && s.currentPrice>0) s.marketValue = stockMvOf(s);
   await saveStocks();
   showToast('已保存，行情将于下一轮自动更新');
@@ -1286,13 +1281,14 @@ function fundBodyHtml(f){
         </select>
       </div>
       <div class="field full"><label>目标跌幅安全垫（%，可选，如 20 表示 -20%）</label><input type="number" data-k="targetDrawdown" value="${rr.targetDrawdown??''}"></div>
-      <div class="field full"><label>止盈策略（预设）</label>
+      <div class="field full"><label>止盈策略（收益率%:卖出%）</label>
         <select data-k="tierPreset">
-          <option value="" ${tierPresetFor(profitTiersText(f))===''?'selected':''}>自定义（使用下方档位）</option>
-          ${Object.keys(TIER_PRESETS).map(k=>`<option value="${k}" ${tierPresetFor(profitTiersText(f))===k?'selected':''}>${TIER_PRESETS[k].name}：${TIER_PRESETS[k].tiers}</option>`).join('')}
+          ${(()=>{ const cur = profitTiersText(f); const pk = tierPresetFor(cur);
+            let opts = Object.keys(TIER_PRESETS).map(k=>`<option value="${k}" ${pk===k?'selected':''}>${TIER_PRESETS[k].name}：${TIER_PRESETS[k].tiers}</option>`).join('');
+            if(!pk) opts = `<option value="__custom__" selected>自定义：${cur}</option>` + opts;
+            return opts; })()}
         </select>
       </div>
-      <div class="field full"><label>止盈档位（收益率%:卖出%，逗号分隔，选预设后可微调）</label><input type="text" data-k="profitTiersText" value="${profitTiersText(f)}"></div>
     </div>
     <div class="resume-box">
       当前连续站上60日线：<strong>${f.aboveMaStreak||0}</strong> 个交易日。点上方「自动获取净值与均线」会按完整历史回算该天数，保存时自动同步；也可用「今日是否收盘站上60日线」手动累计或清零。
@@ -1311,11 +1307,6 @@ function bindFundBody(id){
   body.querySelector('[data-action="delete"]').addEventListener('click', ()=> deleteFund(id));
   const fetchBtn = document.getElementById('autoFetchBtn-'+id);
   if(fetchBtn) fetchBtn.addEventListener('click', ()=> autoFetchFundData(id));
-  const presetSel = body.querySelector('[data-k="tierPreset"]');
-  if(presetSel) presetSel.addEventListener('change', ()=>{
-    const p = TIER_PRESETS[presetSel.value];
-    if(p) body.querySelector('[data-k="profitTiersText"]').value = p.tiers;
-  });
   // 市值 = 份额×净值，实时联动；成本两栏二选一，另一栏自动折算
   const mvInput = body.querySelector('[data-k="mvDisplay"]');
   const sharesEl = body.querySelector('[data-k="shares"]');
@@ -1499,18 +1490,13 @@ async function saveFundForm(id){
   const qdiiEl = body.querySelector('[data-k="qdiiPremium"]');
   f.qdiiPremium = qdiiEl ? qdiiEl.value : '';
   f.manualPause = get('manualPause').checked;
-  const ptText = get('profitTiersText').value.trim();
-  if(ptText === ''){
+  const ptSel = get('tierPreset');
+  const pv = ptSel ? ptSel.value : '';
+  if(pv && TIER_PRESETS[pv]){
+    f.profitTiers = TIER_PRESETS[pv].tiers.split(',').map(x=>{ const seg = x.split(':').map(Number); return { ret: seg[0], sell: seg[1] }; });
+  } else if(!f.profitTiers || !f.profitTiers.length){
     f.profitTiers = DEFAULT_TIERS;
-  } else {
-    const parsed = ptText.split(/[,，]/).map(x=>{
-      const seg = x.split(/[:：]/).map(Number);
-      return (seg[0]>0 && seg[1]>0) ? { ret: seg[0], sell: seg[1] } : null;
-    }).filter(Boolean);
-    if(parsed.length){ f.profitTiers = parsed.sort((a,b)=>a.ret-b.ret); }
-    else showToast('止盈档位格式有误，已保留原设置');
   }
-  if(!f.profitTiers || !f.profitTiers.length) f.profitTiers = DEFAULT_TIERS;
 
   const reqDays = parseInt(get('reqDays').value)||3;
   const mode = get('resumeMode').value;
