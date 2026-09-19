@@ -609,6 +609,8 @@ async function syncOnOpen(){
       try{
         await store.set(STORE_KEY, JSON.stringify(funds));
         await store.set(THEME_CAP_KEY, JSON.stringify(themeCaps));
+        await store.set(STOCKS_KEY, JSON.stringify(stocks));
+        await store.set(SETTINGS_KEY, JSON.stringify({goal, stockCap}));
         await markLocalSaved();
       }catch(e){}
       console.log('[定投信号台] 同步完成，准备渲染');
