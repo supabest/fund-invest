@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>图标生成器</title>
+<style>
+  body {
+    font-family: -apple-system, sans-serif;
+    max-width: 600px;
+    margin: 50px auto;
+    padding: 20px;
+    background: #f5f5f5;
+  }
+  .container {
+    background: white;
+    padding: 30px;
+    border-radius: 12px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+  }
+  h1 { color: #1B2436; }
+  .preview {
+    display: flex;
+    gap: 20px;
+    justify-content: center;
+    margin: 30px 0;
+    flex-wrap: wrap;
+  }
+  .icon-preview {
+    text-align: center;
+  }
+  .icon-preview canvas {
+    border-radius: 25px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  }
+  .btn {
+    background: #A87C2E;
+    color: white;
+    border: none;
+    padding: 12px 24px;
+    border-radius: 8px;
+    font-size: 16px;
+    cursor: pointer;
+    margin: 10px 5px;
+  }
+  .btn:hover {
+    background: #8B6425;
+  }
+  .instructions {
+    background: #f0f4f8;
+    padding: 15px;
+    border-radius: 8px;
+    margin: 20px 0;
+  }
+  code {
+    background: #e0e0e0;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: monospace;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>🎨 定投信号台图标生成器</h1>
+  
+  <div class="instructions">
+    <p><strong>步骤说明：</strong></p>
+    <ol>
+      <li>下方会显示预览效果</li>
+      <li>点击"下载所有图标"按钮，会自动下载 3 个 PNG 文件</li>
+      <li>将下载的 PNG 文件上传到 GitHub 项目根目录</li>
+      <li>在手机上重新添加到主屏幕即可看到自定义图标</li>
+    </ol>
+  </div>
+
+  <div class="preview" id="preview"></div>
+  
+  <div style="text-align: center;">
+    <button class="btn" onclick="downloadAll()">⬇️ 下载所有图标</button>
+  </div>
+</div>
+
+<script>
+const colors = {
+  bg: '#1B2436',
+  gold: '#A87C2E'
+};
+
+// 绘制图标的函数
+function drawIcon(ctx, size) {
+  // 背景圆角矩形
+  ctx.fillStyle = colors.bg;
+  ctx.beginPath();
+  ctx.roundRect(0, 0, size, size, size * 0.17);
+  ctx.fill();
+  
+  // 上升箭头（金色）
+  ctx.strokeStyle = colors.gold;
+  ctx.lineWidth = size * 0.047;
+  ctx.lineCap = 'round';
+  
+  // 垂直线
+  ctx.beginPath();
+  ctx.moveTo(size / 2, size * 0.25);
+  ctx.lineTo(size / 2, size * 0.7);
+  ctx.stroke();
+  
+  // 箭头头部
+  ctx.beginPath();
+  ctx.moveTo(size / 2, size * 0.55);
+  ctx.lineTo(size * 0.35, size * 0.4);
+  ctx.moveTo(size / 2, size * 0.55);
+  ctx.lineTo(size * 0.65, size * 0.4);
+  ctx.stroke();
+  
+  // 底部折线图
+  ctx.strokeStyle = colors.gold;
+  ctx.lineWidth = size * 0.031;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  
+  const points = [
+    { x: size * 0.25, y: size * 0.75 },
+    { x: size * 0.35, y: size * 0.7 },
+    { x: size * 0.45, y: size * 0.73 },
+    { x: size * 0.55, y: size * 0.67 },
+    { x: size * 0.65, y: size * 0.72 },
+    { x: size * 0.75, y: size * 0.65 }
+  ];
+  
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) {
+    ctx.lineTo(points[i].x, points[i].y);
+  }
+  ctx.stroke();
+  
+  // 装饰点
+  ctx.fillStyle = colors.gold;
+  points.forEach(p => {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, size * 0.023, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
+// 创建并显示预览
+function createPreviews() {
+  const previewDiv = document.getElementById('preview');
+  const sizes = [
+    { size: 180, label: 'iPhone' },
+    { size: 192, label: 'Android' },
+    { size: 512, label: '高分辨率' }
+  ];
+  
+  sizes.forEach(({size, label}) => {
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    canvas.id = `canvas-${size}`;
+    
+    const ctx = canvas.getContext('2d');
+    drawIcon(ctx, size);
+    
+    const div = document.createElement('div');
+    div.className = 'icon-preview';
+    div.innerHTML = `<canvas id="canvas-${size}"></canvas><div>${label} (${size}px)</div>`;
+    previewDiv.appendChild(div);
+  });
+}
+
+// 下载所有图标
+function downloadAll() {
+  const sizes = [180, 192, 512];
+  
+  sizes.forEach((size, index) => {
+    setTimeout(() => {
+      const canvas = document.getElementById(`canvas-${size}`);
+      const link = document.createElement('a');
+      link.download = `icon-${size}.png`;
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    }, index * 500);
+  });
+  
+  alert('正在下载 3 个图标文件：\n✓ icon-180.png\n✓ icon-192.png\n✓ icon-512.png\n\n下载完成后，请将它们上传到 GitHub 项目根目录！');
+}
+
+// 页面加载时创建预览
+window.addEventListener('load', createPreviews);
+</script>
+</body>
+</html>

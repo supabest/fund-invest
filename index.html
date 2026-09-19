@@ -4,6 +4,17 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <title>定投信号台</title>
+
+<!-- Apple Touch Icon - 添加到主屏幕的图标 -->
+<link rel="apple-touch-icon-preconnect" href="icon-180.png">
+<link rel="apple-touch-icon-preconnect" href="icon-192.png">
+<link rel="apple-touch-icon" sizes="180x180" href="icon-180.png">
+<link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" sizes="512x512" href="icon-512.png">
+
+<!-- Web App 模式配置 -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style>
   :root{
     --ink:#FAF8F2;
@@ -216,6 +227,7 @@
     <span id="syncText">云同步：检测中…</span>
     <span class="sync-spacer"></span>
     <button class="sync-btn" id="syncActionBtn" style="display:none;">登录</button>
+    <button class="sync-btn" id="forceSyncBtn" style="display:none;">强制同步</button>
   </div>
 </div>
 
@@ -481,20 +493,25 @@ function initCloud(tries){
 function setSyncUI(){
   const textEl = document.getElementById('syncText');
   const btn = document.getElementById('syncActionBtn');
+  const forceBtn = document.getElementById('forceSyncBtn');
   const strip = document.getElementById('syncStrip');
   if(!textEl || !btn || !strip) return;
   if(!cloudReady){
     strip.classList.add('off');
     textEl.textContent = '云同步不可用（离线或脚本被拦截）';
     btn.style.display = 'none';
+    if(forceBtn) forceBtn.style.display = 'none';
     return;
   }
   strip.classList.remove('off');
   strip.classList.toggle('err', syncState==='error');
   btn.style.display = '';
+  if(forceBtn) forceBtn.style.display = '';
+  
   if(!sbUser){
     textEl.textContent = '云同步：未登录';
     btn.textContent = '登录';
+    if(forceBtn) forceBtn.style.display = 'none';
   } else {
     if(syncState==='syncing') textEl.textContent = '云同步：同步中…';
     else if(syncState==='ok') textEl.textContent = '云同步：已同步 ' + new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'});
@@ -568,12 +585,19 @@ async function syncOnOpen(){
   if(Date.now()-lastPullAt < 3000) return;
   lastPullAt = Date.now();
   syncState = 'syncing'; setSyncUI();
+  console.log('[定投信号台] 开始云同步...');
   try{
     const { data, error } = await sb.from(TABLE_NAME).select('data,updated_at').eq('user_id', sbUser.id).maybeSingle();
     if(error) throw error;
     const localTs = localSavedAt();
+    console.log('[定投信号台] 本地保存时间:', localTs);
+    console.log('[定投信号台] 云端更新:', data ? data.updated_at : '无数据');
+    
     if(data && data.data && (!localTs || new Date(data.updated_at) >= new Date(localTs))){
       const d = data.data;
+      console.log('[定投信号台] 云端数据 - 基金数:', Array.isArray(d.funds) ? d.funds.length : 0);
+      console.log('[定投信号台] 云端数据 - 股票数:', Array.isArray(d.stocks) ? d.stocks.length : 0);
+      
       if(Array.isArray(d.funds)) funds = d.funds;
       if(d.themeCaps && typeof d.themeCaps==='object') themeCaps = {...DEFAULT_CAPS, ...d.themeCaps};
       if(Array.isArray(d.stocks)) stocks = d.stocks;
@@ -587,6 +611,7 @@ async function syncOnOpen(){
         await store.set(THEME_CAP_KEY, JSON.stringify(themeCaps));
         await markLocalSaved();
       }catch(e){}
+      console.log('[定投信号台] 同步完成，准备渲染');
       render();
       ensureBenchmarkData();
       syncState = 'ok'; syncErrMsg=''; setSyncUI();
@@ -594,11 +619,12 @@ async function syncOnOpen(){
       applyStockSnapshots();
       return;
     }
+    console.log('[定投信号台] 本地数据更新，准备推送到云端');
     await pushCloud(true);
     applyServerSnapshots();
     applyStockSnapshots();
-    applyServerSnapshots();
   }catch(e){
+    console.error('[定投信号台] 同步失败:', e);
     syncState = 'error';
     syncErrMsg = cloudErrHint(e);
     setSyncUI();
@@ -1538,12 +1564,21 @@ async function deleteFund(id){
 
 document.getElementById('syncActionBtn').addEventListener('click', async ()=>{
   if(sbUser){
-    try{ await sb.auth.signOut(); }catch(e){}
+    try{ await sb.auth.signOut(); }
+catch(e){}
     sbUser = null; syncState = 'none'; setSyncUI();
     showToast('已退出登录');
   } else {
     openLoginModal();
   }
+});
+
+// 强制同步按钮：立即从云端拉取最新数据
+document.getElementById('forceSyncBtn').addEventListener('click', async ()=>{
+  console.log('[定投信号台] 用户手动触发强制同步');
+  lastPullAt = 0; // 清除限频，允许立即同步
+  await syncOnOpen();
+  showToast('同步完成');
 });
 document.getElementById('loginSubmitBtn').addEventListener('click', async ()=>{
   const email = document.getElementById('loginEmail').value.trim();

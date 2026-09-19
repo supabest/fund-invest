@@ -1,6 +1,7 @@
 // daily-update: 每日自动更新基金净值/均线、股票收盘行情与参考指数行情（pg_cron 经 HTTP 调用）
-// v3: + 股票(沪深/港股)行情/买卖信号/总额限制 + 日经225基准
+// v4: + 分析报告（每只基金/股票：信号→状态→趋势→下一步操作），修正报告条目与状态表
 // 触发方式: POST /functions/v1/daily-update，Authorization: Bearer <DAILY_UPDATE_TOKEN>
+// 可选 body: {"force":true} 无变化也发送报告
 const GOAL_DEFAULT = 200000;
 const DEFAULT_TIERS = [{ ret: 20, sell: 10 }, { ret: 40, sell: 20 }, { ret: 60, sell: 30 }, { ret: 80, sell: 50 }];
 const DEFAULT_CAPS: Record<string, number> = { '电力/新能源': 20, '全球资源': 20, '机器人/先进制造': 15, '日本股票': 15, '均衡配置': 30, '其他': 15 };
@@ -51,7 +52,7 @@ function baseSignalLabel(dev: number | null): { label: string; multiplier: numbe
 }
 
 // 复刻页面 evalFundSignal：QDII溢价 → 手动暂停/恢复 → 主题上限(金额锚定) → 常规信号
-function evalFundSignalServer(f: any, nav: number, dev: number | null, streak: number | null, belowStreak: number | null, themeCaps: Record<string, number>, themeMv: number, goal: number) {
+function evalFundSignalServer(f: any, nav: number, dev: number | null, streak: number | null, themeCaps: Record<string, number>, themeMv: number, goal: number) {
   if (f.isQDII && f.qdiiPremium !== '' && f.qdiiPremium !== undefined && !isNaN(parseFloat(f.qdiiPremium))) {
     const prem = parseFloat(f.qdiiPremium);
     if (prem >= 2) return { label: '暂停（QDII溢价）', level: 'pause', multiplier: 0 };
@@ -174,9 +175,9 @@ Deno.serve(async (req: Request) => {
   if (!token || auth !== 'Bearer ' + token) {
     return new Response(JSON.stringify({ ok: false, error: 'unauthorized' }), { status: 401 });
   }
-  // force=true（测试用）：即使无信号变化也发送当前信号一览
   let force = false;
   try { const b = await req.json(); if (b && (b as any).force) force = true; } catch (e) { /* body 可为空 */ }
+
   const sbUrl = Deno.env.get('SUPABASE_URL') || '';
   const serviceKey = Deno.env.get('SB_SERVICE_KEY') || Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
   const H = { apikey: serviceKey, Authorization: 'Bearer ' + serviceKey, 'Content-Type': 'application/json' };
@@ -192,7 +193,6 @@ Deno.serve(async (req: Request) => {
     if (!r.ok) throw new Error(table + ' upsert failed ' + r.status + ': ' + (await r.text()).slice(0, 200));
   };
 
-  // 东财接口偶发网络抖动（IPv6 出口抽签），带重试 + 镜像域名轮换
   const fetchRetry = async (url: string, headers: any, tries = 3): Promise<Response> => {
     let lastErr: any = null;
     for (let i = 0; i < tries; i++) {
@@ -221,7 +221,7 @@ Deno.serve(async (req: Request) => {
   };
 
   try {
-    // 1. 读取所有用户的资产清单（基金 + 股票）
+    // 1. 读取所有用户的资产清单
     const stRes = await fetch(sbUrl + '/rest/v1/dingtou_state?select=user_id,data', { headers: H });
     if (!stRes.ok) throw new Error('state read failed ' + stRes.status);
     const states = await stRes.json();
@@ -231,7 +231,6 @@ Deno.serve(async (req: Request) => {
     const stockJobs: { userId: string; code: string }[] = [];
     const idxSet = new Set<string>();
     for (const st of states) {
-      const goal = (st.data && st.data.goal) || GOAL_DEFAULT;
       const funds = (st.data && st.data.funds) || [];
       for (const f of funds) {
         const code = String(f.fundCode || '').trim();
@@ -254,11 +253,32 @@ Deno.serve(async (req: Request) => {
       return devs.length ? devs.reduce((a, b) => a + b, 0) / devs.length : null;
     };
 
-    // 2. 基金：净值/均线/信号（含卖出维度）
+    // 2. 先取参考指数行情与档位（基金/股票报告的建议金额需要用到系数）
+    const idxLevels: Record<string, { label: string; coef: number }> = {};
+    for (const k of idxSet) {
+      try {
+        const kk = await fetchKline(BENCH[k].secid, 1, 130);
+        const close = kk.close;
+        const ma60 = ma(kk.closes, 60);
+        const ma120 = ma(kk.closes, 120);
+        const devs: number[] = [];
+        if (ma60) devs.push((close - ma60) / ma60 * 100);
+        if (ma120) devs.push((close - ma120) / ma120 * 100);
+        const dev = devs.length ? devs.reduce((a, b) => a + b, 0) / devs.length : null;
+        const lv = marketLevel(dev, BENCH[k].th);
+        idxLevels[k] = { label: lv.label, coef: lv.coef };
+        await post('index_history', 'idx_code,idx_date', [{ idx_code: k, idx_date: kk.date, close }]);
+        summary.indices.push({ idx: k, ok: true, date: kk.date, close, level: lv.label });
+      } catch (e) {
+        summary.indices.push({ idx: k, ok: false, error: String((e as any)?.message || e).slice(0, 140) });
+      }
+    }
+
+    // 3. 基金：净值/均线/信号 + 分析报告数据
     const fundUniq = [...new Set(fundJobs.map(j => j.code))];
-    const perUserFundItems: Record<string, string[]> = {};
     const fundSignalRows: any[] = [];
     const fundMeta: Record<string, { name: string; nav: number; navDate: string }> = {};
+    const fundReport: Record<string, any[]> = {};
     for (const code of fundUniq) {
       try {
         const pzRes = await fetchRetry('https://fund.eastmoney.com/pingzhongdata/' + code + '.js?dt=' + Date.now(), {
@@ -280,16 +300,17 @@ Deno.serve(async (req: Request) => {
         const ma120 = ma(navs, 120);
         const dev = avgDev(close, ma60, ma120);
         const above = ma60 === null ? null : close >= ma60;
-        let streak: number | null = null, belowStreak: number | null = null;
-        if (ma60 !== null) {
-          streak = 0; belowStreak = 0;
+        let streak: number | null = null;
+        if (navs.length >= 60) {
+          streak = 0;
           for (let i = navs.length - 1; i >= 59; i--) {
             const m = navs.slice(i - 59, i + 1).reduce((a: number, b: number) => a + b, 0) / 60;
-            if (navs[i] >= m) { if (belowStreak === 0) streak++; else break; } else { if (streak === 0) belowStreak++; else break; }
+            if (navs[i] >= m) streak++; else break;
           }
         }
-        const users = [...new Set(fundJobs.filter(j => j.code === code).map(j => j.userId))];
         fundMeta[code] = { name: nameMatch ? nameMatch[1] : '', nav: close, navDate };
+
+        const users = [...new Set(fundJobs.filter(j => j.code === code).map(j => j.userId))];
         for (const userId of users) {
           const st = states.find((s: any) => s.user_id === userId);
           const goal = (st.data && st.data.goal) || GOAL_DEFAULT;
@@ -302,22 +323,34 @@ Deno.serve(async (req: Request) => {
             const xm = (isSelf && f.shares > 0 && close > 0) ? fm : (parseFloat(x.marketValue) || 0);
             return (x.theme === f.theme) ? s + (parseFloat(xm) || 0) : s;
           }, 0);
-          const themeMv = themeSum;
-          const sig = evalFundSignalServer(f, close, dev, streak, belowStreak, themeCaps, themeMv, goal);
+          const sig = evalFundSignalServer(f, close, dev, streak, themeCaps, themeSum, goal);
           const ret = computeReturn(close, f);
           const tiers = (f.profitTiers && f.profitTiers.length) ? f.profitTiers : DEFAULT_TIERS;
           let newTier: number | null = null;
           if (ret !== null && ret > 0) {
             for (const t of tiers) { if (ret >= t.ret && !(f.profitTaken || []).includes(t.ret)) newTier = t.ret; }
           }
-          (perUserFundItems[userId] = perUserFundItems[userId] || []);
           const label = sig.label + (newTier !== null ? '｜止盈' + newTier + '%达标' : '');
-          fundSignalRows.push({ user_id: userId, code, label, profit_tier: newTier, updated_at: new Date().toISOString() });
+          fundSignalRows.push({ user_id: userId, code, label, profit_tier: newTier, benchmark: f.benchmark || 'HS300', updated_at: new Date().toISOString() });
+
+          // 分析报告数据（大盘系数已知）
+          const bkey = f.benchmark || 'HS300';
+          const bl = idxLevels[bkey] || null;
+          const coef = (bl && sig.multiplier > 0) ? bl.coef : 1;
+          const amount = (parseFloat(f.baseAmount) || 0) * sig.multiplier * coef;
+          const taken = f.profitTaken || [];
+          const nextTier = tiers.find((x: any) => !taken.includes(x.ret)) || null;
+          (fundReport[userId] = fundReport[userId] || []).push({
+            code, name: nameMatch ? nameMatch[1] : (f.name || ''), nav: close, navDate,
+            dev, ma60, ma120, streak, label: sig.label, multiplier: sig.multiplier,
+            amount: Math.round(amount), benchmarkName: bl ? BENCH[bkey].name : '', benchmarkLevel: bl ? bl.label : '',
+            ret, nextTier, resumeReady: !!sig.resumeReady, theme: f.theme || ''
+          });
 
           await post('fund_nav_history', 'user_id,code,nav_date', [{ user_id: userId, code, nav_date: navDate, nav: close, ma60, ma120, dev_pct: dev, above_ma60: above }]);
           await post('fund_latest', 'user_id,code', [{
             user_id: userId, code, name: nameMatch ? nameMatch[1] : null, nav: close, nav_date: navDate,
-            ma60, ma120, dev_pct: dev, streak, below_streak: belowStreak, updated_at: new Date().toISOString()
+            ma60, ma120, dev_pct: dev, streak, updated_at: new Date().toISOString()
           }]);
         }
         summary.funds.push({ code, ok: true, nav_date: navDate, nav: close, dev: dev === null ? null : Math.round(dev * 1000) / 1000, streak });
@@ -326,10 +359,10 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // 3. 股票（A股/港股）：收盘价/均线/买卖信号
+    // 4. 股票（A股/港股）：收盘价/均线/信号 + 分析报告数据
     const stockUniq = [...new Set(stockJobs.map(j => j.code))];
-    const perUserStockItems: Record<string, string[]> = {};
     const stockSignalRows: any[] = [];
+    const stockReport: Record<string, any[]> = {};
     for (const code of stockUniq) {
       try {
         const secid = code.length === 5 ? ('116.' + code) : (code.startsWith('6') ? ('1.' + code) : ('0.' + code));
@@ -351,7 +384,6 @@ Deno.serve(async (req: Request) => {
           const st = states.find((s: any) => s.user_id === userId);
           const arr = (st.data && st.data.stocks) || [];
           const s = arr.find((x: any) => String(x.code || '').trim() === code) || {};
-          const smv = (s.shares > 0) ? s.shares * close : 0;
           const ret = stockReturn(s, close);
           const tier = baseSignalLabel(dev);
           const tiers = (s.profitTiers && s.profitTiers.length) ? s.profitTiers : DEFAULT_TIERS;
@@ -359,21 +391,15 @@ Deno.serve(async (req: Request) => {
           if (ret !== null && ret > 0) { for (const t of tiers) { if (ret >= t.ret && !(s.profitTaken || []).includes(t.ret)) newTier = t.ret; } }
 
           const label = tier.label + (newTier !== null ? '｜止盈' + newTier + '%' : '');
-          const prevRes = await fetch(sbUrl + '/rest/v1/stock_signal_state?select=tier,break_hit,stop_hit,profit_tier&user_id=eq.' + userId + '&code=eq.' + code, { headers: H });
-          const prevArr: any[] = prevRes.ok ? await prevRes.json() : [];
-          const p = prevArr[0] || null;
-          const sm = arr.find((x: any) => String(x.code || '').trim() === code);
-          // 名称：用户填写 > K线响应自带名称；纯数字视为历史污染数据，忽略以打断"名称=代码"循环
-          const cleanName = (v: any) => { const t = String(v || '').trim(); return (t && !/^\d+$/.test(t)) ? t : ''; };
-          const sname = cleanName(s.name) || cleanName(sm?.name) || k.name || '';
-          const displayName = sname || code;
-          if (!p) {
-            (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + displayName + '：买入参考档位 <b>' + tier.label + '</b>' + (dev === null ? '' : '（偏离 ' + fmtSigned(dev) + '）'));
-          } else {
-            if (p.tier !== tier.label) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + displayName + '：买入参考档位变化 ' + p.tier + ' → <b>' + tier.label + '</b>' + (dev === null ? '' : '（偏离 ' + fmtSigned(dev) + '）'));
-            if (newTier !== null && p.profit_tier !== newTier) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('【' + code + '】' + displayName + '：收益率 <b>' + fmtSigned(ret) + '</b> 达到止盈档 +' + newTier + '%，建议分批止盈');
-          }
           stockSignalRows.push({ user_id: userId, code, tier: tier.label, profit_tier: newTier, updated_at: new Date().toISOString() });
+
+          const sname = s.name || k.name || '';
+          const taken = s.profitTaken || [];
+          const nextTier = tiers.find((x: any) => !taken.includes(x.ret)) || null;
+          (stockReport[userId] = stockReport[userId] || []).push({
+            code, name: sname || code, close, date: k.date, dev, ma60, ma120, below,
+            tier: tier.label, ret, nextTier
+          });
 
           await post('stock_history', 'user_id,code,price_date', [{ user_id: userId, code, price_date: k.date, close, ma20, ma60, ma120, dev_pct: dev }]);
           await post('stock_latest', 'user_id,code', [{
@@ -387,7 +413,7 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // 4. 股票总仓位上限提醒
+    // 5. 股票总仓位上限提醒
     for (const st of states) {
       const userId = st.user_id;
       const arr = (st.data && st.data.stocks) || [];
@@ -405,94 +431,116 @@ Deno.serve(async (req: Request) => {
       const prevRes = await fetch(sbUrl + '/rest/v1/stock_signal_state?select=code,tier&user_id=eq.' + userId + '&code=eq.__STOCK_CAP__', { headers: H });
       const prevArr: any[] = prevRes.ok ? await prevRes.json() : [];
       const wasOver = prevArr.length ? prevArr[0].tier === 'over' : false;
-      if (over && !wasOver) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('股票总仓位 <b>¥' + Math.round(total).toLocaleString() + '</b> 已超过总额上限 ¥' + Math.round(cap).toLocaleString() + '，建议暂停买入');
-      if (!over && wasOver) (perUserStockItems[userId] = perUserStockItems[userId] || []).push('股票总仓位回落至上限内（当前 ¥' + Math.round(total).toLocaleString() + ' / ¥' + Math.round(cap).toLocaleString() + '）');
       stockSignalRows.push({ user_id: userId, code: '__STOCK_CAP__', tier: over ? 'over' : 'ok', profit_tier: null, updated_at: new Date().toISOString() });
-    }
-
-    // 5. 指数行情 + 档位
-    const idxLevels: Record<string, string> = {};
-    for (const k of idxSet) {
-      try {
-        const kk = await fetchKline(BENCH[k].secid, 1, 130);
-        const close = kk.close;
-        const ma60 = ma(kk.closes, 60);
-        const ma120 = ma(kk.closes, 120);
-        const devs: number[] = [];
-        if (ma60) devs.push((close - ma60) / ma60 * 100);
-        if (ma120) devs.push((close - ma120) / ma120 * 100);
-        const dev = devs.length ? devs.reduce((a, b) => a + b, 0) / devs.length : null;
-        const lv = marketLevel(dev, BENCH[k].th);
-        idxLevels[k] = lv.label;
-        await post('index_history', 'idx_code,idx_date', [{ idx_code: k, idx_date: kk.date, close }]);
-        summary.indices.push({ idx: k, ok: true, date: kk.date, close, level: lv.label });
-      } catch (e) {
-        summary.indices.push({ idx: k, ok: false, error: String((e as any)?.message || e).slice(0, 140) });
+      if (over && !wasOver) {
+        (stockReport[userId] = stockReport[userId] || []).push({ capAlert: '股票总仓位 ¥' + Math.round(total).toLocaleString() + ' 已超过总额上限 ¥' + Math.round(cap).toLocaleString() + '，建议暂停买入' });
       }
     }
 
-    // 6. 与昨日信号对比，生成通知项并发邮件
-    const allItems: string[] = [];
-    const perUserAll: Record<string, string[]> = {};
-    for (const userId of Object.keys(perUserFundItems)) perUserAll[userId] = perUserFundItems[userId].concat(perUserStockItems[userId] || []);
-    for (const userId of Object.keys(perUserStockItems)) if (!perUserAll[userId]) perUserAll[userId] = perUserStockItems[userId];
+    // 6. 分析报告 + 与昨日信号对比的变化提醒 + 邮件
+    for (const userId of new Set([...Object.keys(fundReport), ...Object.keys(stockReport)])) {
+      const st = states.find((s: any) => s.user_id === userId);
+      const items: string[] = [];
 
-    for (const userId of Object.keys(perUserAll)) {
-      const items = perUserAll[userId];
-      // signal_state 只存基金信号（股票信号有自己的 stock_signal_state）
+      // 6a. 与昨日 signal_state 对比：基金常规信号变化
       const todayRows = fundSignalRows.filter(r => r.user_id === userId);
       const prevRes = await fetch(sbUrl + '/rest/v1/signal_state?select=code,label&user_id=eq.' + userId, { headers: H });
       const prev: any[] = prevRes.ok ? await prevRes.json() : [];
       const prevMap: Record<string, string> = {};
       prev.forEach((p: any) => prevMap[p.code] = p.label);
       const isFirstRun = prev.length === 0;
-
-      const stateRows = todayRows.map(r => ({ user_id: userId, code: r.code, label: r.label, profit_tier: r.profit_tier, updated_at: new Date().toISOString() }));
+      const stateRows = todayRows.map(r => ({ user_id: userId, code: r.code, label: r.label, profit_tier: r.profit_tier, benchmark: r.benchmark, updated_at: new Date().toISOString() }));
       await post('signal_state', 'user_id,code', stateRows);
-
-      // 基金常规信号变化（label 前半段变化，不含卖出标记）
       for (const r of stateRows) {
-        if (r.code === '__STOCK_CAP__') continue;
         const p = prevMap[r.code];
         const curBase = String(r.label).split('｜')[0];
         const prevBase = p ? String(p).split('｜')[0] : null;
-        const meta = fundMeta[r.code];
-        const nameStr = meta && meta.name ? ' ' + meta.name : '';
-        const navStr = meta ? '（净值 ' + meta.nav + '，' + meta.navDate + '）' : '';
-        if (p && prevBase !== curBase) {
-          items.unshift('【' + r.code + nameStr + '】基金信号变化：' + prevBase + ' → <b>' + curBase + '</b>' + navStr);
-        } else if (!p) {
-          items.unshift('【' + r.code + nameStr + '】基金当前信号：<b>' + curBase + '</b>' + navStr);
-        }
+        if (p && prevBase !== curBase) items.push('【' + r.code + '】基金信号变化：' + prevBase + ' → <b>' + curBase + '</b>');
       }
 
-      // 指数档位变化
+      // 6b. 指数档位变化
       const idxPrevRes = await fetch(sbUrl + '/rest/v1/index_state?select=idx_code,label', { headers: H });
       const idxPrev: any[] = idxPrevRes.ok ? await idxPrevRes.json() : [];
       const idxPrevMap: Record<string, string> = {};
       idxPrev.forEach((p: any) => idxPrevMap[p.idx_code] = p.label);
       const idxRows: any[] = [];
       for (const k of Object.keys(idxLevels)) {
-        const label = idxLevels[k];
-        if (idxPrevMap[k] && idxPrevMap[k] !== label) items.push('大盘参考：' + BENCH[k].name + ' 档位变化 ' + idxPrevMap[k] + ' → <b>' + label + '</b>');
-        idxRows.push({ idx_code: k, label, updated_at: new Date().toISOString() });
+        if (idxPrevMap[k] && idxPrevMap[k] !== idxLevels[k].label) items.push('大盘参考：' + BENCH[k].name + ' 档位变化 ' + idxPrevMap[k] + ' → <b>' + idxLevels[k].label + '</b>');
+        idxRows.push({ idx_code: k, label: idxLevels[k].label, updated_at: new Date().toISOString() });
       }
       if (idxRows.length) await post('index_state', 'idx_code', idxRows);
 
       summary.notifications.push({ userId: userId.slice(0, 8), items: items.length, sent: false });
 
+      // 6c. 组装分析报告邮件：信号 → 状态 → 趋势 → 操作
+      const dateStr = new Date().toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
+      const title = isFirstRun ? '定投分析报告（首次启用）' : (items.length ? '定投分析报告 · ' + items.length + ' 条信号变化' : '定投分析报告 · 信号平稳');
+
+      const fundBlock = (fundReport[userId] || []).map(r => {
+        const zone = r.dev === null ? '数据不足' : (r.dev <= -15 ? '深度低位' : r.dev <= -5 ? '低位区' : r.dev < 3 ? '中性区间' : r.dev < 10 ? '偏高区' : '明显高位');
+        const benchmarkStr = r.benchmarkLevel ? '｜基准 ' + r.benchmarkName + ' ' + r.benchmarkLevel : '';
+        const statusStr = '净值 ' + r.nav + '（' + r.navDate + '）｜较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (r.streak !== null ? '｜连续 ' + r.streak + ' 日站上60日线' : '') + benchmarkStr;
+        const signalStr = '信号 <b>' + r.label + '</b>' + (r.multiplier > 0 && r.amount > 0 ? ' · 本期建议买入 <b>¥' + r.amount + '</b>/期' : ' · 暂停买入');
+        let actionStr: string;
+        if (r.label.includes('QDII溢价')) actionStr = '溢价率过高，暂停买入，等待溢价回落';
+        else if (r.label.includes('仓位超限')) actionStr = '主题仓位已达上限，停止买入该主题；浮盈可按止盈档分批兑现';
+        else if (r.label === '暂停中') actionStr = '已按你的要求暂停定投，恢复条件满足时系统会提醒你';
+        else if (r.resumeReady) actionStr = '恢复条件已满足，可恢复定投';
+        else if (r.dev === null) actionStr = '自动获取数据后即可分析';
+        else if (r.dev <= -15) actionStr = '加大买入，积极拉低成本';
+        else if (r.dev <= -5) actionStr = '维持或加大定投节奏';
+        else if (r.dev < 3) actionStr = '按计划定投，持有不动';
+        else if (r.dev < 10) actionStr = '放缓定投节奏，关注止盈档位';
+        else actionStr = '停止加码，浮盈分批止盈锁定收益';
+        const profitStr = r.ret === null ? '' : ('当前收益率 ' + fmtSigned(r.ret) + (r.nextTier ? '｜下一止盈档 +' + r.nextTier.ret + '%（卖' + r.nextTier.sell + '%）' : '｜各止盈档已执行完毕'));
+        return '<li style="margin:12px 0;padding:10px 12px;background:#FAF8F2;border-radius:8px;">'
+          + '<b>【' + r.code + '】' + r.name + '</b>'
+          + '<div style="margin:4px 0;">📊 信号：<b style="color:#A87C2E;">' + r.label + '</b>' + (r.multiplier > 0 && r.amount > 0 ? ' · 本期建议买入 <b>¥' + r.amount + '</b>/期' : ' · 暂停买入') + '</div>'
+          + '<div style="color:#707C8C;font-size:13px;">📈 ' + statusStr + '</div>'
+          + '<div style="color:#707C8C;font-size:13px;">💰 ' + profitStr + '</div>'
+          + '<div style="margin-top:4px;">👉 ' + actionStr + '</div>'
+          + '</li>';
+      }).join('');
+
+      const stockBlock = (stockReport[userId] || []).map(r => {
+        if (r.capAlert) return '<li style="margin:12px 0;padding:10px 12px;background:#B14A341A;border-radius:8px;color:#B14A34;">⚠️ ' + r.capAlert + '</li>';
+        const zone = r.dev === null ? '数据不足' : (r.dev <= -15 ? '深度低位' : r.dev <= -5 ? '低位区' : r.dev < 3 ? '中性区间' : r.dev < 10 ? '偏高区' : '明显高位');
+        let actionStr: string;
+        if (r.dev === null) actionStr = '等待行情数据';
+        else if (r.dev <= -15) actionStr = '深度低位，可分批买入拉低成本';
+        else if (r.dev <= -5) actionStr = '低位区，可考虑分批买入';
+        else if (r.dev < 3) actionStr = '持有观察';
+        else if (r.dev < 10) actionStr = '偏高区，不再追高，关注止盈档';
+        else actionStr = '明显高位，浮盈分批止盈锁定收益';
+        const trendStr = r.ma60 ? (r.below > 0 ? '已连续 ' + r.below + ' 日低于60日线' : (r.above > 0 ? '已连续 ' + r.above + ' 日站上60日线' : '')) : '';
+        const profitStr = r.ret === null ? '' : ('当前收益率 ' + fmtSigned(r.ret) + (r.nextTier ? '｜下一止盈档 +' + r.nextTier.ret + '%（卖' + r.nextTier.sell + '%）' : ''));
+        return '<li style="margin:12px 0;padding:10px 12px;background:#FAF8F2;border-radius:8px;">'
+          + '<b>【' + r.code + '】' + r.name + '</b>'
+          + '<div style="margin:4px 0;">📊 买入参考：<b style="color:#A87C2E;">' + r.tier + '</b> · 现价 ' + r.close + '（' + r.date + '）</div>'
+          + '<div style="color:#707C8C;font-size:13px;">📈 较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (trendStr ? '｜' + trendStr : '') + '</div>'
+          + '<div style="color:#707C8C;font-size:13px;">💰 ' + profitStr + '</div>'
+          + '<div style="margin-top:4px;">👉 ' + actionStr + '</div>'
+          + '</li>';
+      }).join('');
+
+      const html = '<div style="font-family:-apple-system,PingFang SC,Arial;max-width:600px;margin:0 auto;font-size:14px;color:#1B2436;line-height:1.7;">'
+        + '<h2 style="font-size:18px;border-bottom:2px solid #A87C2E;padding-bottom:8px;">定投信号台 · ' + title + '</h2>'
+        + '<p style="color:#707C8C;">' + dateStr + ' 收盘数据已自动更新</p>'
+        + (items.length
+          ? '<h3 style="font-size:16px;margin:20px 0 12px;">📢 今日重要提醒</h3><ul style="padding-left:18px;margin:12px 0;">' + items.map(i => '<li style="margin:8px 0;">' + i + '</li>').join('') + '</ul>'
+          : '<p style="color:#3F8A68;">✅ 今日无信号变化，各资产按计划执行即可。</p>')
+        + '<h3 style="font-size:16px;margin:20px 0 12px;">📊 基金分析</h3>'
+        + (fundBlock ? '<ul style="padding-left:0;list-style:none;">' + fundBlock + '</ul>' : '<p style="color:#707C8C;">暂无基金</p>')
+        + '<h3 style="font-size:16px;margin:20px 0 12px;">💹 股票分析</h3>'
+        + (stockBlock ? '<ul style="padding-left:0;list-style:none;">' + stockBlock + '</ul>' : '<p style="color:#707C8C;">暂无股票（可在股票标签页添加）</p>')
+        + '<div style="background:#F1EDE3;padding:14px;border-radius:8px;margin:16px 0;font-size:13px;">'
+        + '<b>📖 信号规则速查</b>：双倍/加强 = 加大买入拉低成本｜正常 = 按计划定投｜减半/暂停 = 少买或停买<br>'
+        + '止盈档位达到时系统会提醒分批卖出；大盘参考指数升至高位会降低买入系数。'
+        + '</div>'
+        + '<p style="color:#707C8C;font-size:12px;">本邮件由定投信号台自动发送 · 每日 20:30/22:30 自动更新</p>'
+        + '</div>';
+
       if (items.length > 0 || isFirstRun || force) {
-        const dateStr = new Date().toLocaleDateString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' });
-        const title = isFirstRun ? '定投信号基线快照（首次启用通知）' : (items.length ? '定投信号变化提醒（' + items.length + ' 条）' : '定投信号一览（无变化）');
-        const html = '<div style="font-family:-apple-system,PingFang SC,Arial;max-width:560px;margin:0 auto;font-size:14px;color:#1B2436;line-height:1.7;">'
-          + '<h2 style="font-size:18px;border-bottom:2px solid #A87C2E;padding-bottom:8px;">定投信号台 · ' + title + '</h2>'
-          + '<p style="color:#707C8C;">' + dateStr + ' 收盘数据已自动更新</p>'
-          + (items.length
-            ? '<ul style="padding-left:18px;margin:12px 0;">' + items.map(i => '<li style="margin:8px 0;">' + i + '</li>').join('') + '</ul>'
-            : '<p>各基金当前信号：</p><ul style="padding-left:18px;">' + stateRows.map(r => { const meta = fundMeta[r.code]; return '<li>【' + r.code + (meta && meta.name ? ' ' + meta.name : '') + '】：<b>' + String(r.label).split('｜')[0] + '</b>' + (meta ? '（净值 ' + meta.nav + '，' + meta.navDate + '）' : '') + '</li>'; }).join('') + '</ul>')
-          + '<hr style="border:none;border-top:1px solid #eee;margin:16px 0;">'
-          + '<p style="color:#707C8C;font-size:12px;">本邮件由定投信号台自动发送 · 每日 20:30/22:30 自动更新 · 仅信号变化时提醒</p>'
-          + '</div>';
         try {
           await sendMail('【定投信号台】' + title + ' - ' + dateStr, html);
           summary.notifications[summary.notifications.length - 1].sent = true;

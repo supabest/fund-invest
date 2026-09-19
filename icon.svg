@@ -1,0 +1,18 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- 背景圆角矩形 -->
+  <rect width="512" height="512" rx="88" fill="#1B2436"/>
+  
+  <!-- 上升箭头（金色） -->
+  <path d="M256 128 L256 352" stroke="#A87C2E" stroke-width="24" stroke-linecap="round"/>
+  <path d="M256 224 L192 160 M256 224 L320 160" stroke="#A87C2E" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  
+  <!-- 底部折线图 -->
+  <polyline points="128,380 180,340 230,360 280,300 330,320 384,260" 
+            fill="none" stroke="#A87C2E" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+  
+  <!-- 装饰点 -->
+  <circle cx="180" cy="340" r="12" fill="#A87C2E"/>
+  <circle cx="230" cy="360" r="12" fill="#A87C2E"/>
+  <circle cx="280" cy="300" r="12" fill="#A87C2E"/>
+  <circle cx="330" cy="320" r="12" fill="#A87C2E"/>
+</svg>
