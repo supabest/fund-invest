@@ -455,7 +455,9 @@ Deno.serve(async (req: Request) => {
         const p = prevMap[r.code];
         const curBase = String(r.label).split('｜')[0];
         const prevBase = p ? String(p).split('｜')[0] : null;
-        if (p && prevBase !== curBase) items.push('【' + r.code + '】基金信号变化：' + prevBase + ' → <b>' + curBase + '</b>');
+        const meta = fundMeta[r.code];
+        const nameStr = meta && meta.name ? ' ' + meta.name : '';
+        if (p && prevBase !== curBase) items.push('【' + r.code + nameStr + '】基金信号变化：' + prevBase + ' → <b>' + curBase + '</b>');
       }
 
       // 6b. 指数档位变化
@@ -479,7 +481,16 @@ Deno.serve(async (req: Request) => {
       const fundBlock = (fundReport[userId] || []).map(r => {
         const zone = r.dev === null ? '数据不足' : (r.dev <= -15 ? '深度低位' : r.dev <= -5 ? '低位区' : r.dev < 3 ? '中性区间' : r.dev < 10 ? '偏高区' : '明显高位');
         const benchmarkStr = r.benchmarkLevel ? '｜基准 ' + r.benchmarkName + ' ' + r.benchmarkLevel : '';
-        const statusStr = '净值 ' + r.nav + '（' + r.navDate + '）｜较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (r.streak !== null ? '｜连续 ' + r.streak + ' 日站上60日线' : '') + benchmarkStr;
+        // 下一买入档位：按偏离度边界换算成具体净值触发价
+        let buyNextStr = '';
+        if (r.dev !== null && r.ma60 && r.ma120) {
+          const maAvg = (r.ma60 + r.ma120) / 2;
+          if (r.dev < -15) buyNextStr = '｜已达最高买入档（双倍）';
+          else if (r.dev < -5) buyNextStr = '｜下一买入档：净值跌至 ' + (maAvg * 0.85).toFixed(4) + '（-15%）升为双倍';
+          else if (r.dev < 3) buyNextStr = '｜下一买入档：净值跌至 ' + (maAvg * 0.95).toFixed(4) + '（-5%）升为加强';
+          else buyNextStr = '｜下一买入档：净值回落至 ' + (maAvg * 1.03).toFixed(4) + '（+3%内）恢复正常';
+        }
+        const statusStr = '净值 ' + r.nav + '（' + r.navDate + '）｜较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (r.streak !== null ? '｜连续 ' + r.streak + ' 日站上60日线' : '') + benchmarkStr + buyNextStr;
         const signalStr = '信号 <b>' + r.label + '</b>' + (r.multiplier > 0 && r.amount > 0 ? ' · 本期建议买入 <b>¥' + r.amount + '</b>/期' : ' · 暂停买入');
         let actionStr: string;
         if (r.label.includes('QDII溢价')) actionStr = '溢价率过高，暂停买入，等待溢价回落';
