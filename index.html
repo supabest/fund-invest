@@ -638,7 +638,7 @@ async function pushCloud(silent){
   if(!cloudReady || !sbUser) return;
   syncState = 'syncing'; setSyncUI();
   try{
-    const { error } = await sb.from(TABLE_NAME).upsert({ user_id: sbUser.id, data: { funds, themeCaps, stocks, settings: { goal, stockCap } } });
+    const { error } = await sb.from(TABLE_NAME).upsert({ user_id: sbUser.id, data: { funds, themeCaps, stocks, settings: { goal, stockCap } }, updated_at: new Date().toISOString() });
     if(error) throw error;
     await markLocalSaved();
     syncState = 'ok'; syncErrMsg='';
