@@ -14,7 +14,7 @@ const BENCH: Record<string, { secid: string; name: string; th: number[] }> = {
   HSTECH: { secid: '124.HSTECH', name: '恒生科技', th: [-12, -5, 5, 12] },
   N225: { secid: '100.N225', name: '日经225', th: [-8, -3, 3, 8] }
 };
-const KLINE_HOSTS = ['push2his.eastmoney.com', '1.push2his.eastmoney.com', '23.push2his.eastmoney.com', '92.push2his.eastmoney.com'];
+const KLINE_HOSTS = ['push2his.eastmoney.com', '1.push2his.eastmoney.com', '23.push2his.eastmoney.com', '33.push2his.eastmoney.com', '44.push2his.eastmoney.com', '92.push2his.eastmoney.com', '98.push2his.eastmoney.com', '99.push2his.eastmoney.com'];
 
 function marketLevel(dev: number | null, th: number[]) {
   if (dev === null) return { level: 'neutral', label: '中性', coef: 1 };
@@ -193,14 +193,17 @@ Deno.serve(async (req: Request) => {
     if (!r.ok) throw new Error(table + ' upsert failed ' + r.status + ': ' + (await r.text()).slice(0, 200));
   };
 
-  const fetchRetry = async (url: string, headers: any, tries = 3): Promise<Response> => {
+  const fetchRetry = async (url: string, headers: any, tries = 3, timeoutMs = 9000): Promise<Response> => {
     let lastErr: any = null;
     for (let i = 0; i < tries; i++) {
+      const ctrl = new AbortController();
+      const to = setTimeout(() => ctrl.abort(), timeoutMs);
       try {
-        const r = await fetch(url + (url.includes('?') ? '&' : '?') + '_r=' + Date.now(), { headers });
+        const r = await fetch(url + (url.includes('?') ? '&' : '?') + '_r=' + Date.now(), { headers, signal: ctrl.signal });
+        clearTimeout(to);
         if (r.ok) return r;
         lastErr = new Error('HTTP ' + r.status);
-      } catch (e) { lastErr = e; }
+      } catch (e) { clearTimeout(to); lastErr = (e && (e as any).name === 'AbortError') ? new Error('timeout ' + timeoutMs + 'ms') : e; }
       await new Promise(res => setTimeout(res, 1200 * (i + 1)));
     }
     throw lastErr;
@@ -229,6 +232,7 @@ Deno.serve(async (req: Request) => {
 
     const fundJobs: { userId: string; code: string }[] = [];
     const stockJobs: { userId: string; code: string }[] = [];
+    const invalidStocks: Record<string, { code: string; name: string }[]> = {};
     const idxSet = new Set<string>();
     for (const st of states) {
       const funds = (st.data && st.data.funds) || [];
@@ -242,6 +246,7 @@ Deno.serve(async (req: Request) => {
       for (const s of stocks) {
         const code = String(s.code || '').trim();
         if (/^\d{5,6}$/.test(code)) stockJobs.push({ userId: st.user_id, code });
+        else (invalidStocks[st.user_id] = invalidStocks[st.user_id] || []).push({ code: code || '(空)', name: s.name || '' });
       }
     }
 
@@ -409,7 +414,16 @@ Deno.serve(async (req: Request) => {
         }
         summary.stocks.push({ code, ok: true, date: k.date, close });
       } catch (e) {
-        summary.stocks.push({ code, ok: false, error: String((e as any)?.message || e).slice(0, 140) });
+        const msg = String((e as any)?.message || e).slice(0, 140);
+        summary.stocks.push({ code, ok: false, error: msg });
+        const errUsers = [...new Set(stockJobs.filter(j => j.code === code).map(j => j.userId))];
+        for (const uid of errUsers) {
+          const stt = states.find((s: any) => s.user_id === uid);
+          const arr = (stt && stt.data && stt.data.stocks) || [];
+          const rec = arr.find((x: any) => String(x.code || '').trim() === code);
+          const nm = (rec && rec.name) || '';
+          (stockReport[uid] = stockReport[uid] || []).push({ fetchError: '【' + code + (nm ? ' ' + nm : '') + '】行情抓取失败：' + msg + '（本次未纳入分析，下次运行会自动重试；若持续失败请核对该代码是否为有效 A股6位/港股5位）' });
+        }
       }
     }
 
@@ -438,9 +452,16 @@ Deno.serve(async (req: Request) => {
     }
 
     // 6. 分析报告 + 与昨日信号对比的变化提醒 + 邮件
-    for (const userId of new Set([...Object.keys(fundReport), ...Object.keys(stockReport)])) {
+    for (const userId of new Set([...Object.keys(fundReport), ...Object.keys(stockReport), ...Object.keys(invalidStocks)])) {
       const st = states.find((s: any) => s.user_id === userId);
       const items: string[] = [];
+
+      // 将“代码无效”的股票并入告警，确保误填代码不再被静默丢弃
+      for (const iv of (invalidStocks[userId] || [])) {
+        (stockReport[userId] = stockReport[userId] || []).push({ fetchError: '【' + iv.code + (iv.name ? ' ' + iv.name : '') + '】代码格式无效（应为 A股6位/港股5位纯数字），未能获取行情，请在股票页修正' });
+      }
+      const stockWarnCount = (stockReport[userId] || []).filter((r: any) => r.fetchError).length;
+      if (stockWarnCount > 0) items.push('⚠️ 有 ' + stockWarnCount + ' 只股票行情获取异常，详见下方股票分析');
 
       // 6a. 与昨日 signal_state 对比：基金常规信号变化
       const todayRows = fundSignalRows.filter(r => r.user_id === userId);
@@ -514,6 +535,7 @@ Deno.serve(async (req: Request) => {
       }).join('');
 
       const stockBlock = (stockReport[userId] || []).map(r => {
+        if (r.fetchError) return '<li style="margin:12px 0;padding:10px 12px;background:#B14A341A;border-radius:8px;color:#B14A34;">⚠️ ' + r.fetchError + '</li>';
         if (r.capAlert) return '<li style="margin:12px 0;padding:10px 12px;background:#B14A341A;border-radius:8px;color:#B14A34;">⚠️ ' + r.capAlert + '</li>';
         const zone = r.dev === null ? '数据不足' : (r.dev <= -15 ? '深度低位' : r.dev <= -5 ? '低位区' : r.dev < 3 ? '中性区间' : r.dev < 10 ? '偏高区' : '明显高位');
         let actionStr: string;
