@@ -1377,13 +1377,16 @@ function toggleFundBody(id){
 function fundBodyHtml(f){
   const rr = f.resumeRule || {requireDays:3, mode:'ma_only', targetDrawdown:''};
   return `
+    <div class="divider-label" style="margin-top:0; padding-top:0; border-top:none;">① 基本信息（手工填写）</div>
     <div class="field-grid">
-      <div class="field"><label>基金名称</label><input type="text" data-k="name" value="${escapeHtml(f.name||'')}"></div>
+      <div class="field"><label>基金代码（6位，自动获取入口）</label><input type="text" data-k="fundCode" maxlength="6" placeholder="如 020973" value="${escapeHtml(f.fundCode||'')}"></div>
+      <div class="field"><label>基金名称（获取后自动填入）</label><input type="text" data-k="name" value="${escapeHtml(f.name||'')}"></div>
       <div class="field"><label>主题分类</label>
         <select data-k="theme">
           ${DEFAULT_THEMES.map(t=>`<option value="${t}" ${f.theme===t?'selected':''}>${t}</option>`).join('')}
         </select>
       </div>
+      <div class="field"><label>每期定投基数（元）</label><input type="number" data-k="baseAmount" value="${f.baseAmount??''}"></div>
       <div class="field"><label>大盘参考指数（QDII/港股选对应市场）</label>
         <select data-k="benchmark">
           <option value="HS300" ${(!f.benchmark||f.benchmark==='HS300')?'selected':''}>沪深300（A股默认）</option>
@@ -1396,27 +1399,45 @@ function fundBodyHtml(f){
           <option value="" ${f.benchmark===''?'selected':''}>不参考</option>
         </select>
       </div>
+    </div>
+
+    <div class="divider-label">② 持仓与成本（手工填写）</div>
+    <div class="field-grid">
       <div class="field"><label>持有份额（份）</label><input type="number" step="0.0001" data-k="shares" value="${f.shares??''}"></div>
-      <div class="field"><label>当前市值（元，自动 =份额×净值）</label><input type="text" readonly data-k="mvDisplay" value="${fmtMoney(f.shares>0&&f.currentNav>0 ? f.shares*f.currentNav : (f.marketValue||0))}" style="opacity:.75;"></div>
-      <div class="field"><label>每期定投基数（元）</label><input type="number" data-k="baseAmount" value="${f.baseAmount??''}"></div>
       <div class="field"><label>持仓成本净值（每份成本，如 1.0523）</label><input type="number" step="0.0001" data-k="costBasis" value="${f.costBasis??''}"></div>
       <div class="field"><label>持仓总成本（元，与左边二选一）</label><input type="number" data-k="costTotal" value="${f.costTotal??''}"></div>
+      <div class="field"><label>当前市值（元，自动 =份额×净值）</label><input type="text" readonly data-k="mvDisplay" value="${fmtMoney(f.shares>0&&f.currentNav>0 ? f.shares*f.currentNav : (f.marketValue||0))}" style="opacity:.75;"></div>
       <div class="field full"><div class="small-note">成本二选一：填「持仓总成本」会按 份额 自动折算出每份成本净值，填「成本净值」则反算总成本，两边保持一致。注意不要把总金额填进成本净值（收益率会接近 -100%）。折算需要先填「持有份额」。</div></div>
-      <div class="field"><label>基金代码（6位，用于自动获取）</label><input type="text" data-k="fundCode" maxlength="6" placeholder="如 020973" value="${escapeHtml(f.fundCode||'')}"></div>
-      <div class="field"><label>当前净值</label><input type="number" step="0.0001" data-k="currentNav" value="${f.currentNav??''}"></div>
-      <div class="field"><label>60日均线</label><input type="number" step="0.0001" data-k="ma60" value="${f.ma60??''}"></div>
-      <div class="field"><label>120日均线</label><input type="number" step="0.0001" data-k="ma120" value="${f.ma120??''}"></div>
+    </div>
+
+    <div class="divider-label">③ 行情参考（点「一键获取」自动填入，无需手填）</div>
+    <div class="field-grid">
       <div class="field full">
         <button type="button" class="btn ghost" id="autoFetchBtn-${f.id}" style="border:1px solid var(--line-strong); padding:9px; border-radius:6px; margin-top:2px;">⟳ 自动获取净值与均线</button>
         <div class="small-note" id="autoFetchStatus-${f.id}"></div>
       </div>
+      <div class="field"><label>当前净值</label><input type="number" step="0.0001" data-k="currentNav" value="${f.currentNav??''}"></div>
+      <div class="field"><label>60日均线</label><input type="number" step="0.0001" data-k="ma60" value="${f.ma60??''}"></div>
+      <div class="field"><label>120日均线</label><input type="number" step="0.0001" data-k="ma120" value="${f.ma120??''}"></div>
+      <div class="field"><label>52周最高净值（自动回算）</label><input type="number" step="0.0001" data-k="high52w" value="${f.high52w??''}"></div>
       <div class="field full"><label>估值百分位（0-100，越低越便宜；主信号与双信号对照共用）</label><input type="number" data-k="valuationPercentile" value="${f.valuationPercentile??''}"></div>
-      <div class="field full"><label>52周最高净值（可选，用于回撤加仓对照信号；点「自动获取」会按历史净值自动回算）</label><input type="number" step="0.0001" data-k="high52w" value="${f.high52w??''}"></div>
       <div class="field full"><div class="small-note" data-wrap="qdiiNote">${f.isQDII ? '✓ 已自动识别为 QDII 基金（可填溢价率参与暂停规则）' : 'QDII 身份自动识别，无需手动勾选'}</div></div>
       <div class="field full" data-wrap="qdiiWrap" style="${f.isQDII?'':'display:none;'}"><label>QDII 场内溢价率（%，≥2% 独立触发暂停）</label><input type="number" step="0.1" data-k="qdiiPremium" value="${f.qdiiPremium??''}"></div>
     </div>
 
-    <div class="divider-label">暂停 / 恢复规则</div>
+    <div class="divider-label">④ 止盈策略</div>
+    <div class="field-grid">
+      <div class="field full"><label>止盈策略（收益率%:卖出%）</label>
+        <select data-k="tierPreset">
+          ${(()=>{ const cur = profitTiersText(f); const pk = tierPresetFor(cur);
+            let opts = Object.keys(TIER_PRESETS).map(k=>`<option value="${k}" ${pk===k?'selected':''}>${TIER_PRESETS[k].name}：${TIER_PRESETS[k].tiers}</option>`).join('');
+            if(!pk) opts = `<option value="__custom__" selected>自定义：${cur}</option>` + opts;
+            return opts; })()}
+        </select>
+      </div>
+    </div>
+
+    <div class="divider-label">⑤ 暂停 / 恢复规则</div>
     <div class="checkline"><input type="checkbox" data-k="manualPause" ${f.manualPause?'checked':''}> 暂停此基金定投，按以下恢复条件提醒我</div>
     <div class="field-grid" style="margin-top:10px;">
       <div class="field"><label>恢复所需连续站上60日线的交易日数</label><input type="number" data-k="reqDays" value="${rr.requireDays??3}"></div>
@@ -1435,14 +1456,6 @@ function fundBodyHtml(f){
         </select>
       </div>
       <div class="field full"><label>目标跌幅安全垫（%，可选，如 20 表示 -20%）</label><input type="number" data-k="targetDrawdown" value="${rr.targetDrawdown??''}"></div>
-      <div class="field full"><label>止盈策略（收益率%:卖出%）</label>
-        <select data-k="tierPreset">
-          ${(()=>{ const cur = profitTiersText(f); const pk = tierPresetFor(cur);
-            let opts = Object.keys(TIER_PRESETS).map(k=>`<option value="${k}" ${pk===k?'selected':''}>${TIER_PRESETS[k].name}：${TIER_PRESETS[k].tiers}</option>`).join('');
-            if(!pk) opts = `<option value="__custom__" selected>自定义：${cur}</option>` + opts;
-            return opts; })()}
-        </select>
-      </div>
     </div>
     <div class="resume-box">
       当前连续站上60日线：<strong>${f.aboveMaStreak||0}</strong> 个交易日。点上方「自动获取净值与均线」会按完整历史回算该天数，保存时自动同步；也可用「今日是否收盘站上60日线」手动累计或清零。
