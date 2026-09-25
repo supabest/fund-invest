@@ -4,7 +4,7 @@
 // 可选 body: {"force":true} 无变化也发送报告
 const GOAL_DEFAULT = 200000;
 const DEFAULT_TIERS = [{ ret: 20, sell: 10 }, { ret: 40, sell: 20 }, { ret: 60, sell: 30 }, { ret: 80, sell: 50 }];
-const DEFAULT_CAPS: Record<string, number> = { '电力/新能源': 20, '全球资源': 20, '机器人/先进制造': 15, '日本股票': 15, '均衡配置': 30, '其他': 15 };
+const DEFAULT_CAPS: Record<string, number> = { '机器人/先进制造': 10, '电力/新能源': 15, '全球资源': 20, '日本股票': 15, '美国股票': 30, '均衡配置': 10 };
 const BENCH: Record<string, { secid: string; name: string; th: number[] }> = {
   HS300: { secid: '1.000300', name: '沪深300', th: [-8, -3, 3, 8] },
   NDX: { secid: '100.NDX', name: '纳斯达克', th: [-8, -3, 3, 8] },

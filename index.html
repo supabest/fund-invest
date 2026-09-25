@@ -325,8 +325,8 @@ const BENCHMARKS = {
   N225:   {secid:'100.N225',   name:'日经225',   th:[-8,-3,3,8]}
 };
 
-const DEFAULT_THEMES = ['电力/新能源','全球资源','机器人/先进制造','日本股票','均衡配置','其他'];
-const DEFAULT_CAPS = {'电力/新能源':20,'全球资源':20,'机器人/先进制造':15,'日本股票':15,'均衡配置':30,'其他':15};
+const DEFAULT_THEMES = ['机器人/先进制造','电力/新能源','全球资源','日本股票','美国股票','均衡配置'];
+const DEFAULT_CAPS = {'机器人/先进制造':10,'电力/新能源':15,'全球资源':20,'日本股票':15,'美国股票':30,'均衡配置':10};
 
 const DEFAULT_TIERS = [
   {ret:20, sell:10},
@@ -401,6 +401,16 @@ function migrateFunds(){
   });
 }
 
+// 一次性迁移：旧六板块占比重置为新配置（机器人10/电力15/全球资源20/日本15/美国30/均衡10）；本地与云端两条路径都过这里
+function migrateThemeCaps(){
+  if(themeCaps['美国股票']===undefined || themeCaps['机器人/先进制造']===15){
+    themeCaps = {...DEFAULT_CAPS};
+    saveCaps();
+    return true;
+  }
+  return false;
+}
+
 async function loadAll(){
   try{
     const r = await store.get(STORE_KEY);
@@ -423,6 +433,7 @@ async function loadAll(){
     if(s.stockCap !== undefined) stockCap = s.stockCap || 0;
   }catch(e){}
   migrateFunds();
+  migrateThemeCaps();
   render();
   ensureBenchmarkData();
   initCloud();
@@ -613,6 +624,7 @@ async function syncOnOpen(){
       
       if(Array.isArray(d.funds)) funds = d.funds;
       if(d.themeCaps && typeof d.themeCaps==='object') themeCaps = {...DEFAULT_CAPS, ...d.themeCaps};
+      migrateThemeCaps();
       if(Array.isArray(d.stocks)) stocks = d.stocks;
       if(d.settings && typeof d.settings==='object'){
         if(d.settings.goal) goal = d.settings.goal;
@@ -1102,7 +1114,8 @@ function render(){
 function renderThemeTable(){
   const tbody = document.querySelector('#themeTable tbody');
   tbody.innerHTML = '';
-  const themes = [...new Set(funds.map(f=>f.theme))];
+  // 固定按新板块顺序展示全部主题（含暂无基金的），另附存量基金用到的其他主题
+  const themes = [...DEFAULT_THEMES, ...[...new Set(funds.map(f=>f.theme))].filter(t=>!DEFAULT_THEMES.includes(t))];
   if(themes.length===0){
     tbody.innerHTML = '<tr><td colspan="2" style="color:var(--muted); padding:14px 0;">添加基金后将显示主题仓位</td></tr>';
     return;
