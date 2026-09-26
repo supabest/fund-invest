@@ -145,6 +145,24 @@
   .settings-row input{width:140px; background:var(--panel-2); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font-size:13px; color:var(--ivory); font-family:var(--sans);}
   .stock-alert{margin:0 16px 10px 16px; padding:8px 12px; background:var(--brick-dim); border-radius:7px; font-size:12px; color:var(--brick); line-height:1.6;}
   .stock-meta{font-size:11.5px; color:var(--muted); margin-top:3px;}
+
+  /* 量化评分（stock_score 批次）：Top10 区块 / 持仓胶囊 / 四因子明细 */
+  .score-card-title{font-family:var(--serif); font-size:14px; color:var(--ivory); font-weight:600; padding:14px 16px 4px;}
+  .score-row{display:flex; align-items:center; gap:8px; padding:8px 16px; font-size:13px; flex-wrap:wrap;}
+  .score-row:nth-child(odd){background:var(--panel-2);}
+  .score-card-note{font-size:11px; color:var(--muted); line-height:1.6; padding:10px 16px 14px;}
+  .score-pill{background:var(--jade-dim); color:var(--jade); font-size:11.5px; padding:3px 10px; border-radius:20px; font-weight:600; white-space:nowrap;}
+  .score-pill-warn{color:var(--gold);}
+  .score-detail{background:var(--panel-2); border-radius:10px; padding:12px; margin-bottom:14px;}
+  .score-detail .score-summary{font-size:11.5px; color:var(--muted); margin-top:8px; line-height:1.8;}
+  .score-detail .score-src{font-size:11px; color:var(--muted); margin-top:6px;}
+  .score-bar{display:flex; align-items:center; gap:8px; margin:5px 0; font-size:11.5px; color:var(--muted);}
+  .score-bar span{width:88px; flex:none;}
+  .score-bar i{flex:1; height:6px; background:var(--line); border-radius:3px; overflow:hidden; position:relative;}
+  .score-bar i::after{content:''; position:absolute; left:0; top:0; bottom:0; width:var(--w); background:var(--jade); border-radius:3px;}
+  .score-bar em{font-style:normal; width:30px; text-align:right; color:var(--ivory); font-variant-numeric:tabular-nums;}
+  .warn-pill{background:rgba(180,150,90,0.14); color:#C7A15E; font-size:11px; padding:2px 8px; border-radius:20px; margin-left:4px; white-space:nowrap;}
+  .score-warn{font-size:11.5px; color:var(--brick); margin-top:6px; line-height:1.6;}
   .mkt-strip.off{opacity:.45;}
 
   .sync-strip{display:flex; align-items:center; gap:10px; margin-top:10px; font-size:12px; color:var(--muted);}
@@ -361,6 +379,10 @@ let activeTab = 'funds'; // 当前页签：顶部统计按基金/股票分别口
 let goal = GOAL;      // 基金目标总额（可在页面调整，主题上限随之缩放）
 let stockCap = 0;     // 股票总仓位上限（0=不限）
 
+// 量化评分（stock_score 最新批次）：null=尚未生成/加载失败，UI 优雅降级
+let scoreState = null; // { batch, rows: Map<code,row>, top10: row[] }
+let scoreTried = false; // 已尝试拉取；纯本地未接云时不展示占位文案
+
 // 云同步状态
 let sb = null;            // supabase client
 let sbUser = null;        // 当前登录用户
@@ -511,7 +533,69 @@ function initCloud(tries){
   window.addEventListener('focus', ()=>{
     if(sbUser && Date.now()-lastPullAt > 60000) syncOnOpen();
   });
+  // 评分表 anon 可读、全局共享，客户端就绪即拉一次；失败仅降级不阻塞页面
+  loadStockScores().then(()=>render());
   setSyncUI();
+}
+
+// ===================== 量化评分（stock_score 只读） =====================
+async function loadStockScores(){
+  if(!cloudReady || !sb) return;
+  scoreTried = true;
+  try{
+    const { data: b, error: be } = await sb.from('stock_score').select('batch_date')
+      .order('batch_date',{ascending:false}).limit(1).maybeSingle();
+    if(be || !b) return;
+    const batch = b.batch_date;
+    // 精选池行（in_pool）+ 我的持仓行（code.in）一次取回
+    const codes = [...new Set(stocks.map(s=>String(s.code||'').trim()).filter(c=>/^\d{5,6}$/.test(c)))];
+    const orFilter = codes.length ? 'in_pool.eq.true,code.in.(' + codes.join(',') + ')' : 'in_pool.eq.true';
+    const { data, error } = await sb.from('stock_score').select('*')
+      .eq('batch_date', batch).or(orFilter).order('final',{ascending:false});
+    if(error || !data) return;
+    const rows = data.filter(r=>r && r.final!==null && r.final!==undefined);
+    scoreState = { batch, rows: new Map(rows.map(r=>[String(r.code),r])), top10: rows.filter(r=>r.in_pool).slice(0,10) };
+  }catch(e){ console.warn('scores load failed', e); }
+}
+
+function scoreStars(f){ return f>=90?'★★★★★':f>=80?'★★★★☆':f>=70?'★★★★':f>=60?'★★★':f>=50?'★★':'★'; }
+
+function renderScoreTop10(){
+  if(!scoreState)
+    return scoreTried ? `<div class="signal-strip"><span class="signal-pill pill-normal">评分批次尚未生成（夜间批处理上线后自动出现）</span></div>` : '';
+  const { batch, top10 } = scoreState;
+  return `<div class="fund-card">
+    <div class="score-card-title">精选池 Top10 · 量化初筛 <span style="font-weight:400;font-size:11.5px;color:var(--muted)">批次 ${escapeHtml(String(batch))}</span></div>
+    ${top10.length ? top10.map((r,i)=>{
+      const mkt = (r.market_rank!=null && r.market_n) ? ' · 市场前' + Math.max(1, Math.round(100 - r.market_rank/r.market_n*100)) + '%' : '';
+      const ind = (r.ind_rank!=null && r.ind_n) ? ' 行业' + r.ind_rank + '/' + r.ind_n : '';
+      const fl = ((r.flags)||[]).length ? ' ⚠' + r.flags.join('、') : '';
+      return `<div class="score-row" data-code="${escapeHtml(String(r.code))}"><span style="color:var(--muted);width:24px">#${i+1}</span><b>${escapeHtml(r.name||'')}</b><span style="color:var(--muted);font-size:11.5px">${escapeHtml(String(r.code))}</span><span class="score-pill">${r.final.toFixed(1)}分 ${scoreStars(r.final)}</span><span style="color:var(--muted);font-size:11px">${escapeHtml(r.ths_l1||'')}${ind}${mkt}${escapeHtml(fl)}</span></div>`;
+    }).join('') : '<div class="score-row" style="color:var(--muted)">本批次精选池无评分行</div>'}
+    <div class="score-card-note">评分为横截面相对位置（质量30/成长30/估值20/动量20，行业内百分位），不构成买卖建议；点开持仓卡片可见你的股票同口径明细。</div>
+  </div>`;
+}
+
+function scorePillHtml(s){
+  const sc = scoreState && s ? scoreState.rows.get(String(s.code||'').trim()) : null;
+  if(!sc || sc.final===null || sc.final===undefined) return '';
+  const warn = ((sc.flags)||[]).length || ((sc.warnings)||[]).length;
+  const ind = (sc.ind_rank!=null && sc.ind_n) ? ' 行业' + sc.ind_rank + '/' + sc.ind_n : '';
+  return `<span class="score-pill${warn?' score-pill-warn':''}">评分 ${Number(sc.final).toFixed(1)} · ${escapeHtml(sc.name||sc.ths_l1||'')}${escapeHtml(ind)}${warn?' ⚠':''}</span>`;
+}
+
+function scoreDetailHtml(s){
+  const sc = scoreState && s ? scoreState.rows.get(String(s.code||'').trim()) : null;
+  if(!sc) return '';
+  const bar = (v,l)=>`<div class="score-bar"><span>${l}</span><i style="--w:${Math.max(0,Math.min(100, v==null?0:Number(v)))}%"></i><em>${v==null?'NA':Number(v).toFixed(0)}</em></div>`;
+  const w = (sc.warnings||[]).map(x=>`<div class="score-warn">⚠ ${escapeHtml(String(x))}</div>`).join('');
+  const f = (sc.flags||[]).map(x=>`<span class="warn-pill">${escapeHtml(String(x))}</span>`).join('');
+  const num = v => (v==null ? 'NA' : v);
+  return `<div class="score-detail">
+    ${bar(sc.quality,'质量 Q(30%)')}${bar(sc.growth,'成长 G(30%)')}${bar(sc.value,'估值 V(20%)')}${bar(sc.momentum,'动量 M(20%)')}
+    <div class="score-summary">综合 ${Number(sc.final).toFixed(1)} · 全市场 ${num(sc.market_rank)}/${num(sc.market_n)} · 数据完整度 ${sc.cov==null?'NA':Math.round(sc.cov)+'%'} · PE ${num(sc.pe)}${f}</div>
+    ${w}<div class="score-src">财务截至 ${escapeHtml(String((sc.extras&&sc.extras.fin_period)||'—'))} · 批次 ${escapeHtml(String(scoreState.batch))} · 评分≠买入建议</div>
+  </div>`;
 }
 
 function setSyncUI(){
@@ -1208,8 +1292,10 @@ function renderStockSection(){
     }
   }
   list.innerHTML = '';
+  // Top10 区块固定为股票列表第一张卡片；无批次时 renderScoreTop10 内部降级为占位文案
+  list.insertAdjacentHTML('beforeend', renderScoreTop10());
   if(stocks.length===0){
-    list.innerHTML = '<div class="empty">还没有添加股票<br>A股填6位代码，港股填5位代码，行情每日自动更新</div>';
+    list.insertAdjacentHTML('beforeend', '<div class="empty">还没有添加股票<br>A股填6位代码，港股填5位代码，行情每日自动更新</div>');
     return;
   }
   stocks.forEach(s=>{
@@ -1230,6 +1316,7 @@ function renderStockSection(){
       </div>
       <div class="signal-strip">
         <span class="signal-pill ${pillCls}">买入参考·${tier}</span>
+        ${scorePillHtml(s)}
         <span class="signal-amount">现价 ${s.currentPrice||'--'}${s.ma60?' · MA60 '+Number(s.ma60).toFixed(2):''}${s.ma120?' · MA120 '+Number(s.ma120).toFixed(2):''}</span>
       </div>
       ${dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0)}
@@ -1251,6 +1338,7 @@ function toggleStockBody(id){
 
 function stockFormHtml(s){
   return `
+    ${scoreDetailHtml(s)}
     <div class="field-grid">
       <div class="field"><label>名称</label><input type="text" data-sk="name" value="${escapeHtml(s.name||'')}"></div>
       <div class="field"><label>代码（A股6位 / 港股5位）</label><input type="text" data-sk="code" maxlength="6" value="${escapeHtml(s.code||'')}"></div>
