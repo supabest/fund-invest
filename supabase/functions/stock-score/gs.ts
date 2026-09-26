@@ -65,7 +65,9 @@ export async function gsFetch(query: string, apiKey: string, timeoutMs = 90_000)
       if (!table?.['股票代码']) throw new Error('GS table missing');
       return table;
     } catch (e) {
-      lastErr = e;
+      // 网络错误（fetch 本身失败的 TypeError）的 message 可能内嵌含 apiKey 的完整 URL，
+      // 脱敏为不含 URL 的通用信息后再保留；3 次重试用尽由末尾 throw lastErr 抛出。
+      lastErr = e instanceof TypeError ? new Error(`GS network error (attempt ${attempt + 1})`) : e;
       await new Promise(res => setTimeout(res, 2000 * (attempt + 1)));
     }
   }
@@ -74,6 +76,11 @@ export async function gsFetch(query: string, apiKey: string, timeoutMs = 90_000)
 
 export function mergeTables(fin: GsTable, mom: GsTable): Stock[] {
   const codes = (fin['股票代码'] as string[] | undefined) ?? [];
+  // 守卫：有数据行却缺失“股票市场类型”列时，下方 isST 判定会把全部股票静默标为 ST
+  // （0 可用行且无报错）——在此 fail loudly，避免编排层拿到空宇宙。
+  if (codes.length > 0 && !colByPrefix(fin, '股票市场类型')) {
+    throw new Error('GS fin table missing 股票市场类型 column');
+  }
   const momCodes = (mom['股票代码'] as string[] | undefined) ?? [];
   const momIdx = new Map(momCodes.map((c, i) => [c, i]));
   const thsK = colByPrefix(fin, '所属同花顺行业');
