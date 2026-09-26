@@ -15,7 +15,7 @@ export interface ScoreRow extends Stock {
   final: number | null; indRank: number; indN: number; marketRank: number; marketN: number;
   cov: number; peg: number | null; flags: string[];
   grp: string;      // 'L2:汽车-汽车零部件' | 'L1:传媒' | 'MARKET'（Task 4 经 extras 消费）
-  absTrend: number; // 0/33.3/66.7/100；-1 = 数据缺失未参与（Task 4 经 extras 消费）
+  absTrend: number; // 满足数/已知数×100：三条件全知时为 0/33.3/66.7/100，部分缺数据时可为 k/已知数 的中间值（如 50、66.7 两条件情形）；-1 = 三条件全缺未参与（Task 4 经 extras 消费）
 }
 
 // 行业回退：同花顺二级样本≥20 → 一级≥20 → 全市场(MARKET)

@@ -38,7 +38,23 @@ Deno.test('金融股：毛利率NA → Quality=ROE单腿；权重全落单指标
   // 原 brief 的 mid.__roePct 断言行不可用（引擎无此字段），按 plan 注改为语义断言：
   assertEquals(mid.quality !== null, true);
   assertEquals(mid.quality, pctWithinGroups(s, x => x.roe).get('b12')!); // 单腿 = 其 ROE 组内百分位
+  assertEquals(mid.quality, 50); // 硬编码期望：Roe=i 互异且 N=25 → b12 = (12+0.5)/25×100 = 50
   assertEquals(mid.cov, 100); // 单腿化不降覆盖
+});
+Deno.test('决策8 混合宇宙：isFin 的极端毛利率(999)被剔除出 mlr 横截面，不污染非金融股', () => {
+  // 同一 L2 组 25 只：x0 为金融股（isFin:true，真实 mlr=999，roe 居中）；x1..x24 非金融，mlr 均为正常值
+  const s: Stock[] = [mk({ code: 'x0', isFin: true, mlr: 999, roe: 12 })];
+  for (let i = 1; i <= 24; i++) s.push(mk({ code: `x${i}`, roe: i, mlr: i }));
+  const rows = computeScores(s);
+  const fin = rows.find(r => r.code === 'x0')!;
+  const x5 = rows.find(r => r.code === 'x5')!;
+  // (a) 金融股 Quality = 其 ROE 组内百分位（毛利率单腿化）
+  assertEquals(fin.quality, pctWithinGroups(s, x => x.roe).get('x0')!);
+  // (b) 非金融股 x5 的 Quality 用可手算具体值锁定，若 999 污染 mlr 分布则断言破裂：
+  //   ROE 腿：25 只（1..24 + 居中值12）→ x5 低于数4、共1 → (4.5)/25×100 = 18
+  //   毛利腿（正确：mlr 有效样本仅非金融 24 只 1..24）→ (4.5)/24×100 = 18.75
+  //   Quality = (18+18.75)/2 = 18.375；若 isFin 剔除逻辑被删除，毛利腿变成 (4.5)/25×100=18 → Quality=18
+  assertEquals(x5.quality, 18.375);
 });
 Deno.test('PEG 有效性：扣非增速8(<10) → NA → Value=PE单指标；增速500(>300) 同 NA', () => {
   const s = Array.from({ length: 25 }, (_, i) => mk({ code: `p${i}`, kc: i === 0 ? 8 : i === 1 ? 500 : 20, pe: 15 }));
