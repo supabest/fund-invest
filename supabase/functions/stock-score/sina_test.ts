@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { ma, parseKline, retN, sinaSymbol, type Kbar } from './sina.ts';
+import { ma, parseKline, retN, sinaSymbol, dailyKline, type Kbar } from './sina.ts';
 
 Deno.test('sinaSymbol: SH/SZ/BJ 三市场映射', () => {
   assertEquals(sinaSymbol('600000.SH'), 'sh600000');
@@ -9,6 +9,9 @@ Deno.test('sinaSymbol: SH/SZ/BJ 三市场映射', () => {
   assertEquals(sinaSymbol('688378'), 'sh688378');
   assertEquals(sinaSymbol('430047'), 'bj430047');
   assertEquals(sinaSymbol('300750'), 'sz300750');
+  // fix 轮 4：裸代码首位 /9/ 也是北交所（含 920xxx 新号段）→ bj
+  assertEquals(sinaSymbol('920001'), 'bj920001');
+  assertEquals(sinaSymbol('920819.BJ'), 'bj920819');
 });
 
 Deno.test('ma: 尾部 n 均值的硬值 + 长度不足/空数组 → null', () => {
@@ -51,4 +54,21 @@ Deno.test('parseKline: 字符串数字正常解析；坏 payload 抛错不含内
     { day: '2026-09-25', close: '3' },
   ]);
   assertEquals(mixed, [{ day: '2026-09-25', close: 3 }]);
+});
+
+// fix 轮 3：网关拦截页（HTML）使 r.json() 抛 SyntaxError（message 内嵌 payload 片段），
+// dailyKline 必须单独冒住并归一为 'sina bad payload'，不让片段泄露到错误链。
+Deno.test('dailyKline: r.json() 抛 SyntaxError → 脱敏为 sina bad payload（不含片段）', async () => {
+  const origFetch = globalThis.fetch;
+  const leaky = new SyntaxError('Unexpected token < in JSON at position 0: <html>SECRET-GATE-PAGE</html>');
+  // @ts-ignore test stub
+  globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.reject(leaky) });
+  try {
+    const err = await dailyKline('sh600000').catch((e: unknown) => e as Error);
+    assertEquals(err instanceof Error, true);
+    assertEquals((err as Error).message, 'sina bad payload');
+    assertEquals((err as Error).message.includes('SECRET'), false);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
 });

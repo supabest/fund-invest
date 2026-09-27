@@ -7,10 +7,34 @@ import type { Stock } from './engine.ts';
 export type GsTable = Record<string, (string | number | null)[]>;
 
 // V1.1 措辞（探针实证的最终版）：不写「销售毛利率同比增长率」——GS 会把同查询里
-// 的销售毛利率/roe(摊薄) 当期列连带替换成同比增长率列（污染）；改用 2025年中报/
-// 2025年报两个历史绝对值窗口列，mlrYoy 由适配器自行派生（与 GS 同比列逐位一致）。
+// 的销售毛利率/roe(摊薄) 当期列连带替换成同比增长率列（污染）；改用 年中报/
+// 年报历史绝对值窗口列，mlrYoy 由适配器自行派生（百分点口径，fix 轮 1）。
 // 现金流指标同理必须留在独立 Q_CASH（并入会被误解析成同比增长率列）。
-export const Q_FIN = '全部沪深A股的加权净资产收益率、归属母公司股东的净利润同比增长率、扣非净利润同比增长率、营业总收入同比增长率、销售毛利率、资产负债率、市盈率PE、2023年报净资产收益率、2024年报净资产收益率、2025年报净资产收益率、近3年营业总收入复合增长率、2025年报销售毛利率、2025年中报销售毛利率、所属同花顺行业';
+//
+// 查询年份锚点运行时推导（fix 轮 1）：Q_FIN 措辞里绝不出现硬编码的 2023/2024/2025。
+// annualBase = 最新一期完整年报的年份：年报须在次年 4/30 前披露完毕，故当年
+// month>=5 可锚 currentYear-1，1-4 月只能锚 currentYear-2。yearAnchors 是纯函数
+// （无隐式时钟），测试传合成 Date 即可覆盖披露月映射。
+export function yearAnchors(now: Date): { annualBase: number } {
+  return { annualBase: now.getMonth() + 1 >= 5 ? now.getFullYear() - 1 : now.getFullYear() - 2 };
+}
+
+// 新鲜度守卫：基期必须**恰好等于** yearAnchors(now) 推出的当年合法锚点——偏旧（如 9 月里
+// 错用 2024 基期 = 「1.5 年前」的年报前沿）或偏新（1-4 月里错锚到当年尚未披露完毕的年报）
+// 均判陈旧 → 拒绝。调用方递合成 Date → 可测（无隐式时钟）。
+export function isAnnualBaseFresh(now: Date, annualBase: number): boolean {
+  return annualBase === yearAnchors(now).annualBase;
+}
+
+// Q_FIN 由 annualBase 模板拼装；除年份锚点外逐字沿用探针 L 的最终措辞。
+export function buildQFin(annualBase: number): string {
+  const b = annualBase;
+  return `全部沪深A股的加权净资产收益率、归属母公司股东的净利润同比增长率、扣非净利润同比增长率、营业总收入同比增长率、销售毛利率、资产负债率、市盈率PE、${b - 2}年报净资产收益率、${b - 1}年报净资产收益率、${b}年报净资产收益率、近3年营业总收入复合增长率、${b}年报销售毛利率、${b}年中报销售毛利率、所属同花顺行业`;
+}
+
+// 模块加载时按当前日期推导（Edge Runtime 每次冷启动重算）；index.ts 禁改，
+// Q_FIN 保持同名导出。
+export const Q_FIN = buildQFin(yearAnchors(new Date()).annualBase);
 export const Q_MOM = '全部沪深A股的60日涨跌幅、20日涨跌幅、最新收盘价、20日均价、60日均价、所属同花顺行业';
 export const Q_CASH = '全部沪深A股的经营活动产生的现金流量净额、归属于母公司所有者的净利润、股票简称';
 
@@ -122,7 +146,9 @@ export function mergeTables(fin: GsTable, mom: GsTable, cash: GsTable | null = n
   const mktK = colByPrefix(fin, '股票市场类型');
 
   // 销售毛利率三个绝对值窗口列（本期 / 上年同期 / 上年年报）按日期定位，不按下标猜测：
-  // 本期=日期最大；上年同期=年份减一且月日相同；上年年报=日期最大的 12月31日列。
+  // 本期=日期最大；上年同期=年份减一且月日相同（fix 轮 1 兜底：查不到同月日列时退回
+  // `${annualBase}年中报` 措辞对应的列）；上年年报=年份恰为 latest.year−1 且月日 1231
+  // （fix 轮 1 收紧：更早年份的年报列不得当基期）。
   const mlrKeys = windowColsByPrefix(fin, '销售毛利率').filter(k => Number.isFinite(colDate(k)));
   const mlrKeyOf = (i: number, pick: (ds: number[]) => number): number | null => {
     const dates = mlrKeys.map(colDate);
@@ -131,21 +157,38 @@ export function mergeTables(fin: GsTable, mom: GsTable, cash: GsTable | null = n
   };
   const at = (i: number) => ({
     latest: mlrKeyOf(i, ds => Math.max(...ds)),
+    // 上年同期=年份减一且月日相同（本期即 12月31日年报时不得自反）；
+    // fix 轮 1 兜底策略：查不到同月日列时退回 `${annualBase}年中报` 措辞对应的列
     prevYoy: mlrKeyOf(i, ds => {
       const y = Math.max(...ds);
       const want = (Math.floor(y / 10000) - 1) * 10000 + mmdd(y);
+      if (want === y) return NaN;
       return ds.filter(d => d === want)[0] ?? NaN;
     }),
-    // 上年年报 = 日期严格早于本期的最近 12月31日列；若年报本身已成为本期列
-    // （跑批撞上年报披露日）则不得用自身作差 → mlrDelta 退回 null 而非恒 0
+    // 上年年报 = 年份恰为 latest.year−1 的 12月31日列（fix 轮 1 收紧守卫：跑批撞上
+    // 年报披露日、或只有更早年份年报时不得用自身/远旧年报作差 → 退回 null 而非恒 0）
     prevAnnual: mlrKeyOf(i, ds => {
       const y = Math.max(...ds);
-      return ds.filter(d => mmdd(d) === 1231 && d < y).sort((a, b) => a - b).at(-1) ?? NaN;
+      const want = (Math.floor(y / 10000) - 1) * 10000 + 1231;
+      return ds.filter(d => d === want)[0] ?? NaN;
     }),
   });
 
-  // roe3y：近三年年报加权 ROE 窗口列，按日期升序（=[2023,2024,2025]，裁定 4）
-  const roe3Keys = windowColsByPrefix(fin, '净资产收益率roe(加权,公布值)');
+  // ---- fix 轮 1：B 层派生年份锚点新鲜度守卫（不信任单点，双通道核对）----
+  // 数据驱动基期：毛利率窗口里最新 12月31日列的年份；运行时基期：yearAnchors(now)。
+  // 运行时基期本身陈旧（isAnnualBaseFresh 不过）或两者相差 >1 年 → anchorsOk=false，
+  // mlrDelta/roe3y/cagr3 只置 null（NA 优雅降级）；mlrYoy 是数据自身同期对的 pp 差，
+  // 不依赖年份锚点 → 同受此守卫管辖。
+  const annualBase = yearAnchors(new Date()).annualBase;
+  const annRefs = mlrKeys.map(colDate).filter(d => mmdd(d) === 1231);
+  const dataAnnualBase = annRefs.length ? Math.max(...annRefs) / 10000 : NaN;
+  const anchorsOk = isAnnualBaseFresh(new Date(), annualBase)
+    && (!Number.isFinite(dataAnnualBase) || Math.abs(dataAnnualBase - annualBase) <= 1);
+
+  // roe3y：近三年年报加权 ROE 窗口列，按日期升序（裁定 4）。fix 轮 1 收紧：
+  // 必须恰好 3 根窗口列，否则整组置 null（宁可 NA，不可 2 列错位当 3 列）。
+  const roe3All = windowColsByPrefix(fin, '净资产收益率roe(加权,公布值)');
+  const roe3Keys = roe3All.length === 3 ? roe3All : [];
   const out: Stock[] = [];
   for (let i = 0; i < codes.length; i++) {
     const code = codes[i];
@@ -183,14 +226,18 @@ export function mergeTables(fin: GsTable, mom: GsTable, cash: GsTable | null = n
           strictWin(cash!, '经营活动产生的现金流量净额', k, -1),
           strictWin(cash!, '归属于母公司所有者的净利润', k, -1))
         : null,
-      // mlrYoy：本期毛利率对上年同期（与 GS 同比列逐位一致的派生值）；与 mlrDelta 不同字段
-      mlrYoy: m.latest !== null && m.prevYoy !== null && m.prevYoy !== 0
-        ? (m.latest / m.prevYoy - 1) * 100 : null,
-      // mlrDelta（R6 利润率恢复代理）：本期 − 上年年报，两者均非 null 才接线
-      mlrDelta: m.latest !== null && m.prevAnnual !== null ? m.latest - m.prevAnnual : null,
-      roe3y: roe3Keys.map(key => num(fin[key]?.[i])),
-      // 裁定 1：取日期最新的窗口列（[20251231] = 2022→2025 年报 3 年 CAGR）
-      cagr3: strictWin(fin, '营业总收入复合年增长率', i, -1),
+      // mlrYoy（fix 轮 1 改口径）：百分点差 pp = 本期 − 上年同期（spec §4.4 /
+      // engine.ts 注释 "pp" / MARGIN_DROP=-5 均按 pp 判定）。旧推导 (latest/prev−1)*100
+      // 是相对 %，且上年基数为负时符号翻转（金浦钛业案）——pp 差同时消除两个缺陷。
+      // 两者非 null 才接线，无「prev≠0」残守卫（pp 口径不需要除法）。
+      mlrYoy: m.latest !== null && m.prevYoy !== null ? m.latest - m.prevYoy : null,
+      // mlrDelta（R6 利润率恢复代理）：本期 − 上年年报（同为 pp 差），两者非 null
+      // 且年份锚点新鲜（anchorsOk）才接线
+      mlrDelta: anchorsOk && m.latest !== null && m.prevAnnual !== null ? m.latest - m.prevAnnual : null,
+      // roe3y：近三年年报 ROE 升序数组；列数≠ 3 或锚点陈旧 → undefined（engine `(s.roe3y ?? [])` 走 NA）
+      roe3y: anchorsOk && roe3Keys.length === 3 ? roe3Keys.map(key => num(fin[key]?.[i])) : undefined,
+      // 裁定 1：取日期最新的窗口列（[annualBase 年报] = 3 年 CAGR）；锚点陈旧 → null
+      cagr3: anchorsOk ? strictWin(fin, '营业总收入复合年增长率', i, -1) : null,
     };
     out.push(out2);
   }

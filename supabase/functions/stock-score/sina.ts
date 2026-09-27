@@ -6,8 +6,9 @@ const SINA = 'https://quotes.sina.cn/cn/api/json_v2.php/CN_MarketDataService.get
 export function sinaSymbol(code: string): string {
   const c = code.split('.')[0];
   const mkt = code.split('.')[1] ?? '';
+  // 北交所代码段：4xxxxx / 8xxxxx / 9xxxxx（含 920xxx 新号段，裸代码无后缀时一并覆盖）
   const p = mkt === 'SH' || c.startsWith('6') ? 'sh'
-    : mkt === 'BJ' || /^[48]/.test(c) ? 'bj'
+    : mkt === 'BJ' || /^[489]/.test(c) ? 'bj'
     : 'sz';
   return p + c;
 }
@@ -31,7 +32,13 @@ export async function dailyKline(symbol: string, datalen = 70): Promise<Kbar[]> 
   try {
     const r = await fetch(`${SINA}?symbol=${symbol}&scale=240&ma=no&datalen=${datalen}`, { signal: AbortSignal.timeout(10_000) });
     if (!r.ok) throw new Error(`sina http ${r.status}`);
-    raw = await r.json();
+    // fix 轮 3：网关拦截页（HTML）会让 r.json() 抛 SyntaxError，其 message 内嵌
+    // payload 片段——单独冒住并归一为 'sina bad payload'，不把原始片段带到错误链。
+    try {
+      raw = await r.json();
+    } catch {
+      throw new Error('sina bad payload');
+    }
   } catch (e) {
     // TypeError 脱敏：不暴露含参数的 URL
     throw e instanceof TypeError ? new Error('sina network error') : e;
