@@ -120,7 +120,8 @@ Deno.test('V1.1 新列接线（奥来德 688378 硬值，Task 2/4 探针）：ca
   const fin = fx('fin_sample.json');
   const mom = fx('mom_sample.json');
   const cash = fx('cash_sample.json');
-  const ald = mergeTables(fin, mom, cash).find(s => s.code === '688378.SH')!;
+  // fix 轮 2：注入固定时钟（annualBase=2025 与 fixture 锚点同步），硬值不随挂钟漂移
+  const ald = mergeTables(fin, mom, cash, new Date('2026-10-01')).find(s => s.code === '688378.SH')!;
   // 现金比值 = 经营现金流净额 / 归母净利（独立第 3 次调用，原始值列）
   assertEquals(ald.cash, 157010826.89 / 175808330.99); // ≈0.893
   // mlrYoy 派生（fix 轮 1 改口径）= 本期 − 上年同期 的百分点差 pp（spec §4.4 / engine
@@ -201,7 +202,8 @@ Deno.test('mlrYoy 百分点口径：普通同期对（10.45pp）与年报自反�
 });
 
 // fix 轮 2 守卫：数据里的年报基期与运行时锚点相差 >1 年（含「1.5 年前基期」的
-// 陈旧形态）→ B 层派生字段整组置 null（NA 优雅降级），pp 版 mlrYoy 不受管辖
+// 陈旧形态）→ B 层派生字段整组置 null（NA 优雅降级）；pp 版 mlrYoy 不受管辖。
+// 时钟注入（fix 轮 2）：2026-10-01 → annualBase=2025，数据基期 2098 差 73 年 → 陈旧
 Deno.test('新鲜度守卫：陈旧基期 → mlrDelta/roe3y/cagr3 置 null；mlrYoy 照常', () => {
   const stale = {
     '股票代码': ['000001.SZ'], '股票简称': ['A'], '股票市场类型': ['x'],
@@ -209,11 +211,29 @@ Deno.test('新鲜度守卫：陈旧基期 → mlrDelta/roe3y/cagr3 置 null；ml
     '净资产收益率roe(加权,公布值)[20971231]': ['7'], '净资产收益率roe(加权,公布值)[20981231]': ['8'], '净资产收益率roe(加权,公布值)[20991231]': ['9'],
     '营业总收入复合年增长率[20991231]': ['12.3'],
   };
-  const [s] = mergeTables(stale, { '股票代码': [] as string[] }, null);
+  const [s] = mergeTables(stale, { '股票代码': [] as string[] }, null, new Date('2026-10-01'));
   assertEquals(s.mlrYoy, 5); // pp：55 − 50，数据自身同期对，不依赖年份锚点
   assertEquals(s.mlrDelta, null); // 数据基期 2098 与运行时锚点差 >1 年 → 守卫
   assertEquals(s.roe3y, undefined);
   assertEquals(s.cagr3, null);
+});
+
+// fix 轮 2 回归（取整修复的另一半方向）：早披露场景——annualBase=2025 的跑批里
+// 数据已出现 FY(base+1) 年报列 [20261231]。旧版 dataAnnualBase=20261231/10000=
+// 2026.1231 带 mmdd 小数尾巴，|2026.1231−2025|=1.1231>1 → 误判陈旧，把全宇宙的
+// mlrDelta/roe3y/cagr3 杀掉；floor 取整后差=1 → 新鲜，字段照常接线。
+Deno.test('新鲜度守卫（早披露方向）：annualBase=2025 + [20261231] 年报列 → 字段仍接线', () => {
+  const early = {
+    '股票代码': ['000001.SZ'], '股票简称': ['A'], '股票市场类型': ['x'],
+    '销售毛利率[20261231]': ['60'], '销售毛利率[20251231]': ['58'], '销售毛利率[20260630]': ['59'],
+    '净资产收益率roe(加权,公布值)[20241231]': ['7'], '净资产收益率roe(加权,公布值)[20251231]': ['8'], '净资产收益率roe(加权,公布值)[20261231]': ['9'],
+    '营业总收入复合年增长率[20261231]': ['12.3'],
+  };
+  const [s] = mergeTables(early, { '股票代码': [] as string[] }, null, new Date('2026-10-01'));
+  assertEquals(s.mlr, 60); // 本期 = 日期最大的 [20261231]
+  assertEquals(s.mlrDelta, 2); // 60 − 58（基期 [20251231] = latest.year−1 的 12月31日列）
+  assertEquals(s.roe3y, [7, 8, 9]); // 锚点新鲜 → 3 根窗口列照常接线
+  assertEquals(s.cagr3, 12.3);
 });
 
 // fix 轮 2：mlrDelta 基期收紧——只接受「年份恰为 latest.year−1」的 12月31日列，
@@ -233,10 +253,10 @@ Deno.test('roe3y 列数断言：窗口列不等于 3 根 → null', () => {
     '股票代码': ['000001.SZ'], '股票简称': ['A'], '股票市场类型': ['x'],
     '净资产收益率roe(加权,公布值)[20241231]': ['7'], '净资产收益率roe(加权,公布值)[20251231]': ['8'],
   };
-  assertEquals(mergeTables(two, { '股票代码': [] as string[] }, null)[0].roe3y, undefined);
+  assertEquals(mergeTables(two, { '股票代码': [] as string[] }, null, new Date('2026-10-01'))[0].roe3y, undefined);
   const four = { ...two, '净资产收益率roe(加权,公布值)[20261231]': ['9'], '净资产收益率roe(加权,公布值)[20231231]': ['6'] };
-  assertEquals(mergeTables(four, { '股票代码': [] as string[] }, null)[0].roe3y, undefined);
-  // 恰好 3 根且与运行时锚点同步（fixture 实除 2023/24/25）→ 正常数组
-  const ald = mergeTables(fx('fin_sample.json'), fx('mom_sample.json'), null).find(s => s.code === '688378.SH')!;
+  assertEquals(mergeTables(four, { '股票代码': [] as string[] }, null, new Date('2026-10-01'))[0].roe3y, undefined);
+  // 恰好 3 根且与注入时钟的锚点同步（fixture 实除 2023/24/25）→ 正常数组
+  const ald = mergeTables(fx('fin_sample.json'), fx('mom_sample.json'), null, new Date('2026-10-01')).find(s => s.code === '688378.SH')!;
   assertEquals(ald.roe3y, [7.2, 5.15, 4.22]);
 });

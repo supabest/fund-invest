@@ -131,7 +131,9 @@ const mmdd = (d: number): number => d % 10000;
 
 // cash = 独立第 3 次 GS 调用（Q_CASH）的原始值宽表；null/缺省 → Stock.cash 全 null
 // （Task 6 编排接入前的兼容形态：两参调用照旧可用，缺失表现为 C 层风格优雅缺席）。
-export function mergeTables(fin: GsTable, mom: GsTable, cash: GsTable | null = null): Stock[] {
+// now 可注入（fix 轮 2）：新鲜度守卫不再偷读挂钟，硬值测试传固定时钟，
+// fixture 锚点 2025 不会到 2028 年腐烂；index.ts 两参调用走默认值不受影响。
+export function mergeTables(fin: GsTable, mom: GsTable, cash: GsTable | null = null, now: Date = new Date()): Stock[] {
   const codes = (fin['股票代码'] as string[] | undefined) ?? [];
   // 守卫：有数据行却缺失“股票市场类型”列时，下方 isST 判定会把全部股票静默标为 ST
   // （0 可用行且无报错）——在此 fail loudly，避免编排层拿到空宇宙。
@@ -146,9 +148,9 @@ export function mergeTables(fin: GsTable, mom: GsTable, cash: GsTable | null = n
   const mktK = colByPrefix(fin, '股票市场类型');
 
   // 销售毛利率三个绝对值窗口列（本期 / 上年同期 / 上年年报）按日期定位，不按下标猜测：
-  // 本期=日期最大；上年同期=年份减一且月日相同（fix 轮 1 兜底：查不到同月日列时退回
-  // `${annualBase}年中报` 措辞对应的列）；上年年报=年份恰为 latest.year−1 且月日 1231
-  // （fix 轮 1 收紧：更早年份的年报列不得当基期）。
+  // 本期=日期最大；上年同期=年份减一且月日相同，本期即 12月31日年报时不自反；
+  // 上年年报=年份恰为 latest.year−1 且月日 1231（fix 轮 1 收紧：更早年份的
+  // 年报列不得当基期）。
   const mlrKeys = windowColsByPrefix(fin, '销售毛利率').filter(k => Number.isFinite(colDate(k)));
   const mlrKeyOf = (i: number, pick: (ds: number[]) => number): number | null => {
     const dates = mlrKeys.map(colDate);
@@ -158,7 +160,7 @@ export function mergeTables(fin: GsTable, mom: GsTable, cash: GsTable | null = n
   const at = (i: number) => ({
     latest: mlrKeyOf(i, ds => Math.max(...ds)),
     // 上年同期=年份减一且月日相同（本期即 12月31日年报时不得自反）；
-    // fix 轮 1 兜底策略：查不到同月日列时退回 `${annualBase}年中报` 措辞对应的列
+    // 找不到严格同月日的上年列就是 null，无其他兜底（fix 轮 2 纠正旧注释）
     prevYoy: mlrKeyOf(i, ds => {
       const y = Math.max(...ds);
       const want = (Math.floor(y / 10000) - 1) * 10000 + mmdd(y);
@@ -178,11 +180,14 @@ export function mergeTables(fin: GsTable, mom: GsTable, cash: GsTable | null = n
   // 数据驱动基期：毛利率窗口里最新 12月31日列的年份；运行时基期：yearAnchors(now)。
   // 运行时基期本身陈旧（isAnnualBaseFresh 不过）或两者相差 >1 年 → anchorsOk=false，
   // mlrDelta/roe3y/cagr3 只置 null（NA 优雅降级）；mlrYoy 是数据自身同期对的 pp 差，
-  // 不依赖年份锚点 → 同受此守卫管辖。
-  const annualBase = yearAnchors(new Date()).annualBase;
+  // 不依赖年份锚点 → **不**受此守卫管辖（fix 轮 2 纠正旧注释）。
+  const annualBase = yearAnchors(now).annualBase;
   const annRefs = mlrKeys.map(colDate).filter(d => mmdd(d) === 1231);
-  const dataAnnualBase = annRefs.length ? Math.max(...annRefs) / 10000 : NaN;
-  const anchorsOk = isAnnualBaseFresh(new Date(), annualBase)
+  // fix 轮 2 取整：20261231/10000=2026.1231 会带 mmdd 小数尾巴，把早披露的
+  // FY(base+1) 年报列（如 2027-02 跑批撞出 [20261231]，差 1.1231>1）误判成宇宙级
+  // 陈旧——必须 floor 到纯年份再与 annualBase 比。
+  const dataAnnualBase = annRefs.length ? Math.floor(Math.max(...annRefs) / 10000) : NaN;
+  const anchorsOk = isAnnualBaseFresh(now, annualBase)
     && (!Number.isFinite(dataAnnualBase) || Math.abs(dataAnnualBase - annualBase) <= 1);
 
   // roe3y：近三年年报加权 ROE 窗口列，按日期升序（裁定 4）。fix 轮 1 收紧：
