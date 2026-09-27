@@ -6,8 +6,13 @@ import type { Stock } from './engine.ts';
 
 export type GsTable = Record<string, (string | number | null)[]>;
 
-export const Q_FIN = '全部沪深A股的加权净资产收益率、归属母公司股东的净利润同比增长率、扣非净利润同比增长率、营业总收入同比增长率、销售毛利率、资产负债率、市盈率PE、所属同花顺行业';
+// V1.1 措辞（探针实证的最终版）：不写「销售毛利率同比增长率」——GS 会把同查询里
+// 的销售毛利率/roe(摊薄) 当期列连带替换成同比增长率列（污染）；改用 2025年中报/
+// 2025年报两个历史绝对值窗口列，mlrYoy 由适配器自行派生（与 GS 同比列逐位一致）。
+// 现金流指标同理必须留在独立 Q_CASH（并入会被误解析成同比增长率列）。
+export const Q_FIN = '全部沪深A股的加权净资产收益率、归属母公司股东的净利润同比增长率、扣非净利润同比增长率、营业总收入同比增长率、销售毛利率、资产负债率、市盈率PE、2023年报净资产收益率、2024年报净资产收益率、2025年报净资产收益率、近3年营业总收入复合增长率、2025年报销售毛利率、2025年中报销售毛利率、所属同花顺行业';
 export const Q_MOM = '全部沪深A股的60日涨跌幅、20日涨跌幅、最新收盘价、20日均价、60日均价、所属同花顺行业';
+export const Q_CASH = '全部沪深A股的经营活动产生的现金流量净额、归属于母公司所有者的净利润、股票简称';
 
 const BASE = 'https://dgzt.guosen.com.cn/skills/agent/mcp/smart_stock_picking';
 
@@ -19,6 +24,13 @@ export function colByPrefix(t: GsTable, prefix: string): string | undefined {
 // 最早起始日 = 长窗（60日），最晚起始日 = 短窗（20日）；单一列时首尾同为该列。
 export function sortedWindowCols(t: GsTable, prefix: string): string[] {
   return Object.keys(t).filter(k => k.startsWith(prefix)).sort();
+}
+
+// 严格窗口列：`名称[yyyyMMdd...]` 才入选，排除同名前缀的先兄弟列
+// （销售毛利率同比增长率 / 归属于母公司所有者的净利润同比增长率等），
+// mlrYoy 与 mlrDelta 是不同字段，绝不互换。仍按字典序 = 时间序升序。
+export function windowColsByPrefix(t: GsTable, name: string): string[] {
+  return Object.keys(t).filter(k => k.startsWith(name + '[') && /^\d{8}/.test(k.slice(name.length + 1))).sort();
 }
 
 const num = (v: string | number | null | undefined): number | null => {
@@ -45,6 +57,21 @@ const lastWindowCol = (t: GsTable, prefix: string, i: number): number | null => 
   if (keys.length === 0) return null;
   return num(t[keys[keys.length - 1]]?.[i]);
 };
+
+// 严格窗口列版本（同上纪律，但排除增长率先兄弟列）：idx=0 最早期，-1 最新期；
+// 行索引越界 = 该 code 在此表无行 → null（优雅缺席，不 clamp 取值）
+const strictWin = (t: GsTable, name: string, i: number, idx: number): number | null => {
+  const keys = windowColsByPrefix(t, name);
+  if (keys.length === 0) return null;
+  const key = idx < 0 ? keys[keys.length + idx] : keys[Math.min(idx, keys.length - 1)];
+  if (!key || i < 0 || i >= (t[key]?.length ?? 0)) return null;
+  return num(t[key]?.[i]);
+};
+
+// 利润现金含量 = 经营现金流净额 ÷ 归母净利（各自窗口列最新值）；
+// R-CASHNEG：分母≤0 时比值无经济意义 → null（Quality 缺腿由引擎 renorm 处理）
+const cashRatio = (cf: number | null, np: number | null): number | null =>
+  cf !== null && np !== null && np > 0 ? cf / np : null;
 
 export async function gsFetch(query: string, apiKey: string, timeoutMs = 90_000): Promise<GsTable> {
   const qs = new URLSearchParams({
@@ -74,7 +101,13 @@ export async function gsFetch(query: string, apiKey: string, timeoutMs = 90_000)
   throw lastErr;
 }
 
-export function mergeTables(fin: GsTable, mom: GsTable): Stock[] {
+// 从严格窗口列名中取 yyyyMMdd 日期戳（'销售毛利率[20250630]' → 20250630）
+const colDate = (key: string): number => Number(key.match(/\[(\d{8})/)?.[1] ?? NaN);
+const mmdd = (d: number): number => d % 10000;
+
+// cash = 独立第 3 次 GS 调用（Q_CASH）的原始值宽表；null/缺省 → Stock.cash 全 null
+// （Task 6 编排接入前的兼容形态：两参调用照旧可用，缺失表现为 C 层风格优雅缺席）。
+export function mergeTables(fin: GsTable, mom: GsTable, cash: GsTable | null = null): Stock[] {
   const codes = (fin['股票代码'] as string[] | undefined) ?? [];
   // 守卫：有数据行却缺失“股票市场类型”列时，下方 isST 判定会把全部股票静默标为 ST
   // （0 可用行且无报错）——在此 fail loudly，避免编排层拿到空宇宙。
@@ -83,8 +116,36 @@ export function mergeTables(fin: GsTable, mom: GsTable): Stock[] {
   }
   const momCodes = (mom['股票代码'] as string[] | undefined) ?? [];
   const momIdx = new Map(momCodes.map((c, i) => [c, i]));
+  const cashCodes = (cash?.['股票代码'] as string[] | undefined) ?? [];
+  const cashIdx = new Map(cashCodes.map((c, i) => [c, i]));
   const thsK = colByPrefix(fin, '所属同花顺行业');
   const mktK = colByPrefix(fin, '股票市场类型');
+
+  // 销售毛利率三个绝对值窗口列（本期 / 上年同期 / 上年年报）按日期定位，不按下标猜测：
+  // 本期=日期最大；上年同期=年份减一且月日相同；上年年报=日期最大的 12月31日列。
+  const mlrKeys = windowColsByPrefix(fin, '销售毛利率').filter(k => Number.isFinite(colDate(k)));
+  const mlrKeyOf = (i: number, pick: (ds: number[]) => number): number | null => {
+    const dates = mlrKeys.map(colDate);
+    const d = pick(dates);
+    return Number.isFinite(d) ? num(fin[mlrKeys[dates.indexOf(d)]]?.[i]) : null;
+  };
+  const at = (i: number) => ({
+    latest: mlrKeyOf(i, ds => Math.max(...ds)),
+    prevYoy: mlrKeyOf(i, ds => {
+      const y = Math.max(...ds);
+      const want = (Math.floor(y / 10000) - 1) * 10000 + mmdd(y);
+      return ds.filter(d => d === want)[0] ?? NaN;
+    }),
+    // 上年年报 = 日期严格早于本期的最近 12月31日列；若年报本身已成为本期列
+    // （跑批撞上年报披露日）则不得用自身作差 → mlrDelta 退回 null 而非恒 0
+    prevAnnual: mlrKeyOf(i, ds => {
+      const y = Math.max(...ds);
+      return ds.filter(d => mmdd(d) === 1231 && d < y).sort((a, b) => a - b).at(-1) ?? NaN;
+    }),
+  });
+
+  // roe3y：近三年年报加权 ROE 窗口列，按日期升序（=[2023,2024,2025]，裁定 4）
+  const roe3Keys = windowColsByPrefix(fin, '净资产收益率roe(加权,公布值)');
   const out: Stock[] = [];
   for (let i = 0; i < codes.length; i++) {
     const code = codes[i];
@@ -93,12 +154,15 @@ export function mergeTables(fin: GsTable, mom: GsTable): Stock[] {
     const mkt = mktK ? str(fin[mktK]?.[i]) : '';
     const j = momIdx.get(code) ?? -1;
     const momRowOk = j >= 0;
-    out.push({
+    const m = at(i);
+    const k = cashIdx.get(code) ?? -1;
+    const out2: Stock = {
       code,
       name,
       ths: (thsK ? str(fin[thsK]?.[i]) : '').split('-'),
-      roe: num(col(fin, '净资产收益率roe', i)),
-      mlr: num(col(fin, '销售毛利率', i)),
+      // 当期 ROE 严格取摊薄列（只写 '净资产收益率roe' 会被 3 年加权列误匹配）
+      roe: num(col(fin, '净资产收益率roe(摊薄', i)),
+      mlr: m.latest,
       kc: num(col(fin, '归属母公司股东的净利润-扣除', i)),
       gm: num(col(fin, '归属母公司股东的净利润(同比', i)),
       rev: num(col(fin, '营业总收入(同比', i)),
@@ -112,7 +176,23 @@ export function mergeTables(fin: GsTable, mom: GsTable): Stock[] {
       close: momRowOk ? lastWindowCol(mom, '区间收盘价', j) : null,
       a20: momRowOk ? lastWindowCol(mom, '区间成交均价', j) : null,
       a60: momRowOk ? windowCol(mom, '区间成交均价', j, 0) : null,
-    });
+      // ---- V1.1 新增（缺列 → null/空数组，引擎侧走 NA renorm）----
+      // 利润现金含量：独立第 3 次 GS 调用的两个原始值列最新窗口值之比
+      cash: k >= 0
+        ? cashRatio(
+          strictWin(cash!, '经营活动产生的现金流量净额', k, -1),
+          strictWin(cash!, '归属于母公司所有者的净利润', k, -1))
+        : null,
+      // mlrYoy：本期毛利率对上年同期（与 GS 同比列逐位一致的派生值）；与 mlrDelta 不同字段
+      mlrYoy: m.latest !== null && m.prevYoy !== null && m.prevYoy !== 0
+        ? (m.latest / m.prevYoy - 1) * 100 : null,
+      // mlrDelta（R6 利润率恢复代理）：本期 − 上年年报，两者均非 null 才接线
+      mlrDelta: m.latest !== null && m.prevAnnual !== null ? m.latest - m.prevAnnual : null,
+      roe3y: roe3Keys.map(key => num(fin[key]?.[i])),
+      // 裁定 1：取日期最新的窗口列（[20251231] = 2022→2025 年报 3 年 CAGR）
+      cagr3: strictWin(fin, '营业总收入复合年增长率', i, -1),
+    };
+    out.push(out2);
   }
   return out;
 }
