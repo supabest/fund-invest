@@ -602,11 +602,16 @@ function scoreDetailHtml(s){
   const ex = sc.extras || null;
   const mixed = (sc.flags||[]).includes('mixed_business');
   const segs = (ex && ex.mix && Array.isArray(ex.mix.segments)) ? ex.mix.segments.filter(x=>x&&typeof x.name==='string') : null;
+  const mixSuffix = (segs && segs.length) ? ' · 收入结构 ' + segs.slice(0,2).map(x=>`${escapeHtml(x.name)}${Math.round((typeof x.ratio==='number'&&isFinite(x.ratio)?x.ratio:0)*100)}%`).join('/') : '';
+  const indCaliber = '行业池 ' + escapeHtml(String(sc.ths_l2 || sc.ths_l1 || '—'));
+  // I-1：优先按引擎落库的真实分组 grp 判定池口径（MARKET 含 mixed 与行业样本<20 两类，均对全市场取百分位）
+  const grp = (ex && ex.pool && ex.pool.grp) || null;
   let caliber;
-  if(mixed){
-    caliber = '全市场口径' + (segs && segs.length ? ' · 收入结构 ' + segs.slice(0,2).map(x=>`${escapeHtml(x.name)}${Math.round((typeof x.ratio==='number'&&isFinite(x.ratio)?x.ratio:0)*100)}%`).join('/') : '');
+  if(grp){
+    caliber = (grp === 'MARKET') ? ('全市场口径' + (mixed ? mixSuffix : '')) : indCaliber;
   } else {
-    caliber = '行业池 ' + escapeHtml(String(sc.ths_l2 || sc.ths_l1 || '—'));
+    // 安全降级：旧批次无 extras.pool → 沿用原 mixed-flag-only 行为，绝不 undefined
+    caliber = mixed ? ('全市场口径' + mixSuffix) : indCaliber;
   }
   const confTxt = (sc.confidence==='A'||sc.confidence==='B'||sc.confidence==='C') ? ' · 置信度 ' + sc.confidence : '';
   const normalPe = (ex && ex.implied_normal_pe_approx!=null && Number.isFinite(Number(ex.implied_normal_pe_approx))) ? `<div class="score-caliber">按当前利润增速正常化 PE ≈ ${Number(ex.implied_normal_pe_approx).toFixed(1)}（info-only）</div>` : '';

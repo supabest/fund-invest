@@ -1,6 +1,6 @@
 /// <reference lib="deno.ns" />
 import { computeScores, type Stock } from './engine.ts';
-import { gsFetch, mergeTables, Q_FIN, Q_MOM } from './gs.ts';
+import { gsFetch, mergeTables, Q_FIN, Q_MOM, Q_CASH, type GsTable } from './gs.ts';
 
 const MIN_ROWS = 4000;
 
@@ -79,7 +79,14 @@ Deno.serve(async (req: Request) => {
     const [finT, momT] = [await gsFetch(Q_FIN, key), await gsFetch(Q_MOM, key)];
     const n = (finT['股票代码']?.length ?? 0);
     if (n < MIN_ROWS || (momT['股票代码']?.length ?? 0) < MIN_ROWS) throw new Error(`GS 行数异常 fin=${n}，保留旧批次`);
-    const stocks: Stock[] = mergeTables(finT, momT);
+    // C-1（spec §4.3）：现金腿必须独立第 3 次 GS 调用（并入会被 GS 误解析成同比增长率列）；
+    // 独立且静默降级——短表/畸形/异常一律置 null，绝不阻塞跑批或覆盖好批次（缺腿由引擎 renorm 处理）。
+    let cashT: GsTable | null = null;
+    try {
+      const c = await gsFetch(Q_CASH, key);
+      if ((c['股票代码']?.length ?? 0) >= MIN_ROWS) cashT = c;   // 短表/畸形 → 保持 null（该腿被 renorm 排除）
+    } catch { cashT = null; }                                    // 现金腿尽力而为；缺席 → 保守降级
+    const stocks: Stock[] = mergeTables(finT, momT, cashT);
     // C 层混合业务标记：仅设 s.mixed，分组降级（→MARKET）由 engine.assignGroups 完成
     const mixMap = await fetchMixMap(Deno.env.get('SUPABASE_URL')!);
     let mixedCount = 0;
@@ -110,7 +117,7 @@ Deno.serve(async (req: Request) => {
       ind_rank: r.indRank, ind_n: r.indN, market_rank: r.marketRank, market_n: scored.length,
       in_pool: poolSet.has(r.code.split('.')[0]), cov: r.cov, pe: r.pe, peg: r.peg, roe: r.roe, debt: r.debt,
       flags: r.flags, warnings: warnings.get(r.code) ?? [], confidence: r.confidence,
-      extras: { fin_period: periodStamp, abs_trend: r.absTrend, ...buildRevealExtras(r, mixMap.get(r.code.split('.')[0])) },
+      extras: { fin_period: periodStamp, abs_trend: r.absTrend, pool: { grp: r.grp, ind_n: r.indN }, ...buildRevealExtras(r, mixMap.get(r.code.split('.')[0])) },
     })), 'stock_score', 'batch_date,code');
     return Response.json({ ok: true, batch_date: batch, scored: scored.length, skipped: rows.length - scored.length, mixed_injected: mixedCount, top10: top.map(t2 => ({ code: t2.code, name: t2.name, final: t2.final })) });
   } catch (e) {

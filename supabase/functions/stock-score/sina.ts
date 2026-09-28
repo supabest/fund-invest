@@ -1,3 +1,5 @@
+// DEPRECATED / 未接线：新浪行情为不复权价，与 GS 前复权口径不可混用（直接对接会静默污染 momentum_crowded）。
+// crowded 已在 engine.ts 内用 GS a60 实现。本模块原语仅保留备未来解决复权口径后启用；启用前必须先对齐复权。
 /// <reference lib="deno.ns" />
 export interface Kbar { day: string; close: number }
 
