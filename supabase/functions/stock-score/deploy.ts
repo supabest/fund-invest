@@ -577,7 +577,7 @@ Deno.serve(async (req: Request) => {
     // 独立且静默降级——短表/畸形/异常一律置 null，绝不阻塞跑批或覆盖好批次（缺腿由引擎 renorm 处理）。
     let cashT: GsTable | null = null;
     try {
-      const c = await gsFetch(Q_CASH, key);
+      const c = await gsFetch(Q_CASH, key, 20_000);   // 尽力而为腿用短预算，避免最坏情况撞平台超时杀整批
       if ((c['股票代码']?.length ?? 0) >= MIN_ROWS) cashT = c;   // 短表/畸形 → 保持 null（该腿被 renorm 排除）
     } catch { cashT = null; }                                    // 现金腿尽力而为；缺席 → 保守降级
     const stocks: Stock[] = mergeTables(finT, momT, cashT);
@@ -613,7 +613,7 @@ Deno.serve(async (req: Request) => {
       flags: r.flags, warnings: warnings.get(r.code) ?? [], confidence: r.confidence,
       extras: { fin_period: periodStamp, abs_trend: r.absTrend, pool: { grp: r.grp, ind_n: r.indN }, ...buildRevealExtras(r, mixMap.get(r.code.split('.')[0])) },
     })), 'stock_score', 'batch_date,code');
-    return Response.json({ ok: true, batch_date: batch, scored: scored.length, skipped: rows.length - scored.length, mixed_injected: mixedCount, top10: top.map(t2 => ({ code: t2.code, name: t2.name, final: t2.final })) });
+    return Response.json({ ok: true, batch_date: batch, scored: scored.length, skipped: rows.length - scored.length, mixed_injected: mixedCount, cash_leg_ok: cashT !== null, cash_rows: cashT?.['股票代码']?.length ?? 0, top10: top.map(t2 => ({ code: t2.code, name: t2.name, final: t2.final })) });
   } catch (e) {
     return Response.json({ ok: false, error: String(e) }, { status: 500 });
   }
