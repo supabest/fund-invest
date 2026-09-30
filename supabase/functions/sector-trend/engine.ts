@@ -168,7 +168,7 @@ export function computeSectorRows(inputs: SectorInput[]): SectorRow[] {
       if (p52 <= T.bottom.pos52 && m20 > T.bottom.m20 && vr <= T.bottom.vr) labels.push('筑底候选');
       if (p52 >= T.overheat.pos52 && dev60 >= T.overheat.dev60) labels.push('过热警示');
       if (p52 >= T.stall.pos52 && vr >= T.stall.vr && Math.abs(m20) <= T.stall.m20) labels.push('高位放量滞涨');
-      if (p52 >= T.left.pos52 && m20 <= T.left.m20) labels.push('左侧埋伏');
+      if (p52 <= T.left.pos52 && m20 <= T.left.m20) labels.push('左侧埋伏');
       if (dm20 !== null) {
         if (dm20 >= T.chase.dm20 && vr >= T.chase.vr && m20 > T.chase.m20) labels.push('禁追高');
         if (p52 >= T.ebb.pos52 && dm20 <= T.ebb.dm20) labels.push('退潮观察');

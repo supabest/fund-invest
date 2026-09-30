@@ -136,6 +136,27 @@ Deno.test('用例7 左侧埋伏: pos52≤15 且 m20≤0', () => {
   assertEquals(row.labels.includes('左侧埋伏'), true);
 });
 
+// ---------- 用例7c：左侧埋伏 pos52 运算符方向反向钉（spec §5：pos52≤15 触发） ----------
+// pos52 = (c - mn)/(mx - mn)*100（engine.ts L64，窗口需≥250 根）。构造窗口 [90,130]：
+// c=96 → pos52=15（边界，必须触发）；c=96.4 → pos52=16（必须不触发）。
+// 两组 m20 均<0（close[-20]=98）、barsN=260、vr=1，唯一变量是 pos52 落在 15 两侧。
+// 若判据误写成 p52>=T.left.pos52（方向反转），pos52=16 组会误触发 → 本钉变红。
+Deno.test('用例7c 左侧埋伏反向钉: pos52=15 边界触发 / pos52=16 不触发（≤ 非 ≥）', () => {
+  // pos52=15：窗口 [90,130]，close=96 → (96-90)/40*100=15；m20=96/98-1<0
+  const hit = only(input(bars(seq(N, (i) => (i <= 238 ? 130 : i === 239 ? 98 : i <= 258 ? 90 : 96)))));
+  assertClose(hit.pos52!, 15, 'pos52 边界值=15', 0.001);
+  assertEquals(hit.m20 <= 0, true);
+  assertEquals(hit.labels.includes('左侧埋伏'), true); // spec: ≤15 含边界 15
+
+  // pos52=16：close=96.4 → (96.4-90)/40*100=16；m20=96.4/98-1<0 → 按 spec 不得触发
+  const miss = only(input(bars(seq(N, (i) => (i <= 238 ? 130 : i === 239 ? 98 : i <= 258 ? 90 : 96.4)))));
+  assertClose(miss.pos52!, 16, 'pos52 边界外=16', 0.001);
+  assertEquals(miss.m20 <= 0, true);
+  assertEquals(miss.pos52! > T_LEFT_POS52, true); // 16 > 15，位于判据 ≤ 的域外
+  assertEquals(miss.labels.includes('左侧埋伏'), false);
+});
+const T_LEFT_POS52 = 15; // spec §5 左侧埋伏 pos52 阈值（与 engine.ts T.left.pos52 一致）
+
 // ---------- 用例7b（M2）：严格边界钉 —— m20/vr 开闭运算符 与 门槛值 精确锁定 ----------
 // 说明：m20 = closes[n-1]/closes[n-21] - 1（见 engine.ts pctChange）。因 IEEE754 下 c/b-1 无法精确等于
 // 双精度字面量 0.02（102/100-1=0.020000000000000018>0.02），故用边界两侧可达的最近双精度值成对钉住阈值位置；
