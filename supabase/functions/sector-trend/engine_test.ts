@@ -136,6 +136,42 @@ Deno.test('用例7 左侧埋伏: pos52≤15 且 m20≤0', () => {
   assertEquals(row.labels.includes('左侧埋伏'), true);
 });
 
+// ---------- 用例7b（M2）：严格边界钉 —— m20/vr 开闭运算符 与 门槛值 精确锁定 ----------
+// 说明：m20 = closes[n-1]/closes[n-21] - 1（见 engine.ts pctChange）。因 IEEE754 下 c/b-1 无法精确等于
+// 双精度字面量 0.02（102/100-1=0.020000000000000018>0.02），故用边界两侧可达的最近双精度值成对钉住阈值位置；
+// 唯独 m20=0 可精确构造 → 直接钉 左侧埋伏 的 m20 `<=`（翻成 `<` 立即变红）。
+Deno.test('用例7b M2 边界钉: 筑底>0.02 / 禁追高>0.02 / 滞涨|·|≤0.02 / 左侧 m20≤0 恰等0', () => {
+  // 筑底候选 m20 `> 0.02`（钉 >）：其余条件 pos52≤20 且 vr≤0.9 恒满足，唯一变量为 m20 落 0.02 两侧
+  const botNo = only(input(bars(seq(N, (i) => (i < 90 ? 130 : i < 259 ? 90 : 91.79)), (i) => (i >= 240 ? 80 : 100))));
+  assertEquals(botNo.m20 > 0.02, false); // ≈0.01989 边界下侧
+  assertEquals(botNo.labels.includes('筑底候选'), false);
+  const botYes = only(input(bars(seq(N, (i) => (i < 90 ? 130 : i < 259 ? 90 : 91.8)), (i) => (i >= 240 ? 80 : 100))));
+  assertEquals(botYes.m20 > 0.02, true); // 0.020000000000000018 边界上侧
+  assertEquals(botYes.labels.includes('筑底候选'), true);
+
+  // 禁追高 m20 `> 0.02`（钉 >）：dm20=20(≥20) 且 vr≈1.71(≥1.2) 恒满足，prevMp=30 → dm20=50-30=20
+  const chNo = only(input(bars(seq(N, (i) => (i <= 258 ? 100 : 101.99)), (i) => (i >= 240 ? 200 : 100)), [etf()], 30));
+  assertEquals(chNo.dm20, 20);
+  assertEquals(chNo.m20 > 0.02, false);
+  assertEquals(chNo.labels.includes('禁追高'), false);
+  const chYes = only(input(bars(seq(N, (i) => (i <= 258 ? 100 : 102)), (i) => (i >= 240 ? 200 : 100)), [etf()], 30));
+  assertEquals(chYes.m20 > 0.02, true);
+  assertEquals(chYes.labels.includes('禁追高'), true);
+
+  // 高位放量滞涨 `|m20| ≤ 0.02`（钉 ≤ 侧）：pos52≥70 且 vr≈2.25≥1.8 恒满足
+  const stYes = only(input(bars(seq(N, (i) => (i <= 238 ? 90 : i <= 258 ? 100 : 101.99)), (i) => (i >= 240 ? 300 : 100))));
+  assertEquals(Math.abs(stYes.m20) <= 0.02, true); // ≈0.0199 窗内 → 触发
+  assertEquals(stYes.labels.includes('高位放量滞涨'), true);
+  const stNo = only(input(bars(seq(N, (i) => (i <= 238 ? 90 : i <= 258 ? 100 : 102)), (i) => (i >= 240 ? 300 : 100))));
+  assertEquals(Math.abs(stNo.m20) <= 0.02, false); // 0.020000000000000018 越界 → 不触发
+  assertEquals(stNo.labels.includes('高位放量滞涨'), false);
+
+  // 左侧埋伏 m20 `≤ 0` 恰等 0（钉 ≤ 非 <）：pos52=15 满足门、closes[239]=closes[259]=96 → m20 精确=0
+  const left = only(input(bars(seq(N, (i) => (i < 90 ? 130 : i === 239 ? 96 : i <= 258 ? 90 : 96)))));
+  assertEquals(left.m20, 0); // 精确 0：若判据为 m20<0 则不触发 → 本断言立即变红
+  assertEquals(left.labels.includes('左侧埋伏'), true);
+});
+
 // ---------- 用例8：历史不足 bars<250 → pos52/dm20=null, 五态与 score 仍出, labels=[] ----------
 Deno.test('用例8 历史不足: 200根 → pos52/dm20 null, labels 空, 五态与 score 仍出', () => {
   const row = only(input(bars(seq(200, (i) => 100 + 0.1 * i)))); // 上行 → 有状态
@@ -145,6 +181,16 @@ Deno.test('用例8 历史不足: 200根 → pos52/dm20 null, labels 空, 五态�
   assertEquals(row.labels.length, 0);
   assertEquals(['强多头', '多头', '纠缠', '走弱', '空头排列'].includes(row.state), true);
   assertEquals(row.score !== null, true);
+  // M3 门槛钉：构造一个「除 pos52 外，禁追高全部子条件都满足」的 200 根行 ——
+  // dm20=20(≥20，排除 prevMp=null 路径)、vr≈1.71(≥1.2)、m20≈0.0200(>0.02)，唯 pos52 因 <250 根=null。
+  // 证明 engine.ts:167 的 barsN≥250/pos52!==null 门槛确实屏蔽了 dm20 类标签：若移除该门槛，禁追高将触发。
+  const r8b = only(input(bars(seq(200, (i) => (i <= 198 ? 100 : 102)), (i) => (i >= 180 ? 200 : 100)), [etf()], 30));
+  assertEquals(r8b.barsN, 200);
+  assertEquals(r8b.pos52, null); // 历史不足 → pos52 null
+  assertEquals(r8b.dm20, 20); // dm20 有值（非由 prevMp=null 得到）
+  assertEquals(r8b.vr !== null && r8b.vr >= 1.2, true); // 满足禁追高量比子条件
+  assertEquals(r8b.m20 > 0.02, true); // 满足禁追高 m20 子条件
+  assertEquals(r8b.labels.length, 0); // 但门槛屏蔽 → 全部标签(含禁追高)留空（spec §5 附注）
 });
 
 // ---------- 用例9：renorm 权重回切 + V 映射 ----------
@@ -160,9 +206,12 @@ Deno.test('用例9 renorm: 全池 hay=null → V/M/L=46.15/38.46/15.38 权重; �
   const qAbsent = only(input(bars(seq(N, () => 100)), [sole]));
   assertEquals(qAbsent.q, null); // 全池无 hay → Q 腿剔除
   // 分母=V30+M25+L10=65，Q 缺席 → 有效权重 V=30/65≈46.15%, M=25/65≈38.46%, L=10/65≈15.38%
-  assertClose(30 / 65 * 100, 46.1538, 'V 有效权重');
-  assertClose(25 / 65 * 100, 38.4615, 'M 有效权重');
-  assertClose(10 / 65 * 100, 15.3846, 'L 有效权重');
+  // M1 修复：用引擎输出反推 V 有效权重（替换原三行两侧皆字面量的空断言）。
+  // 仅变动 V 腿(tem 1→5，v 20→100)，单 ETF 使 M/L 腿恒=50、Q 缺席 → score=(v*30+m*25+l*10)/65，
+  // 故 Δscore/Δv 必等于 V 有效权重 30/65；此断言含被测值，改判据即会变红。
+  const vBase = only(input(bars(seq(N, () => 100)), [etf({ tem: 1, r60: 5, sharpe: 1, amt: 10, hay: null })]));
+  const vHi = only(input(bars(seq(N, () => 100)), [etf({ tem: 5, r60: 5, sharpe: 1, amt: 10, hay: null })]));
+  assertClose((vHi.score! - vBase.score!) / (vHi.v! - vBase.v!), 30 / 65, 'V 有效权重=30/65≈46.15%', 0.0001);
   // 用 brief 公式独立验证（非硬编码）：Σ(因子分×w)/Σ(非缺腿 w)
   const expectedAbsent = (qAbsent.v! * 30 + qAbsent.m! * 25 + qAbsent.l! * 10) / (30 + 25 + 10);
   assertClose(qAbsent.score, expectedAbsent, 'Q 缺席 renorm');
