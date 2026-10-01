@@ -22,10 +22,12 @@ create table if not exists sector_rotation_daily (
 );
 
 -- 终审 Important-2：bars_n 列 —— 代表ETF当日可用 K 线根数（engine SectorRow.barsN 原样落库）。
--- 语义：engine 对 barsN<250 的行业会把 m20/m60/dev60 兜底为 0（Task2-M5），库内伪 0 与「真实平盘 0」
--- 无法区分；bars_n 是下游第二个消费方（日报/回测）唯一的免歧判别器：bars_n<21 ⇒ m20 不可算，
--- bars_n<61 ⇒ m60/dev60 不可算（阀值取 engine 实际公式），bars_n<250 ⇒ pos52/dm20 相关标签留空。
+-- 语义：engine 对样本不足的行业把 m20/m60 以 `?? 0` 兜底（Task2-M5），库内伪 0 与「真实平盘 0」不可区分；
+-- dev60 不兜底（ma60 取 sma 的部分窗口，得的是非 0 非 null 的「短窗口真值」，口径已不是 60 日均线）。
+-- bars_n 是下游第二个消费方（日报/回测）唯一的免歧判别器：<21 ⇒ m20 不可算（pctChange 需 n>20），
+-- <61 ⇒ m60 不可算、dev60 口径退化（ma60 为部分窗口，按不可信处理是保守安全的），
+-- <250 ⇒ pos52/dm20 相关标签留空（pos52 需 ≥250 根）。
 -- 幂等：本文件整体可重复执行（create if not exists + add column if not exists），对已存在表仅新增一列。
 alter table public.sector_rotation_daily add column if not exists bars_n integer;
 comment on column public.sector_rotation_daily.bars_n is
-  '代表ETF当日可用 K 线根数（0..N）；区分样本不足的 0 兜底与真实平盘 0：<21 m20 不可算、<61 m60/dev60 不可算、<250 pos52/标签留空（数据积累中）';
+  '代表ETF当日可用 K 线根数（0..N）；免歧义区分「样本不足的 0 兜底」与「真实平盘 0」：<21 m20 不可算、<61 m60 不可算且 dev60 为短窗口口径、<250 pos52/标签留空（数据积累中）';
