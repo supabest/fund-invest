@@ -159,7 +159,16 @@ export async function fetchHistoryKline(
   const pages: KlineResp[][] = [];
   let curEnd = opts.end ?? new Date().toISOString().slice(0, 10);
   for (let page = 1; page <= maxPages; page++) {
-    const batch = await fetchPage(symbol, curEnd, lmt);
+    let batch: KlineResp[];
+    try {
+      batch = await fetchPage(symbol, curEnd, lmt);
+    } catch (e) {
+      // 首页即失败 = 真错误（网络/非法 symbol）⇒ 上抛交由调用方记 failed。
+      // 后续页失败（腾讯对上市日之前的日期返回空/畸形 ⇒ fetchRecentKline throw）= 已翻到历史尽头，
+      // 停止翻页并保留已取到的页（spec 终止判据隐含“本批可能更少/空即自然到头”；不得因此丢弃整段历史）。
+      if (pages.length === 0) throw e;
+      break;
+    }
     pages.push(batch);
     const firstDate = batch.length > 0 ? batch[0].date : "";
     // 续页判据：本批拉满量级(>=minRows) 且 首行仍晚于起始日 且 未到页数上限

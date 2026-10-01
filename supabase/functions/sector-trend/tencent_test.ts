@@ -220,3 +220,38 @@ Deno.test("fetchHistoryKline: end 逐页回退=上一页首行前一天（重叠
   // 首页用传入 end，其后用 prevDay(上页首行)
   assertEquals(ends.length, 3);
 });
+
+Deno.test("fetchHistoryKline: 后续页抛异常（上市日前空/畸形）⇒ 保留已取页、不丢弃整段历史", async () => {
+  let calls = 0;
+  const r = await fetchHistoryKline("sh588170", {
+    start: "2019-01-01",
+    end: "2026-09-30",
+    lmt: 640,
+    maxPages: 6,
+    fetchPage: async () => {
+      calls++;
+      if (calls === 1) return barsBack(363, "2026-09-30"); // 首屏 363 根，首行>2019 且>=30 → 续页
+      throw new Error("tencent kline empty/畸形"); // 第2页翻到上市日之前 → 空
+    },
+    sleepFn: async () => {},
+  });
+  assertEquals(calls, 2, "应尝试到第2页后因异常停止");
+  assertEquals(r.length, 363, "首屏 363 根必须保留，不得因后续页异常丢弃");
+});
+
+Deno.test("fetchHistoryKline: 首页即抛异常 = 真错误 ⇒ 上抛（调用方记 failed）", async () => {
+  let threw = false;
+  try {
+    await fetchHistoryKline("sh999999", {
+      start: "2019-01-01",
+      end: "2026-09-30",
+      fetchPage: async () => {
+        throw new Error("tencent network error");
+      },
+      sleepFn: async () => {},
+    });
+  } catch {
+    threw = true;
+  }
+  assertEquals(threw, true, "首页失败必须上抛，不能吐空当作成功");
+});
