@@ -1334,7 +1334,10 @@ if (!Deno.env.get("SECTOR_TREND_DISABLE_SERVE")) {
           batches_before: dailyBefore?.batches ?? null,
           batches_after: dailyAfter.batches,
           accumulating_before: dailyBefore?.latestAcc ?? null,
-          accumulating_after: acc,
+          // 与 before 同口径读【已落库批次】的 pos52-null 计数：
+          //  整轮 GS 失败/computed 为空时，刷新轮不写库 ⇒ after 应如实等于 before（未变），
+          //  不能用内存 acc（那会把「本轮没算」误报成「accumulating 归零」）。
+          accumulating_after: dailyAfter.latestAcc,
           industries: outRows.length,
           up: lists.up.length,
           down: lists.down.length,
