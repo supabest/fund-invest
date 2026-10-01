@@ -62,6 +62,8 @@ create table sector_rotation_daily (
   score numeric,                      -- 行业四因子分(renorm)
   v numeric, m numeric, l numeric, q numeric,  -- 分项(q 无数据时 null)
   theme text,                         -- 用户主题映射(可空)
+  bars_n integer,                     -- 代表ETF当日可用K线根数；免歧义区分「样本不足的0兜底」与「真实平盘0」（终审 I-2）
+  stale boolean default false,        -- 失败降级/复制昨日行标记（§3.2、§6-②.5）
   primary key (batch_date, ind)
 );
 ```
@@ -97,8 +99,9 @@ create table sector_rotation_daily (
 ## 6. Nightly 函数 `sector-trend`
 
 - 形态：Deno Edge Function，`supabase/functions/sector-trend/`，纯函数内核 `engine.ts`（指标/状态/标签/renorm，含单测）+ `index.ts` 编排，沿用 stock-score 的部署（Management API）与触发链（pg_net fire-and-forget，5s 超时预期内）。
-- 时点：**22:30**，接在 stock-score（21:30/22:00）之后，避开并发与配额。
-- 步骤：①读宇宙映射 ②腾讯K线增量 ③GS 15 分段截面（每晚，含 Q 探测；周一额外宇宙重建+归一校验）④指标与截面分位计算 ⑤标签+评分写 `sector_rotation_daily` ⑥滚动月更 label_stats。
+- 时点：**22:35**（原设计 22:30 与 `fund-daily-2230` 同刻，实测错峰后移 5 分钟；cron 表达式 `35 14 * * *` UTC）。
+- 步骤：①读宇宙映射 ②腾讯K线增量 **②.5 非交易日守卫**：`kline_added===0 && kline_failed===0` ⇒ 判非交易日，**不 mint batch_date、不写库**，保留上一真实批次并提前返回（置于 ③ 之前，假日顺带不消耗 GS 配额）；`kline_failed>0` 属失败，不触发守卫，走 ⑤ 的 per-industry stale 复制 ③GS 15 分段截面（每晚，含 Q 探测）④指标与截面分位计算 ⑤标签+评分写 `sector_rotation_daily` ⑥滚动月更 label_stats。
+- 落地形态注记（V1）：「周一额外宇宙重建+归一校验」按 C1 裁决为**本地人工流程**（`scripts/build_universe.ts` + `sector_normalize.ts` 产 seed SQL，人工过目疑似重复清单后入库），nightly 对 `sector_etf_map` 只读、不 import 归一；自动调度与 `offmapCodes` 报警消费均未实现，列 V1.1。`label_stats` 月度滚动重算（⑥）同样未实现，前端脚注用 2026-09-30 回测静态数字。
 - 鉴权：独立 `SECTOR_TREND_TOKEN` 环境变量（沿用 DAILY_UPDATE_TOKEN 模式）。
 
 ## 7. 前端（基金页签「板块轮动」卡片）

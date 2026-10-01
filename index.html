@@ -171,6 +171,57 @@
   .score-caliber{font-size:11.5px; color:var(--muted); margin-top:6px; line-height:1.6;}
   .mkt-strip.off{opacity:.45;}
 
+  /* 板块轮动（sector_rotation_daily 批次）：双榜 + 主题条 + 标签色点 + 静态证据脚注 */
+  .sector-card{background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden;}
+  .sector-summary{font-size:12px; color:var(--muted); padding:12px 16px; border-bottom:1px solid var(--line); line-height:1.8;}
+  .sector-summary b{color:var(--ivory); font-weight:600;}
+  .sector-stale{color:var(--gold); font-weight:600;}
+  .sector-muted{color:var(--muted);}
+  .sector-list-title{font-size:12px; color:var(--ivory); padding:12px 16px 6px; display:flex; align-items:baseline; gap:6px; flex-wrap:wrap;}
+  .sector-list-sub{font-size:11px; color:var(--muted);}
+  .sector-list-title.clickable{cursor:pointer;}
+  .sector-list{border-top:1px solid var(--line);}
+  .sector-row{padding:8px 16px 9px; border-bottom:1px solid var(--line); cursor:pointer;}
+  .sector-row:nth-child(even){background:var(--panel-2);}
+  .sector-line1{display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:13px;}
+  .sector-ind{font-weight:600;}
+  .sector-state{font-size:11px; padding:2px 8px; border-radius:20px; white-space:nowrap;}
+  .st-up{background:var(--jade-dim); color:var(--jade);}
+  .st-down{background:var(--brick-dim); color:var(--brick);}
+  .st-mid{background:var(--panel-2); color:var(--ivory);}
+  .sector-row:nth-child(even) .st-mid{background:var(--line);}
+  .sector-line1 .chevron{margin-left:auto;}
+  .sector-stale-tag{font-size:10.5px; color:var(--gold); border:1px solid var(--gold); border-radius:4px; padding:1px 5px; white-space:nowrap;}
+  .sector-metrics{font-size:11px; color:var(--muted); margin-top:4px; line-height:1.7;}
+  .sector-metrics em, .sector-theme-vals em{font-style:normal; color:var(--ivory); font-variant-numeric:tabular-nums;}
+  .sector-acc{color:var(--gold);}
+  /* 退化行（代表ETF 不足 61 根，m60/m20/乖离不可算）：置榜末 + 标灰，与真实信号区分 */
+  .sector-row.deg{opacity:.66;}
+  .sector-row.deg .sector-ind{font-weight:500;}
+  .sector-row.deg .sector-state.st-deg{filter:grayscale(1); background:var(--line); color:var(--muted);}
+  .sector-deg-tag{font-size:10.5px; color:var(--muted); border:1px dashed var(--line-strong); border-radius:4px; padding:1px 5px; white-space:nowrap;}
+  .sector-labels{display:inline-flex; gap:10px; flex-wrap:wrap;}
+  .sector-label{font-size:11px; color:var(--muted); white-space:nowrap;}
+  .sector-dot{display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:4px; vertical-align:middle;}
+  .dot-green{background:var(--jade);}
+  .dot-red{background:var(--brick);}
+  .dot-amber{background:var(--gold);}
+  .dot-gray{background:var(--muted);}
+  .sector-hint{font-size:11px; color:var(--muted); margin-top:3px; line-height:1.6;}
+  .sector-etf-body{display:none; margin-top:8px; padding:10px 12px; background:var(--panel-2); border-radius:8px;}
+  .sector-etf-body.open{display:block;}
+  .sector-etf-row{display:flex; gap:8px; align-items:baseline; font-size:11.5px; padding:4px 0; border-bottom:1px solid var(--line); flex-wrap:wrap;}
+  .sector-etf-row:last-child{border-bottom:none;}
+  .sector-etf-row .nm{color:var(--ivory);}
+  .sector-etf-rep{color:var(--gold); font-size:10.5px;}
+  .sector-more{display:block; width:calc(100% - 32px); margin:8px 16px 12px; padding:8px; border:1px dashed var(--line-strong); background:transparent; color:var(--muted); font-size:11.5px; border-radius:7px; cursor:pointer; font-family:var(--sans);}
+  .sector-theme{display:flex; flex-wrap:wrap; gap:8px; padding:6px 16px 14px;}
+  .sector-theme-item{flex:1 1 calc(50% - 8px); min-width:0; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:11.5px; display:flex; gap:6px; align-items:center; flex-wrap:wrap;}
+  .sector-theme-item .t{font-weight:600; color:var(--ivory);}
+  .sector-theme-item.na{opacity:.6;}
+  .sector-theme-vals{flex:1 1 100%; font-size:11px; color:var(--muted); line-height:1.6;}
+  .sector-foot{font-size:11px; color:var(--muted); line-height:1.9; padding:12px 16px 14px; border-top:1px solid var(--line); background:var(--ink);}
+
   .sync-strip{display:flex; align-items:center; gap:10px; margin-top:10px; font-size:12px; color:var(--muted);}
   .sync-spacer{flex:1;}
   .sync-btn{background:transparent; border:1px solid var(--line-strong); color:var(--ivory); font-size:12px; padding:4px 12px; border-radius:14px; cursor:pointer; font-family:var(--sans);}
@@ -226,6 +277,13 @@
     .sync-btn{font-size:13px;}
     .modal h2{font-size:20px;}
     .toast{font-size:14px;}
+    .sector-summary{font-size:14px;}
+    .sector-list-title{font-size:14px;}
+    .sector-list-sub, .sector-metrics, .sector-label, .sector-hint, .sector-theme-vals{font-size:12.5px;}
+    .sector-line1{font-size:15px;}
+    .sector-state{font-size:12px;}
+    .sector-theme-item, .sector-etf-row, .sector-more{font-size:13px;}
+    .sector-foot{font-size:12.5px;}
   }
 </style>
 </head>
@@ -279,6 +337,11 @@
 <div class="section">
   <div class="section-title">主题仓位 <span class="hint">市值 vs 金额上限（锚定目标总额）</span></div>
   <table class="theme-table" id="themeTable"><tbody></tbody></table>
+</div>
+
+<div class="section">
+  <div class="section-title">板块轮动 <span class="hint">行业代表ETF均线五态 · 与个股评分口径分立，不合成</span></div>
+  <div id="sectorCardRoot"></div>
 </div>
 
 <div class="section">
@@ -388,6 +451,9 @@ let stockCap = 0;     // 股票总仓位上限（0=不限）
 // 量化评分（stock_score 最新批次）：null=尚未生成/加载失败，UI 优雅降级
 let scoreState = null; // { batch, rows: Map<code,row>, top10: row[] }
 let scoreTried = false; // 已尝试拉取；纯本地未接云时不展示占位文案
+
+// 板块轮动（sector_rotation_daily 最新批次）：与 scoreState 同范式——null=尚未生成/读取失败，卡片优雅降级
+let sectorState = null; // { batch, rows, accCounts: Map<pk_etf,n>, poolPools: {l1,l2,batch} }
 
 // 云同步状态
 let sb = null;            // supabase client
@@ -622,6 +688,448 @@ function scoreDetailHtml(s){
     ${normalPe}
     ${w}<div class="score-src">财务截至 ${escapeHtml(String((sc.extras&&sc.extras.fin_period)||'—'))} · 批次 ${escapeHtml(String(scoreState.batch))} · 评分≠买入建议</div>
   </div>`;
+}
+
+// ==== SECTOR_PURE_BEGIN ====
+// 以下均为无 IO 的纯函数/常量，是本卡片榜单/概要/退化判定/格式化的**唯一实现体**：
+// 页面直接调用，scripts/sector_render_logic.ts 按本标记抽取并做类型化导出，
+// scripts/sector_render_logic_test.ts 据其单测（单文件应用无构建步骤 ⇒ 实现体不外置）。
+// 规则权威 spec §4.3/§5（含 L94「历史不足处理」）/§7；控制者裁决 R-T4-1（累积中判定）/R-T4-3（数值单位）/R-T4-4（主题最差状态）。
+// 修复轮1：撤销上一轮沿用的 C3（把累积中行整体排除在双榜外，属派工越界）——按 spec L94 让
+// 历史不足 250 根的行业并入其 state 所属榜单；只有 n<61（m60 根本算不出、引擎以 0 兜底）的退化行
+// 显示「—」并置该榜末尾、标灰（消除 Task2 评审 M5「0 冒充平盘」隐患）。
+const SECTOR_WORST_RANK = { '空头排列':0, '走弱':1, '纠缠':2, '多头':3, '强多头':4 };
+const SECTOR_UP_STATES = ['强多头','多头'];
+const SECTOR_DOWN_STATES = ['走弱','空头排列'];
+const SECTOR_ENTANGLED_STATE = '纠缠'; // spec §4.3：纠缠只计数、不进双榜（组内仍列出行）
+// brief Step2 色点映射：筑底候选=绿  过热警示/高位放量滞涨=红  禁追高=橙  退潮观察/左侧埋伏=灰
+const SECTOR_LABEL_DOT = { '筑底候选':'green', '过热警示':'red', '高位放量滞涨':'red', '禁追高':'amber', '退潮观察':'gray', '左侧埋伏':'gray' };
+// 可算性门槛（与 supabase/functions/sector-trend/engine.ts 同源，前端只读不重算）：
+// pctChange(closes,60) 需 n>60 ⇒ m60 至少 61 根；sma(closes,120) 满窗需 120 根（engine 用 from=max(0,n-w) 兜底）。
+const SECTOR_M60_MIN_BARS = 61;
+const SECTOR_MA_FULL_BARS = 120;
+// R-T4-4：卡片四个可覆盖主题沿用 DB theme 列原名（板块侧口径）；与 L352 DEFAULT_THEMES 的配置主题名
+// 属两套分立系统（spec S1），不改名对齐。“均衡配置”为宽基配置类、无行业映射，本卡片不呈现（脚注已说明）。
+const SECTOR_THEME_ORDER = ['电力/绿电','机器人','新能源车','全球资源'];
+const SECTOR_NOT_COVERED_THEMES = ['美国股票','日本股票']; // spec §4.4/§7.3：A股行业ETF不覆盖
+
+function sectorStateWorstRank(state){
+  const r = SECTOR_WORST_RANK[state];
+  return r === undefined ? SECTOR_WORST_RANK['纠缠'] : r; // 未知态回落中性，不得“胜出”为最差
+}
+// R-T4-1：表无 bars_n 列 ⇒ 累积中判定严格用 pos52 === null；pos52=0 是有效值（恰在52周最低点），严禁 falsy 判断
+function sectorIsAccumulating(row){
+  return !row || row.pos52 === null || row.pos52 === undefined;
+}
+// n = 该代表ETF 在 sector_kline 的根数，唯一来源是 loadSectorRotation 的 head count（不新造数据源）
+function sectorBarsLookup(pk, accCounts){
+  if(!accCounts || pk === null || pk === undefined) return null;
+  const k = String(pk);
+  if(typeof accCounts.get === 'function') return accCounts.get(k); // Map<pk_etf, n>
+  return Object.prototype.hasOwnProperty.call(accCounts, k) ? accCounts[k] : null; // 纯对象（测试/兜底）
+}
+function sectorBarsN(row, accCounts){
+  const n = row ? sectorBarsLookup(row.pk_etf, accCounts) : null;
+  return (typeof n === 'number' && isFinite(n)) ? n : null;
+}
+// 退化行：累积中 &&（n<61 或 n 未知）。pos52 非空即代表 ETF 已有 ≥250 根，指标必可算，不入此列。
+// n 未知（head count 请求失败）保守按退化处理 ⇒ 宁可少显示一个真实值，也不让兜底 0 冒充平盘（Task2 评审 M5）。
+function sectorIsDegenerate(row, accCounts){
+  if(!sectorIsAccumulating(row)) return false;
+  const n = sectorBarsN(row, accCounts);
+  return n === null || n < SECTOR_M60_MIN_BARS;
+}
+// 参与 m60 排序的唯一口径：退化行返回 null（engine 兜底 0 不得当真涨跌）；其余返回真实值
+function sectorRowM60(row, accCounts){
+  const v = sectorNum(row && row.m60);
+  if(v === null) return null;
+  return sectorIsDegenerate(row, accCounts) ? null : v;
+}
+function sectorSplitRows(rows){
+  const tradable = [], accumulating = [];
+  (rows||[]).forEach(r=>{ (sectorIsAccumulating(r) ? accumulating : tradable).push(r); });
+  return { tradable, accumulating };
+}
+function sectorSplitDegenerate(rows, accCounts){
+  const ranked = [], degenerate = [];
+  (rows||[]).forEach(r=>{ (sectorIsDegenerate(r, accCounts) ? degenerate : ranked).push(r); });
+  return { ranked, degenerate };
+}
+function sectorByState(rows, states){
+  return (rows||[]).filter(r=>r && states.indexOf(r.state) >= 0);
+}
+function sectorCountByState(rows, states){
+  return sectorByState(rows, states).length;
+}
+// spec L94：累积中行与其余行一样入榜；退化行不参与 m60 排序，置于本榜末尾
+function sectorOrderedByM60(rows, accCounts, desc){
+  const s = sectorSplitDegenerate(rows, accCounts);
+  s.ranked.sort(desc ? (a,b)=>Number(b.m60)-Number(a.m60) : (a,b)=>Number(a.m60)-Number(b.m60));
+  return s.ranked.concat(s.degenerate);
+}
+function sectorRankLists(rows, accCounts){
+  const list = rows || [];
+  const ent = sectorByState(list, [SECTOR_ENTANGLED_STATE]);
+  const es = sectorSplitDegenerate(ent, accCounts);
+  return {
+    up: sectorOrderedByM60(sectorByState(list, SECTOR_UP_STATES), accCounts, true),
+    down: sectorOrderedByM60(sectorByState(list, SECTOR_DOWN_STATES), accCounts, false),
+    entangled: es.ranked.concat(es.degenerate),
+    accumulating: list.filter(sectorIsAccumulating),
+    degenerate: list.filter(r=>sectorIsDegenerate(r, accCounts))
+  };
+}
+// 概要单一口径（修复轮1）：向上/纠缠/调整 = 全部入库行按 state 实数统计（含累积中行），
+// 三数之和恒等于 total；accumulating/degenerate 是并列注记，不参与相加。与 rankLists 同源。
+function sectorSummaryCounts(rows, accCounts){
+  const list = rows || [];
+  const rankable = list.filter(r=>!sectorIsDegenerate(r, accCounts));
+  const ent = arr => sectorCountByState(arr, [SECTOR_ENTANGLED_STATE]);
+  return {
+    up: sectorCountByState(list, SECTOR_UP_STATES),
+    entangled: ent(list),
+    down: sectorCountByState(list, SECTOR_DOWN_STATES),
+    accumulating: list.filter(sectorIsAccumulating).length,
+    degenerate: list.length - rankable.length,
+    total: list.length,
+    rankable: { up: sectorCountByState(rankable, SECTOR_UP_STATES), entangled: ent(rankable), down: sectorCountByState(rankable, SECTOR_DOWN_STATES) }
+  };
+}
+// 单元格取值口径：累积中 ⇒ pos52/dm20 留空（spec L94「pos52/dm20 相关标签留空」）；
+// 退化 ⇒ dev60/m20/m60 一并留空（其基准 ma60 本身是部分窗口，显示即为伪精度）。
+function sectorDisplayMetrics(row, accCounts){
+  const acc = sectorIsAccumulating(row);
+  const deg = sectorIsDegenerate(row, accCounts);
+  const g = k => sectorNum(row && row[k]);
+  const priceOk = !deg;
+  return {
+    barsN: acc ? sectorBarsN(row, accCounts) : null,
+    accumulating: acc,
+    degenerate: deg,
+    dev60: priceOk ? g('dev60') : null,
+    m20: priceOk ? g('m20') : null,
+    m60: priceOk ? g('m60') : null,
+    pos52: acc ? null : g('pos52'),
+    dm20: acc ? null : g('dm20'),
+    vr: g('vr'),
+    score: g('score')
+  };
+}
+// 每主题取其映射行业的最差状态；同最差状态取 m60 更低者
+function sectorWorstRow(rows){
+  if(!rows || !rows.length) return null;
+  let best = null;
+  rows.forEach(r=>{
+    if(!best){ best = r; return; }
+    const d = sectorStateWorstRank(r.state) - sectorStateWorstRank(best.state);
+    if(d < 0 || (d === 0 && ((r.m60||0) < (best.m60||0)))) best = r;
+  });
+  return best;
+}
+function sectorThemeGroups(rows){
+  const g = new Map();
+  (rows||[]).forEach(r=>{
+    if(!r || r.theme === null || r.theme === undefined || r.theme === '') return;
+    if(!g.has(r.theme)) g.set(r.theme, []);
+    g.get(r.theme).push(r);
+  });
+  return g;
+}
+function sectorThemeSummaries(rows, order){
+  const g = sectorThemeGroups(rows);
+  return (order||[]).map(theme=>{
+    const rs = g.get(theme) || [];
+    const labels = [];
+    rs.forEach(r=>{ (Array.isArray(r.labels)?r.labels:[]).forEach(l=>{ if(l && labels.indexOf(l)<0) labels.push(l); }); });
+    return { theme, rows: rs, worst: sectorWorstRow(rs), labels };
+  });
+}
+// R-T4-3 单位口径：m20/m60/dev60 = 比率（×100 后显百分比）；pos52/mp/dm20 = 0-100 点位（不再 ×100）；
+// vr = 倍数；score/v/m/l/q = 0-100 分。null/非有限一待显示为「—」（dm20 首跑全 null 属预期）。
+function sectorNum(v){ return (v === null || v === undefined || !isFinite(Number(v))) ? null : Number(v); }
+function fmtRatioPct(v, digits){
+  const n = sectorNum(v); if(n === null) return '—';
+  const p = n*100;
+  return (p > 0 ? '+' : '') + p.toFixed(digits === undefined ? 2 : digits) + '%';
+}
+function fmtPoints(v, digits){
+  const n = sectorNum(v); if(n === null) return '—';
+  return n.toFixed(digits === undefined ? 1 : digits);
+}
+function fmtScoreVal(v){
+  const n = sectorNum(v); if(n === null) return '—';
+  return n.toFixed(1);
+}
+function fmtVr(v){
+  const n = sectorNum(v); if(n === null) return '—';
+  return n.toFixed(2);
+}
+function sectorLabelDots(labels){
+  if(!Array.isArray(labels) || !labels.length) return '';
+  return labels.filter(l=>l!==null && l!==undefined && String(l).length !== 0)
+    .map(l=>`<span class="sector-label"><i class="sector-dot dot-${SECTOR_LABEL_DOT[String(l)]||'gray'}"></i>${escapeHtml(String(l))}</span>`).join('');
+}
+// R-T4-5：同花顺池名与规范行业名“互为子串”才提示；单字池名不参与（避免噪声）；只提示、不合成任何分数（spec §7.4）
+function matchApproxPools(ind, pools){
+  const name = String(ind||'').trim();
+  if(!name || !Array.isArray(pools)) return [];
+  const hit = [];
+  pools.forEach(p=>{
+    const s = String(p||'').trim();
+    if(s.length < 2) return;
+    if((s.indexOf(name) >= 0 || name.indexOf(s) >= 0) && hit.indexOf(s) < 0) hit.push(s);
+  });
+  return hit.sort();
+}
+// 修复轮2（评审 I1）：累积中行的 sector_kline head count 由串行 for…of+await 改为 Promise.all 并发扇出，
+// 慢链路下≈N 个顺序 RT 压成≈1 个。**每行独立 try/catch**（控制要求2）：单行失败只置该行 n=null（沿用已裁决的
+// 「head-count 失败保守按退化」语义，见 sectorIsDegenerate），绝不让整批 Promise.all 拒绝。IO 由调用方注入 fetchCount，
+// 本函数无全局依赖 ⇒ 属纯逻辑、由 scripts/sector_render_logic.ts 门面抽取单测（唯一实现体，无副本）。
+function sectorBuildAccCounts(rows, fetchCount){
+  const acc = (Array.isArray(rows) ? rows : []).filter(sectorIsAccumulating);
+  return Promise.all(acc.map(async (r)=>{
+    let n = null;
+    try{ n = await fetchCount(r.pk_etf); }catch(e){ n = null; }
+    return [String(r.pk_etf), (typeof n === 'number' && isFinite(n)) ? n : null];
+  })).then(pairs=>new Map(pairs));
+}
+// 修复轮2（评审 I1）竞态守卫的谓词：卡片移出 autoRefresh 关键路径（fire-and-forget）后，focus 重入/切页签可让
+// 多个 loadSectorRotation 同时在飞；请求开始时 begin() 取自增序号，写 sectorState/渲染前先 isStaleReq(本次, 最新) ——
+// 只要本请求序号不是最新（迟到的旧响应）就判弃，后到者不得覆盖新批次渲染。序号错乱也按陈旧处理（宁严勿宽）。
+function sectorIsStaleReq(reqSeq, latestSeq){
+  return reqSeq !== latestSeq;
+}
+// 修复轮2（评审 I1）：自增请求序号发生器（闭包持有 seq）。begin() 抢占并返回本次序号；isCurrent(id) 判定 id 是否仍为最新。
+function sectorCreateReqGuard(){
+  let seq = 0;
+  return {
+    begin(){ seq += 1; return seq; },
+    isCurrent(id){ return id === seq; }
+  };
+}
+// ==== SECTOR_PURE_END ====
+
+const SECTOR_DOWN_PREVIEW = 20; // 调整榜默认预览条数（本批次 74 条，移动端不至于冗长）
+let sectorLastRows = [];       // 上一次渲染的行（展开/收起重绘使用，也供控制台合成行验证 stale 分支）
+let sectorUi = { showAllDown:false, showEntangled:false }; // 修复轮1：累积中行已并入各榜，不再单独成组
+const sectorReqGuard = sectorCreateReqGuard(); // 修复轮2（评审 I1）：loadSectorRotation 请求序号守卫（允许同时在飞多个请求，只有最新者可写状态/渲染）
+
+async function loadSectorRotation(){
+  if(!cloudReady || !sb) return;
+  const reqId = sectorReqGuard.begin(); // 修复轮2（评审 I1）：抢占本次请求序号；每个写入点前检查 isCurrent，迟到的旧响应（focus 重入/切页签触发的新批次在后）不得覆盖新渲染
+  const stale = ()=>sectorReqGuard.isCurrent(reqId) === false;
+  try{
+    // 与 loadStockScores 同一范式：先定位最新 batch_date，再整批取回（brief Step1 的 limit(160)+过滤等效）
+    const { data: b, error: be } = await sb.from('sector_rotation_daily').select('batch_date')
+      .order('batch_date',{ascending:false}).limit(1).maybeSingle();
+    if(stale()) return;
+    if(be){ renderSectorPlaceholder('板块轮动批次读取失败（网络或云端异常），下次刷新自动重试'); return; }
+    if(!b){ renderSectorPlaceholder(); return; } // 表为空 = 真无批次
+    const batch = b.batch_date;
+    const { data, error } = await sb.from('sector_rotation_daily').select('*')
+      .eq('batch_date', batch).order('m60',{ascending:false}).limit(400);
+    if(stale()) return;
+    if(error){ renderSectorPlaceholder('板块轮动批次读取失败（网络或云端异常），下次刷新自动重试'); return; }
+    if(!data || !data.length){ renderSectorPlaceholder(); return; }
+    const rows = data.filter(r=>r && r.batch_date === batch);
+    if(!rows.length){ renderSectorPlaceholder(); return; }
+    // R-T4-1 + 修复轮2（评审 I1 ①）：「数据积累中(n=X)」的 n 仍只对累积中行（≤6 行）发 sector_kline head count，
+    // 不全量拉 K 线；串行 for…of+await 改为 Promise.all 并发，每行独立 try/catch → 单行失败仅该行 n=null（保守按退化）
+    const accCounts = await sectorBuildAccCounts(rows, async (pk)=>{
+      const { count } = await sb.from('sector_kline').select('*', {count:'exact', head:true}).eq('etf_code', pk);
+      return count;
+    });
+    const poolPools = await loadThsPoolNames();
+    if(stale()) return; // 所有 await 完成后、写入前最后一道守卫：旧请求丢弃，不覆盖新批次
+    sectorState = { batch, rows, accCounts, poolPools };
+    renderSectorCard(rows);
+  }catch(e){
+    if(stale()) return; // 迟到的旧失败不得用降级占位覆盖新渲染
+    console.warn('sector rotation load failed', e); // 仅降级，不阻塞页面其他功能
+    renderSectorPlaceholder('板块轮动批次读取失败（网络或云端异常），下次刷新自动重试');
+  }
+}
+
+// R-T4-5：只取 stock_score 最新批次精选池（in_pool，上限 1000 行）的 distinct ths_l1/ths_l2；失败降级为无提示
+async function loadThsPoolNames(){
+  const empty = { l1: [], l2: [], batch: null };
+  try{
+    const { data: b } = await sb.from('stock_score').select('batch_date')
+      .order('batch_date',{ascending:false}).limit(1).maybeSingle();
+    if(!b) return empty;
+    const { data, error } = await sb.from('stock_score').select('ths_l1,ths_l2')
+      .eq('batch_date', b.batch_date).eq('in_pool', true).limit(1000);
+    if(error || !data) return empty;
+    const pick = k => [...new Set(data.map(r=>String(r[k]||'').trim()).filter(s=>s.length))];
+    return { l1: pick('ths_l1'), l2: pick('ths_l2'), batch: b.batch_date };
+  }catch(e){ return empty; }
+}
+
+function renderSectorPlaceholder(msg){
+  const root = document.getElementById('sectorCardRoot');
+  if(!root) return;
+  // cron 已错峰到 22:35（brief 写 22:30，与生产 reschedule 后的实际排程不一致，取生产值）
+  root.innerHTML = `<div class="sector-card"><div class="sector-summary">${escapeHtml(msg || '尚无批次，等待今晚 22:35 跑批')}</div></div>`;
+}
+
+function sectorStateClass(state){
+  return SECTOR_UP_STATES.indexOf(state)>=0 ? 'st-up' : (SECTOR_DOWN_STATES.indexOf(state)>=0 ? 'st-down' : 'st-mid');
+}
+
+function sectorPoolHint(ind, pools){
+  const l1 = matchApproxPools(ind, (pools && pools.l1) || []);
+  const l2 = matchApproxPools(ind, (pools && pools.l2) || []);
+  if(!l1.length && !l2.length) return '';
+  const parts = l1.map(x=>'L1:'+x).concat(l2.map(x=>'L2:'+x)).slice(0,4);
+  return '个股侧近似池: ' + escapeHtml(parts.join('、')) + '（分类口径不同，仅供参考）';
+}
+
+function sectorRowHtml(r, accCounts, pools){
+  const m = sectorDisplayMetrics(r, accCounts);
+  const factors = '行业四因子（规模加权）：估值 ' + fmtScoreVal(r.v) + ' · 动量 ' + fmtScoreVal(r.m)
+    + ' · 规模 ' + fmtScoreVal(r.l) + ' · 景气 ' + fmtScoreVal(r.q) + '（Q 无数据时 V/M/L renorm 46/38/15）';
+  let tip = factors;
+  if(m.accumulating){
+    tip += '\n代表ETF 历史 ' + (m.barsN === null ? '未知' : m.barsN + ' 根') + '（<250）⇒ 52周分位与 ΔM20 留空，pos52/dm20 相关标签留空（spec §5 历史不足处理）。';
+  }
+  if(m.degenerate){
+    tip += '\n历史不足 ' + SECTOR_M60_MIN_BARS + ' 根 ⇒ 20/60日涨跌与乖离MA60 不可算（引擎以 0 兜底，前端不呈现伪平盘），本行不参与 60 日排序、置榜末；'
+      + '且 n<' + SECTOR_MA_FULL_BARS + ' 时 ma120 为部分窗口，均线五态不可靠。';
+  }
+  const metrics = `乖离MA60 <em>${fmtRatioPct(m.dev60)}</em> · 20日 <em>${fmtRatioPct(m.m20)}</em> · 60日 <em>${fmtRatioPct(m.m60)}</em>`
+    + ` · 52周分位 <em>${fmtPoints(m.pos52)}</em> · ΔM20 <em>${fmtPoints(m.dm20)}</em> · 量比 <em>${fmtVr(m.vr)}</em> · 行业分 <em>${fmtScoreVal(m.score)}</em>`
+    + (m.accumulating ? ` · <span class="sector-acc">数据积累中(n=${m.barsN === null ? '—' : escapeHtml(String(m.barsN))})</span>` : '')
+    + (m.degenerate ? ' <span class="sector-deg-tag">均线不足，状态不可靠</span>' : '');
+  const hint = sectorPoolHint(r.ind, pools);
+  return `<div class="sector-row${m.degenerate?' deg':''}" data-ind="${escapeHtml(String(r.ind))}">
+    <div class="sector-line1">
+      <span class="sector-ind">${escapeHtml(String(r.ind))}</span>
+      <span class="sector-state ${sectorStateClass(r.state)}${m.degenerate?' st-deg':''}">${escapeHtml(String(r.state||'—'))}</span>
+      <span class="sector-labels">${sectorLabelDots(r.labels)}</span>
+      ${r.stale?'<span class="sector-stale-tag">陈旧</span>':''}
+      <span class="chevron">▸</span>
+    </div>
+    <div class="sector-metrics" title="${escapeHtml(tip)}">${metrics}</div>
+    ${hint?`<div class="sector-hint">${hint}</div>`:''}
+    <div class="sector-etf-body"></div>
+  </div>`;
+}
+
+function sectorListHtml(rows, accCounts, pools){
+  return `<div class="sector-list">${rows.map(r=>sectorRowHtml(r, accCounts, pools)).join('')}</div>`;
+}
+
+function sectorThemeHtml(rows){
+  const accCounts = (sectorState && sectorState.accCounts) || new Map();
+  const sums = sectorThemeSummaries(rows, SECTOR_THEME_ORDER);
+  const covered = sums.map(s=>{
+    if(!s.rows.length) return `<div class="sector-theme-item"><span class="t">${escapeHtml(s.theme)}</span><span class="sector-muted">本批次无映射行业</span></div>`;
+    return `<div class="sector-theme-item">
+      <span class="t">${escapeHtml(s.theme)}</span>
+      <span class="sector-state ${sectorStateClass(s.worst.state)}">${escapeHtml(String(s.worst.state))}</span>
+      <span class="sector-labels">${sectorLabelDots(s.labels)}</span>
+      <span class="sector-theme-vals">${s.rows.map(r=>escapeHtml(String(r.ind))+'·'+escapeHtml(String(r.state))).join(' ')}</span>
+    </div>`;
+  }).join('');
+  const na = SECTOR_NOT_COVERED_THEMES.map(t=>`<div class="sector-theme-item na"><span class="t">${escapeHtml(t)}</span><span class="sector-muted">A股行业ETF不覆盖</span></div>`).join('');
+  return covered + na;
+}
+
+function sectorFootHtml(){
+  // spec §5 表逐字静态证据数字（label_stats 月度滚动重算本版未实现，brief 范围注记已登记为 V1.1）
+  const lines = [
+    '标签历史证据（2026-09-30 回测：2019-01~2026-09 · 121 只行业代表ETF · 冷却 20 日 · 60日前瞻 · vs 全行业等权）：',
+    '筑底候选（买入关注，唯一）超额 +2.25pp，胜率 47.4%，n=173（置信中低，滚动复核）',
+    '过热警示（回避）超额 -2.29pp，中位 -5.00，n=563',
+    '高位放量滞涨（回避，最强）超额 -2.34pp，n=196',
+    '禁追高（警示，原“流入确认”反转）超额 -2.44pp，胜率 34.3%，n=639',
+    '退潮观察（中性观察，不扣分）超额 +1.46pp（不可作卖出依据）',
+    '左侧埋伏（信息展示）超额 +0.78pp（证据弱，仅状态）',
+    '多头状态不构成买入标签；风控性标签仅作展示标记，不影响行业分。',
+    '「数据积累中」= 代表ETF 上市不足 250 根：仍并入其均线状态所属榜单（保留状态与行业分），仅 52周分位与 ΔM20 留空（spec §5）；其中不足 61 根者 20/60日与乖离亦不可算，显示「—」并置该榜末尾、标灰。「均衡配置」属宽基配置类、无行业映射，本卡片不呈现。',
+    '本卡片为规则化状态标记，不构成投资建议。'
+  ];
+  return lines.map(l=>escapeHtml(l)).join('<br>');
+}
+
+function sectorCardHtml(rows){
+  const accCounts = (sectorState && sectorState.accCounts) || new Map();
+  const lists = sectorRankLists(rows, accCounts);
+  const counts = sectorSummaryCounts(rows, accCounts); // 与 lists 同源：概要三数 == 三个榜单的行数
+  const batch = (rows[0] && rows[0].batch_date) ? rows[0].batch_date : '—';
+  const isStale = rows.some(r=>r.stale);
+  const pools = (sectorState && sectorState.poolPools) || { l1: [], l2: [] };
+  const downShown = sectorUi.showAllDown ? lists.down : lists.down.slice(0, SECTOR_DOWN_PREVIEW);
+  // 榜单标题里的计数与顶部概要同一口径（入库行实数），另用注记说明其中历史不足的行数，避免两处数字打架
+  const accNote = arr => {
+    const a = arr.filter(sectorIsAccumulating).length;
+    const d = arr.filter(r=>sectorIsDegenerate(r, accCounts)).length;
+    return a ? '；含数据积累中 ' + a + (d ? '（其中 ' + d + ' 行均线不足，置底标灰）' : '') : '';
+  };
+  return `<div class="sector-card">
+    <div class="sector-summary">向上 <b>${counts.up}</b> · 纠缠 <b>${counts.entangled}</b> · 调整 <b>${counts.down}</b>
+      · 数据积累中 <b>${counts.accumulating}</b> · 批次 ${escapeHtml(String(batch))}
+      ${isStale?'<span class="sector-stale">数据陈旧(昨日批次)</span>':''}</div>
+    <div class="sector-list-title">向上趋势榜 ${lists.up.length}<span class="sector-list-sub">强多头 / 多头 · 按 60 日涨跌降序 · 历史不足 250 根者已并入本榜${accNote(lists.up)} · 点开行可见本行业全部入池ETF</span></div>
+    ${lists.up.length ? sectorListHtml(lists.up, accCounts, pools) : '<div class="sector-list-title sector-muted">本批次无向上行业</div>'}
+    <div class="sector-list-title">调整趋势榜 ${lists.down.length}<span class="sector-list-sub">走弱 / 空头排列 · 按 60 日涨跌升序 · 历史不足 250 根者已并入本榜${accNote(lists.down)}</span></div>
+    ${downShown.length ? sectorListHtml(downShown, accCounts, pools) : '<div class="sector-list-title sector-muted">本批次无调整行业</div>'}
+    ${(!sectorUi.showAllDown && lists.down.length > downShown.length)
+      ? `<button class="sector-more" data-sector-more="1">展开全部 ${lists.down.length} 条（跌幅最深在前）</button>` : ''}
+    <div class="sector-list-title clickable" data-sector-toggle="showEntangled">纠缠 ${lists.entangled.length} 个 ${sectorUi.showEntangled?'收起 ▴':'点开 ▾'}<span class="sector-list-sub">均线未成向，不计入双榜${accNote(lists.entangled)}</span></div>
+    ${sectorUi.showEntangled ? sectorListHtml(lists.entangled, accCounts, pools) : ''}
+    <div class="sector-list-title">持仓主题映射<span class="sector-list-sub">取映射行业最差状态</span></div>
+    <div class="sector-theme">${sectorThemeHtml(rows)}</div>
+    <div class="sector-foot">${sectorFootHtml()}</div>
+  </div>`;
+}
+
+function renderSectorCard(rows){
+  const root = document.getElementById('sectorCardRoot');
+  if(!root || !rows || !rows.length) return;
+  sectorLastRows = rows;
+  root.innerHTML = sectorCardHtml(rows);
+  bindSectorCard(root);
+}
+
+function sectorEtfListHtml(data, error){
+  if(error) return `<div class="sector-muted">ETF 列表读取失败：${escapeHtml(String(error.message||error))}</div>`;
+  const rows = data || [];
+  if(!rows.length) return '<div class="sector-muted">该行业无 sector_etf_map 行（宇宙周一重建）</div>';
+  return `<div class="sector-etf-row"><span class="sector-muted">本行业入池 ${rows.length} 只（按规模降序；行业分为规模加权，四因子明细见行上悬停）</span></div>` + rows.map(e=>{
+    const amt = (e.amt === null || e.amt === undefined || !isFinite(Number(e.amt))) ? '—' : Number(e.amt).toFixed(1);
+    return `<div class="sector-etf-row"><span>${escapeHtml(String(e.etf_code))}</span><span class="nm">${escapeHtml(String(e.etf_name||''))}</span><span class="sector-muted">规模 <em>${amt}</em> 亿</span>${e.is_rep?'<span class="sector-etf-rep">代表</span>':''}</div>`;
+  }).join('');
+}
+
+function bindSectorCard(root){
+  root.querySelectorAll('.sector-row').forEach(el=>{
+    el.addEventListener('click', async ()=>{
+      const body = el.querySelector('.sector-etf-body');
+      const chev = el.querySelector('.chevron');
+      if(!body) return;
+      if(body.classList.contains('open')){ body.classList.remove('open'); if(chev) chev.classList.remove('open'); return; }
+      body.classList.add('open'); if(chev) chev.classList.add('open');
+      if(body.dataset.loaded === '1' || !sb) return;
+      body.dataset.loaded = '1';
+      body.innerHTML = '<div class="sector-muted">ETF 列表加载中…</div>';
+      try{
+        const { data, error } = await sb.from('sector_etf_map')
+          .select('etf_code,etf_name,amt,is_rep,updated_on')
+          .eq('canonical_ind', el.dataset.ind).order('amt',{ascending:false}).limit(200);
+        body.innerHTML = sectorEtfListHtml(data, error);
+      }catch(e){ body.innerHTML = `<div class="sector-muted">ETF 列表读取异常</div>`; }
+    });
+  });
+  const more = root.querySelector('[data-sector-more]');
+  if(more) more.addEventListener('click', e=>{ e.stopPropagation(); sectorUi.showAllDown = true; renderSectorCard(sectorLastRows); });
+  root.querySelectorAll('[data-sector-toggle]').forEach(el=>{
+    el.addEventListener('click', ()=>{
+      const k = el.dataset.sectorToggle;
+      sectorUi[k] = !sectorUi[k];
+      renderSectorCard(sectorLastRows);
+    });
+  });
 }
 
 function setSyncUI(){
@@ -1879,6 +2387,7 @@ async function autoRefreshAll(force){
   let fN = 0, sN = 0;
   try{ fN = await autoRefreshFunds(); }catch(e){}
   try{ sN = await autoRefreshStocks(); }catch(e){}
+  loadSectorRotation().catch(()=>{}); // 修复轮2（评审 I1 ②）：仍在刷新序列末尾触发（不新起定时器），但改为 fire-and-forget —— 卡片结果非 saveFunds/Toast 所需，不再把 autoRefreshRunning 锁在≤ 10 个串行 RT 上；同时在飞请求由 sectorReqGuard 序号守卫防竞态
   autoRefreshRunning = false;
   if(fN + sN > 0){
     await saveFunds();

@@ -1,0 +1,82 @@
+{
+  "_note": "真实 GS filterSearch 响应片段(class1=1&endamt=10,30&temperRegion=3, 2026-10-01 抓取, 取前5行) + 1 行合成行(512800)用于钉 hayjqidu 有值/sharpe1yrank 空串 两种语义",
+  "result": [
+    {
+      "msg": "请求成功",
+      "code": 0
+    }
+  ],
+  "data": [
+    {
+      "ofcode": "589120",
+      "ofname": "科创创新药ETF汇添富",
+      "endamt": "10.94",
+      "temperRegion": "3",
+      "range60d": "0.23",
+      "sharpe1yrank": "59.90",
+      "hayjqidu": "",
+      "class1": "1",
+      "market": "2"
+    },
+    {
+      "ofcode": "159929",
+      "ofname": "医药ETF汇添富",
+      "endamt": "21.44",
+      "temperRegion": "3",
+      "range60d": "7.33",
+      "sharpe1yrank": "74.29",
+      "hayjqidu": "",
+      "class1": "1",
+      "market": "1"
+    },
+    {
+      "ofcode": "159828",
+      "ofname": "医疗ETF国泰",
+      "endamt": "20.26",
+      "temperRegion": "3",
+      "range60d": "14.44",
+      "sharpe1yrank": "69.82",
+      "hayjqidu": "",
+      "class1": "1",
+      "market": "1"
+    },
+    {
+      "ofcode": "159837",
+      "ofname": "生物科技ETF易方达",
+      "endamt": "15.03",
+      "temperRegion": "3",
+      "range60d": "10.71",
+      "sharpe1yrank": "67.30",
+      "hayjqidu": "",
+      "class1": "1",
+      "market": "1"
+    },
+    {
+      "ofcode": "159847",
+      "ofname": "医疗ETF易方达",
+      "endamt": "16.37",
+      "temperRegion": "3",
+      "range60d": "15.11",
+      "sharpe1yrank": "67.25",
+      "hayjqidu": "",
+      "class1": "1",
+      "market": "1"
+    },
+    {
+      "ofcode": "512800",
+      "ofname": "银行ETF华宝",
+      "endamt": "10.94",
+      "temperRegion": "1",
+      "range60d": "-1.20",
+      "sharpe1yrank": "",
+      "hayjqidu": "82.5",
+      "class1": "1",
+      "market": "2"
+    }
+  ],
+  "data1": [
+    {
+      "etfNum": "6"
+    }
+  ]
+}
