@@ -437,3 +437,29 @@ const PROD_ROWS: Row[] = (() => {
   if (all.length !== 110) throw new Error("夹具行数应等于本批入库行数 110，实为 " + all.length);
   return all;
 })();
+
+// ---------- 收尾新增：整卡折叠（粒度=整卡，概要行常显） ----------
+// 被测的是运行时真路径：sectorCardHtml 的早退分支与 section-title 按钮文案都走 sectorFoldState。
+
+Deno.test("sectorFoldState: 两态精确值 —— 展开={收起 ▴,可见}，折叠={展开 ▾,不可见}", () => {
+  assertEquals(P.sectorFoldState(false), { label: "收起 ▴", bodyShown: true });
+  assertEquals(P.sectorFoldState(true), { label: "展开 ▾", bodyShown: false });
+});
+
+Deno.test("sectorFoldState: 默认展开不依赖调用方传对值 —— undefined/null/false/0/'' 均归展开", () => {
+  // 「默认展开」是用户选定行为；扇入 false 分支必须包含所有非 true 值，
+  // 否则存储无该键（getItem 返回 null）时会意外进折叠态。
+  for (const v of [undefined, null, false, 0, ""]) {
+    assertEquals(P.sectorFoldState(v).bodyShown, true, "非 true 应展开，实为 " + String(v));
+    assertEquals(P.sectorFoldState(v).label, "收起 ▴");
+  }
+});
+
+Deno.test("sectorFoldState: 严格 === true —— 字符串 '1'/'true'/'yes' 不得被 truthy 收编为折叠", () => {
+  // 钉住判据本身：有人若改成 if(collapsed) 简写，'1'/'true' 会变 true，而 '0'/'false' 也是 truthy，
+  // 于是「存了 0 却永远折叠」——本例是该退化的反向钉。
+  for (const v of ["1", "true", "yes"]) {
+    assertEquals(P.sectorFoldState(v).bodyShown, true, "非布尔 true 不应折叠，实为 " + String(v));
+  }
+  assertEquals(P.sectorFoldState(true).bodyShown, false);
+});
