@@ -445,13 +445,33 @@ const toStr = (
   ? String(v)
   : "");
 
-// data[] → EtfSnapRow[]（ofcode/ofname/endamt/temperRegion/range60d/sharpe1yrank/hayjqidu；缺列→null）
-function parseSearchResp(json: unknown): EtfSnapRow[] {
-  const j = json as { result?: { code?: number }[]; data?: unknown } | null;
-  if (!j || typeof j !== "object") return [];
-  if (j.result?.[0]?.code !== 0) return []; // 业务失败码（鉴权/参数）当空截面，交由 fetchSegments 记 warning
+// data[] → 行集 + 业务码（终审 I-3：result.code≠0 不得再坑塌成「空截面」）。
+// 行为不变：业务失败依旧 rows=[]（MIN_ROWS/重试/pacing 语义一字不改），只是把码与 msg 一并上抛供透传。
+// bizMsg 是未脱敏原文（可能回显被打码的 apiKey），调用方必须先过 safeGsMsg 才允许进任何文案。
+interface ParsedSearch {
+  rows: EtfSnapRow[];
+  fail: boolean; // true ⇒ result[0].code 缺失或非 0（含鉴权失效/参数错误/日限额）
+  bizCode: number | null;
+  bizMsg: string;
+}
+
+function parseSearchFull(json: unknown): ParsedSearch {
+  const j = json as
+    | { result?: { code?: number; msg?: unknown }[]; data?: unknown }
+    | null;
+  if (!j || typeof j !== "object") return { rows: [], fail: true, bizCode: null, bizMsg: "" };
+  const first = Array.isArray(j.result) ? j.result[0] : undefined;
+  if (first?.code !== 0) {
+    // 业务失败码（鉴权/参数/197006 日限额…）或 result 缺失 → 当空截面，但码必须透出
+    return {
+      rows: [],
+      fail: true,
+      bizCode: typeof first?.code === "number" ? first.code : null,
+      bizMsg: toStr(first?.msg),
+    };
+  }
   const data = Array.isArray(j.data) ? j.data : null;
-  if (!data) return [];
+  if (!data) return { rows: [], fail: false, bizCode: null, bizMsg: "" };
   const out: EtfSnapRow[] = [];
   for (const raw of data) {
     if (!raw || typeof raw !== "object") continue;
@@ -468,7 +488,52 @@ function parseSearchResp(json: unknown): EtfSnapRow[] {
       hay: hay === "" ? null : hay,
     });
   }
-  return out;
+  return { rows: out, fail: false, bizCode: null, bizMsg: "" };
+}
+
+// data[] → EtfSnapRow[]（ofcode/ofname/endamt/temperRegion/range60d/sharpe1yrank/hayjqidu；缺列→null）
+function parseSearchResp(json: unknown): EtfSnapRow[] {
+  return parseSearchFull(json).rows;
+}
+
+// —— 文案加工（终审 I-3）：码必透，msg 只取脱敏后的部分；绝不把可能含凭据的原文拼进去 ——
+const MSG_MAX = 40;
+const CRED_TOKEN_RE = /[A-Za-z0-9_\-]{12,}/g; // 12+ 位字母数字混排 ⇒ 一律当作凭据形态打码
+const URL_RE = /https?:\/\/\S+/g; // URL 可能带 apiKey
+const reLit = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+function safeGsMsg(msg: string, apiKey: string): string {
+  if (!msg) return "";
+  let s = String(msg);
+  const key = String(apiKey ?? "").trim();
+  if (key.length >= 4) {
+    s = s.replace(new RegExp(reLit(key), "g"), "***"); // 整串 key
+    // 打码后的 key 片段（前 6 位同形 + 任意尾）也一律打码
+    s = s.replace(new RegExp(`${reLit(key.slice(0, 6))}[A-Za-z0-9_*\\-]*`, "g"), "***");
+  }
+  s = s.replace(URL_RE, "<url>").replace(CRED_TOKEN_RE, "***");
+  return s.length > MSG_MAX ? s.slice(0, MSG_MAX) : s;
+}
+
+const EMPTY_SNAP_TEXT = "GS 空截面（业务码=0 且 data 为空）"; // 与真空返数据可区分
+
+function bizFailText(code: number | null, msg: string, apiKey: string): string {
+  const tag = `GS 业务码=${code === null ? "未知" : code}`;
+  const m = safeGsMsg(msg, apiKey);
+  return m ? `${tag} msg="${m}"` : tag;
+}
+
+// 整轮降级文案：无业务码时不凭空提及“业务码”（避免误导定性）
+function minRowsText(size: number, tags: string[], segTotal: number): string {
+  const base = `MIN_ROWS 违例: 并集去重 ${size} < ${MIN_ROWS}（快照异常）`;
+  if (tags.length === 0) return base;
+  const counts = new Map<string, number>();
+  for (const t of tags) counts.set(t, (counts.get(t) ?? 0) + 1);
+  const dist = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([t, n]) => `${t}×${n}/${segTotal} 段`)
+    .join(", ");
+  return `${base} 失败码分布: ${dist}`;
 }
 
 async function segFetch(
@@ -484,9 +549,11 @@ async function segFetch(
         signal: AbortSignal.timeout(GS_REQ_TIMEOUT_MS),
       });
       if (!r.ok) throw new Error(`GS http ${r.status}`);
-      const rows = parseSearchResp(await r.json());
-      if (rows.length === 0) throw new Error("GS 空截面/业务失败码"); // 含 result.code≠0（如 apiKey 失效）
-      return rows;
+      const parsed = parseSearchFull(await r.json());
+      // 终审 I-3：业务失败码不再与「真空截面」同文案（197006 / 鉴权失效 / 参数错直接现形于 warning）
+      if (parsed.fail) throw new Error(bizFailText(parsed.bizCode, parsed.bizMsg, apiKey));
+      if (parsed.rows.length === 0) throw new Error(EMPTY_SNAP_TEXT);
+      return parsed.rows;
     } catch (e) {
       // 网络错误 message 可能内嵌含 apiKey 的完整 URL → 脱敏（先例：stock-score/gs.ts、tencent.ts）
       lastErr = e instanceof TypeError
@@ -504,11 +571,16 @@ interface SegSnapshot {
   warnings: string[];
 }
 
-// 15 分段串行 + 400ms pacing；单段失败（重试后）记 warning 继续；满 100 记 truncated；并集 <300 → throw('MIN_ROWS')
+// 15 分段串行 + 400ms pacing；单段失败（重试后）记 warning 继续（warning 文本自带 GS 业务码，I-3）；
+// 满 100 记 truncated；并集 <300 → throw(MIN_ROWS + 失败码分布)（段数/重试/pacing/MIN_ROWS 语义一律不变）
+const CODE_TAG_RE = /GS 业务码=(?:\d+|未知)/;
+const SEG_TOTAL = AMT_BANDS.length * TEMPERS.length;
+
 async function fetchSegments(apiKey: string): Promise<SegSnapshot> {
   const rows = new Map<string, EtfSnapRow>();
   const truncated: string[] = [];
   const warnings: string[] = [];
+  const failTags: string[] = [];
   for (const amt of AMT_BANDS) {
     for (const tem of TEMPERS) {
       const seg = `amt=${amt}×temper${tem}`;
@@ -516,11 +588,12 @@ async function fetchSegments(apiKey: string): Promise<SegSnapshot> {
       try {
         segRows = await segFetch(amt, tem, apiKey);
       } catch (e) {
+        const m = e instanceof Error ? e.message : String(e);
         warnings.push(
-          `${seg} 取数失败（重试 ${ATTEMPTS} 次后跳过）: ${
-            e instanceof Error ? e.message : String(e)
-          }`,
+          `${seg} 取数失败（重试 ${ATTEMPTS} 次后跳过）: ${m}`,
         );
+        const hit = CODE_TAG_RE.exec(m)?.[0]; // throw 时 warnings 会丢 ⇒ 码另存一份进 throw 文案
+        if (hit) failTags.push(hit);
       }
       if (segRows) {
         if (segRows.length === CAP) {
@@ -536,9 +609,7 @@ async function fetchSegments(apiKey: string): Promise<SegSnapshot> {
     }
   }
   if (rows.size < MIN_ROWS) {
-    throw new Error(
-      `MIN_ROWS 违例: 并集去重 ${rows.size} < ${MIN_ROWS}（快照异常）`,
-    );
+    throw new Error(minRowsText(rows.size, failTags, SEG_TOTAL));
   }
   return { rows, truncated, warnings };
 }
@@ -558,6 +629,11 @@ async function fetchSegments(apiKey: string): Promise<SegSnapshot> {
 //   C5 stale：某行业当日 K线/截面失败 → 复制昨日行且 stale=true，不静默丢行业。
 //   C6 凭据：token/key 只从 env 读，错误信息不含 URL/凭据（tencent.ts/gs_etf.ts 各自脱敏）。
 //   C7 pacing：腾讯 300ms/请求；GS 分段 400ms。
+// 整分支终审落点（本轮）：
+//   I-1 非交易日守卫（tradingDayGuard + handle 内 ②后③前）：全宇宙 kline_added===0 && kline_failed===0
+//       ⇒ 判非交易日 ⇒ 不 mint batch_date、不写任何库，保留上一真实批次为最新（提前返回顺带省整晚 GS 配额）。
+//   I-2 bars_n 落库：SectorRow.barsN 原样写入 sector_rotation_daily.bars_n（免歧义区分伪 0 与真实平盘 0）。
+//       engine.ts 一字不改；sector_rotation_daily 列数 24→25（scripts/migrate_sector_rotation.sql）。
 
 
 
@@ -582,7 +658,7 @@ interface MapRow {
   is_rep: boolean;
 }
 
-// sector_rotation_daily 的 24 列（scripts/migrate_sector_rotation.sql 实列名；表无 bars_n 列 ⇒ barsN 不落库）
+// sector_rotation_daily 的 25 列（scripts/migrate_sector_rotation.sql 实列名；bars_n 为终审 I-2 新增）
 interface DailyRow {
   batch_date: string;
   ind: string;
@@ -608,6 +684,7 @@ interface DailyRow {
   q: number | null;
   theme: string | null;
   stale: boolean;
+  bars_n: number; // 代表ETF当日可用 K 线根数（终审 I-2；engine SectorRow.barsN 原样落库）
 }
 
 // spec §4.4 + brief Step 3 字典逐字；末尾 2 个键是 Task 1b 归并裁定（R1 有色金属→有色）后的补偿别名，
@@ -650,7 +727,7 @@ const r4 = (
     ? null
     : Math.round(x * 10000) / 10000);
 
-// SectorRow → DB 行（23 引擎字段 → 24 列；barsN 无对应列，故不落库）
+// SectorRow → DB 行（24 引擎字段 → 25 列；barsN → bars_n，终审 I-2）
 function toDbRow(
   r: SectorRow,
   batchDate: string,
@@ -681,6 +758,31 @@ function toDbRow(
     q: r.q,
     theme: r.theme,
     stale,
+    bars_n: r.barsN, // 不 r4 取整（计数不是金额）、不兜 null（0 根也是事实）
+  };
+}
+
+// 终审 I-1（用户拍板口径逐字）：非交易日不写新批次的判据与 reason 分流（纯函数，无 IO）。
+// 判据：全宇宙 kline_added === 0 && kline_failed === 0 ⇒ 非交易日。
+//   • 腾讯整体宕机 ⇒ kline_failed > 0 ⇒ 不 skip（那是失败，走既有 per-industry stale copy）。
+//   • 部分行业有新 bar ⇒ added > 0 ⇒ 不 skip。
+//   • 同夜幂等重跑（真实交易日已写过今日批次）⇒ 仍 skip，但 reason 区分，控制者判定无害。
+// latestBatch = 库内最新 batch_date（本函数只判相等；读失败传 null ⇒ 宁可少写不写假批次）。
+function tradingDayGuard(o: {
+  klineAdded: number;
+  klineFailed: number;
+  latestBatch: string | null;
+  today: string;
+}): {
+  skip: boolean;
+  reason: "non_trading_day_skip" | "already_written_today" | null;
+} {
+  if (o.klineAdded !== 0 || o.klineFailed !== 0) {
+    return { skip: false, reason: null };
+  }
+  return {
+    skip: true,
+    reason: o.latestBatch === o.today ? "already_written_today" : "non_trading_day_skip",
   };
 }
 
@@ -1082,311 +1184,369 @@ async function readDailyStats(): Promise<
   return { batches: set.size, latestAcc, latest };
 }
 
-// 守卫仅针对单测场景（index_test.ts 先设 SECTOR_TREND_DISABLE_SERVE 再动态 import）；
+// 守卫取证读（终审 I-1）：库内最新 batch_date。本函数只回答「最新批次是哪天」：
+//  • 等于今日 ⇒ 今日已写过（同夜幂等重跑）；
+//  • 不等于/无 ⇒ 与 added=0/failed=0 合判为非交易日。
+// 读失败也返回 null（内部 .catch 吐掉）：与「库里真没批次」共用一个值，但两种情况下「不写库」
+// 都是更安全的选择（宁可少写一轮，绝不 mint 假批次）；取证时看响应 latest_batch_date 是否为 null。
+async function readLatestBatch(): Promise<string | null> {
+  const rows = await readTable<{ batch_date: string }>(
+    "sector_rotation_daily?select=batch_date&order=batch_date.desc&limit=1",
+  ).catch(() => []);
+  return rows[0]?.batch_date ?? null;
+}
+
+// GS 截面注入位：生产走真 fetchSegments，单测传 spy —— 终审 I-1「守卫必须在 ③GS 之前」这条顺序，
+// 只能靠「被注入的截面函数到底有没有被调用」来硬证明，不靠读注释散文。
+interface NightlyDeps {
+  fetchSegments: (apiKey: string) => Promise<SegSnapshot>;
+}
+
+const REAL_DEPS: NightlyDeps = { fetchSegments };
+
+// 编排主体 = 原 Deno.serve 回调逐字提出为具名函数（终审 I-1 要求可调用 + 可注入），逻辑一字未改。
+// 注册守卫仅针对单测场景（index_test.ts 先设 SECTOR_TREND_DISABLE_SERVE 再动态 import）；
 // 线上 Edge 不会注入该变量，Deno.serve 注册行为不变（同 stock-score）。
-if (!Deno.env.get("SECTOR_TREND_DISABLE_SERVE")) {
-  Deno.serve(async (req: Request) => {
-    const token = Deno.env.get("SECTOR_TREND_TOKEN") || "";
-    if (!token || req.headers.get("Authorization") !== `Bearer ${token}`) {
-      return new Response("unauthorized", { status: 401 });
+async function handle(
+  req: Request,
+  deps: NightlyDeps = REAL_DEPS,
+): Promise<Response> {
+  const token = Deno.env.get("SECTOR_TREND_TOKEN") || "";
+  if (!token || req.headers.get("Authorization") !== `Bearer ${token}`) {
+    return new Response("unauthorized", { status: 401 });
+  }
+  const u = new URL(req.url);
+  const mode = u.searchParams.get("mode") || "run";
+  const stage = u.searchParams.get("stage") || "";
+  const today = new Date().toISOString().slice(0, 10);
+  const warnParts: (string[] | undefined)[] = [];
+  try {
+    if (mode === "ping") {
+      const rows = await fetchRecentKline("sh512800", today, 5);
+      return Response.json({
+        ok: true,
+        mode,
+        batch_date: today,
+        bars: rows.length,
+        last: rows[rows.length - 1],
+      });
     }
-    const u = new URL(req.url);
-    const mode = u.searchParams.get("mode") || "run";
-    const stage = u.searchParams.get("stage") || "";
-    const today = new Date().toISOString().slice(0, 10);
-    const warnParts: (string[] | undefined)[] = [];
-    try {
-      if (mode === "ping") {
-        const rows = await fetchRecentKline("sh512800", today, 5);
-        return Response.json({
-          ok: true,
-          mode,
-          batch_date: today,
-          bars: rows.length,
-          last: rows[rows.length - 1],
-        });
-      }
-      const key = Deno.env.get("GS_API_KEY") || "";
-      if (!key) {
-        return Response.json({ ok: false, error: "GS_API_KEY missing" }, {
-          status: 500,
-        });
-      }
+    const key = Deno.env.get("GS_API_KEY") || "";
+    if (!key) {
+      return Response.json({ ok: false, error: "GS_API_KEY missing" }, {
+        status: 500,
+      });
+    }
 
-      // ① 宇宙（C1：sector_etf_map 既有 is_rep 行；空表 ⇒ throw，保留旧批次语义）
-      const mapRows = await readTable<MapRow>(
-        "sector_etf_map?select=etf_code,etf_name,canonical_ind,amt,is_rep&order=etf_code.asc",
+    // ① 宇宙（C1：sector_etf_map 既有 is_rep 行；空表 ⇒ throw，保留旧批次语义）
+    const mapRows = await readTable<MapRow>(
+      "sector_etf_map?select=etf_code,etf_name,canonical_ind,amt,is_rep&order=etf_code.asc",
+    );
+    if (mapRows.length === 0) {
+      throw new Error("seed missing: sector_etf_map 为空，保留旧批次");
+    }
+    let reps = mapRows.filter((m) => m.is_rep);
+    const onlyInds = (u.searchParams.get("inds") || "").split(",").map((s) =>
+      s.trim()
+    ).filter(Boolean);
+    if (onlyInds.length > 0) {
+      reps = reps.filter((r) => onlyInds.includes(r.canonical_ind));
+    }
+    const limit = Number(u.searchParams.get("limit") || "0");
+    const offset = Number(u.searchParams.get("offset") || "0");
+    if (limit > 0 || offset > 0) {
+      const end = limit > 0 ? offset + limit : undefined; // 冒烟/分批回填用
+      reps = reps.slice(offset, end);
+    }
+    if (reps.length === 0) {
+      throw new Error(
+        `seed missing: 宇宙筛选后 0 个行业 (inds=${onlyInds.join("/")})`,
       );
-      if (mapRows.length === 0) {
-        throw new Error("seed missing: sector_etf_map 为空，保留旧批次");
-      }
-      let reps = mapRows.filter((m) => m.is_rep);
-      const onlyInds = (u.searchParams.get("inds") || "").split(",").map((s) =>
-        s.trim()
-      ).filter(Boolean);
-      if (onlyInds.length > 0) {
-        reps = reps.filter((r) => onlyInds.includes(r.canonical_ind));
-      }
-      const limit = Number(u.searchParams.get("limit") || "0");
-      const offset = Number(u.searchParams.get("offset") || "0");
-      if (limit > 0 || offset > 0) {
-        const end = limit > 0 ? offset + limit : undefined; // 冒烟/分批回填用
-        reps = reps.slice(offset, end);
-      }
-      if (reps.length === 0) {
-        throw new Error(
-          `seed missing: 宇宙筛选后 0 个行业 (inds=${onlyInds.join("/")})`,
-        );
-      }
-      const selInds = new Set(reps.map((r) => r.canonical_ind));
-      const subMap = mapRows.filter((m) => selInds.has(m.canonical_ind));
-      warnParts.push(
-        unmatchedThemeKeys([...selInds]).length > 0
-          ? [
-            `theme 字典未命中行业键: ${
-              unmatchedThemeKeys([...selInds]).join(",")
-            }`,
-          ]
-          : [],
-      );
+    }
+    const selInds = new Set(reps.map((r) => r.canonical_ind));
+    const subMap = mapRows.filter((m) => selInds.has(m.canonical_ind));
+    warnParts.push(
+      unmatchedThemeKeys([...selInds]).length > 0
+        ? [
+          `theme 字典未命中行业键: ${
+            unmatchedThemeKeys([...selInds]).join(",")
+          }`,
+        ]
+        : [],
+    );
 
-      // ② 腾讯K线增量（0.3s pacing + 3 次退避重试；单只失败只计数，不中断）
-      //   mode=backfill：先逐只代表 ETF 日期翻页拉全历史 upsert（走与 run 相同的鉴权/宇宙/写入链路），
-      //   再自动续跑下面与 mode=run 相同的当日计算（pos52/dev60/labels 基于新历史刷新）。
-      //   阀门（防 edge wall-clock 截断，沿用 Task 3 mode=run&stage=kline 分批实证做法）：
-      //     &stage=history[&limit&offset] = 仅分页拉取（可分批），不做计算轮即早返回；
-      //     &stage=compute = 跳过分页，仅跑计算轮（分页已由前序 stage=history 完成）。
-      let bf: BackfillStats | null = null;
-      let dailyBefore: {
-        batches: number;
-        latestAcc: number;
-        latest: string | null;
-      } | null = null;
-      if (mode === "backfill") {
-        dailyBefore = await readDailyStats();
-        if (stage !== "compute") {
-          bf = await backfillHistory(reps, today);
-          if (bf.failed.length > 0) {
-            warnParts.push(
-              bf.failed.map((f) =>
-                `backfill 失败 ${f.etf_code}(${f.ind}): ${f.err}`
-              ),
-            );
-          }
-        }
-        if (stage === "history") {
-          return Response.json({
-            ok: true,
-            mode,
-            stage,
-            batch_date: today,
-            etfs: reps.length,
-            rows_added: bf?.rowsAdded ?? 0,
-            rows_written: bf?.rowsWritten ?? 0,
-            pages_total: bf?.pages ?? 0,
-            kline_min: bf?.minDate ?? null,
-            kline_max: bf?.maxDate ?? null,
-            kline_failed: bf?.failed.length ?? 0,
-            warnings: aggregateWarnings(warnParts),
-          });
+    // ② 腾讯K线增量（0.3s pacing + 3 次退避重试；单只失败只计数，不中断）
+    //   mode=backfill：先逐只代表 ETF 日期翻页拉全历史 upsert（走与 run 相同的鉴权/宇宙/写入链路），
+    //   再自动续跑下面与 mode=run 相同的当日计算（pos52/dev60/labels 基于新历史刷新）。
+    //   阀门（防 edge wall-clock 截断，沿用 Task 3 mode=run&stage=kline 分批实证做法）：
+    //     &stage=history[&limit&offset] = 仅分页拉取（可分批），不做计算轮即早返回；
+    //     &stage=compute = 跳过分页，仅跑计算轮（分页已由前序 stage=history 完成）。
+    let bf: BackfillStats | null = null;
+    let dailyBefore: {
+      batches: number;
+      latestAcc: number;
+      latest: string | null;
+    } | null = null;
+    if (mode === "backfill") {
+      dailyBefore = await readDailyStats();
+      if (stage !== "compute") {
+        bf = await backfillHistory(reps, today);
+        if (bf.failed.length > 0) {
+          warnParts.push(
+            bf.failed.map((f) =>
+              `backfill 失败 ${f.etf_code}(${f.ind}): ${f.err}`
+            ),
+          );
         }
       }
-      const kn = await updateKlines(reps, today);
-      if (kn.failed.length > 0) {
-        warnParts.push(
-          kn.failed.map((f) => `kline 失败 ${f.etf_code}(${f.ind}): ${f.err}`),
-        );
-      }
-      if (stage === "kline") {
+      if (stage === "history") {
         return Response.json({
           ok: true,
           mode,
           stage,
           batch_date: today,
-          reps: reps.length,
-          kline_added: kn.added,
-          kline_failed: kn.failed.length,
-          bars_min: Math.min(
-            ...[...kn.barsByCode.values()].map((b) => b.length),
-          ),
-          bars_max: Math.max(
-            ...[...kn.barsByCode.values()].map((b) => b.length),
-          ),
-          warnings: aggregateWarnings(warnParts),
-        });
-      }
-
-      // ③ GS 15 分段截面（含 Q 探测；整轮失败 ⇒ 全局 stale 降级）
-      let snap = new Map<string, EtfSnapRow>();
-      let truncated: string[] = [];
-      let gsError = "";
-      try {
-        const seg = await fetchSegments(key);
-        snap = seg.rows;
-        truncated = seg.truncated;
-        warnParts.push(seg.warnings);
-      } catch (e) {
-        gsError = e instanceof Error ? e.message : String(e); // 含 MIN_ROWS：适配器已脱敏
-        warnParts.push([`GS 截面整体失败: ${gsError}`]);
-      }
-      const qAlive = [...snap.values()].some((r) => r.hay !== null);
-
-      // ④ prevMp（C4）+ 昨日整批（C5）
-      const prevRows = await readPrevBatch(today);
-      const prevMp = new Map<string, number>();
-      for (const r of prevRows) {
-        if (typeof r.mp === "number") prevMp.set(r.ind, r.mp);
-      }
-      const prevByInd = new Map<string, DailyRow>(
-        prevRows.map((r) => [r.ind, r]),
-      );
-
-      // ⑤ 组装 → 引擎 → upsert
-      const { inputs, noSnap, offmapCodes } = assembleInputs(
-        subMap,
-        snap,
-        kn.barsByCode,
-        prevMp,
-      );
-      warnParts.push(
-        offmapCodes.length > 0
-          ? [
-            `GS 截面含 ${offmapCodes.length} 只 map 外 ETF（nightly 不做归一 C1，周一本地流程处理）: ${
-              offmapCodes.slice(0, 10).join(",")
-            }${offmapCodes.length > 10 ? ",…" : ""}`,
-          ]
-          : [],
-      );
-      warnParts.push(
-        noSnap.length > 0
-          ? [`截面缺该行业 ETF（走 stale）: ${noSnap.join(",")}`]
-          : [],
-      );
-
-      const staleInds = new Set([...noSnap, ...kn.failed.map((f) => f.ind)]);
-      const computed = gsError || inputs.length === 0
-        ? []
-        : computeSectorRows(inputs);
-
-      const outRows: DailyRow[] = [];
-      let staleRows = 0;
-      const dropped: string[] = [];
-      for (const r of computed) {
-        const needStale = staleInds.has(r.ind);
-        const prev = prevByInd.get(r.ind);
-        if (needStale && prev) {
-          outRows.push(shapeStaleRow(prev, today));
-          staleRows++;
-        } else {
-          if (needStale && !prev) dropped.push(r.ind);
-          outRows.push(toDbRow(r, today, needStale));
-          if (needStale && !prev) staleRows++; // 无昨日行可 copy ⇒ 当日行标 stale，绝不静默丢（C5）
-        }
-      }
-      if (gsError) {
-        // 整轮截面失败 ⇒ 昨日整批 copy 到今日（labels 原样，不重算）
-        outRows.length = 0;
-        staleRows = 0;
-        for (const prev of prevRows) {
-          if (selInds.has(prev.ind)) {
-            outRows.push(shapeStaleRow(prev, today));
-            staleRows++;
-          }
-        }
-        if (outRows.length === 0) {
-          warnParts.push([
-            "stale 降级无可 copy 的昨日批次 ⇒ 本轮不写库，保留旧批次",
-          ]);
-        }
-      }
-      if (dropped.length > 0) {
-        warnParts.push([
-          `无昨日行、保留当日降级行并置 stale: ${dropped.join(",")}`,
-        ]);
-      }
-      if (outRows.length > 0) {
-        await upsert(
-          outRows as unknown as Record<string, unknown>[],
-          "sector_rotation_daily",
-          "batch_date,ind",
-        );
-      }
-
-      // ⑥ S4：Q 腿复活探测（false→true 才 log 一次）
-      if (isQResurrected(prevRows, qAlive)) console.log("Q_RESURRECTED");
-
-      const lists = rankLists(computed);
-      const acc = lists.accumulating;
-      // mode=backfill 专用响应：刷新前后对照（批次不增 + accumulating 刷新）+ 历史深度/行数取证
-      if (mode === "backfill") {
-        const dailyAfter = await readDailyStats();
-        return Response.json({
-          ok: outRows.length > 0,
-          mode,
-          batch_date: today,
-          etfs: bf?.etfs ?? reps.length,
+          etfs: reps.length,
           rows_added: bf?.rowsAdded ?? 0,
           rows_written: bf?.rowsWritten ?? 0,
           pages_total: bf?.pages ?? 0,
           kline_min: bf?.minDate ?? null,
           kline_max: bf?.maxDate ?? null,
-          kline_failed: (bf?.failed.length ?? 0) + kn.failed.length,
-          batches_before: dailyBefore?.batches ?? null,
-          batches_after: dailyAfter.batches,
-          accumulating_before: dailyBefore?.latestAcc ?? null,
-          // 与 before 同口径读【已落库批次】的 pos52-null 计数：
-          //  整轮 GS 失败/computed 为空时，刷新轮不写库 ⇒ after 应如实等于 before（未变），
-          //  不能用内存 acc（那会把「本轮没算」误报成「accumulating 归零」）。
-          accumulating_after: dailyAfter.latestAcc,
-          industries: outRows.length,
-          up: lists.up.length,
-          down: lists.down.length,
-          entangled: lists.entangled,
-          stale_rows: staleRows,
-          gs_rows: snap.size,
-          gs_offmap: offmapCodes.length,
-          prev_batch_date: prevRows[0]?.batch_date ?? null,
-          error: gsError || undefined,
+          kline_failed: bf?.failed.length ?? 0,
           warnings: aggregateWarnings(warnParts),
         });
       }
+    }
+    const kn = await updateKlines(reps, today);
+    if (kn.failed.length > 0) {
+      warnParts.push(
+        kn.failed.map((f) => `kline 失败 ${f.etf_code}(${f.ind}): ${f.err}`),
+      );
+    }
+    if (stage === "kline") {
+      return Response.json({
+        ok: true,
+        mode,
+        stage,
+        batch_date: today,
+        reps: reps.length,
+        kline_added: kn.added,
+        kline_failed: kn.failed.length,
+        bars_min: Math.min(
+          ...[...kn.barsByCode.values()].map((b) => b.length),
+        ),
+        bars_max: Math.max(
+          ...[...kn.barsByCode.values()].map((b) => b.length),
+        ),
+        warnings: aggregateWarnings(warnParts),
+      });
+    }
+
+    // ②.5 非交易日守卫（终审 Important-1，用户拍板口径逐字）
+    //   位置硬约束：必须在②K线增量之后、③GS 15 段截面之前（假日提前返回顺带省掉整晚 GS 配额）。
+    //   命中则：不 mint batch_date、不写任何库（sector_kline 本轮本就无新增可写），保留上一真实批次为最新。
+    const latestBatch = await readLatestBatch();
+    const guard = tradingDayGuard({
+      klineAdded: kn.added,
+      klineFailed: kn.failed.length,
+      latestBatch,
+      today,
+    });
+    if (guard.skip) {
+      return Response.json({
+        ok: true, // 无事可做＝成功（cron job_run_details 保留 succeeded + 下面两个字段取证）
+        mode,
+        skipped: true,
+        reason: guard.reason, // 'non_trading_day_skip' | 'already_written_today'
+        batch_date: today, // 既有字段语义不变（请求日，非新 mint 的批次）
+        latest_batch_date: latestBatch, // 保留的真实最新批次（判据之一）
+        reps: reps.length,
+        kline_added: kn.added,
+        kline_failed: kn.failed.length,
+        industries: 0, // 本轮未写一行
+        up: 0,
+        down: 0,
+        entangled: 0,
+        accumulating: 0,
+        stale_rows: 0,
+        gs_rows: 0,
+        warnings: aggregateWarnings(warnParts),
+      });
+    }
+
+    // ③ GS 15 分段截面（含 Q 探测；整轮失败 ⇒ 全局 stale 降级）
+    let snap = new Map<string, EtfSnapRow>();
+    let truncated: string[] = [];
+    let gsError = "";
+    try {
+      const seg = await deps.fetchSegments(key);
+      snap = seg.rows;
+      truncated = seg.truncated;
+      warnParts.push(seg.warnings);
+    } catch (e) {
+      gsError = e instanceof Error ? e.message : String(e); // 含 MIN_ROWS：适配器已脱敏
+      warnParts.push([`GS 截面整体失败: ${gsError}`]);
+    }
+    const qAlive = [...snap.values()].some((r) => r.hay !== null);
+
+    // ④ prevMp（C4）+ 昨日整批（C5）
+    const prevRows = await readPrevBatch(today);
+    const prevMp = new Map<string, number>();
+    for (const r of prevRows) {
+      if (typeof r.mp === "number") prevMp.set(r.ind, r.mp);
+    }
+    const prevByInd = new Map<string, DailyRow>(
+      prevRows.map((r) => [r.ind, r]),
+    );
+
+    // ⑤ 组装 → 引擎 → upsert
+    const { inputs, noSnap, offmapCodes } = assembleInputs(
+      subMap,
+      snap,
+      kn.barsByCode,
+      prevMp,
+    );
+    warnParts.push(
+      offmapCodes.length > 0
+        ? [
+          `GS 截面含 ${offmapCodes.length} 只 map 外 ETF（nightly 不做归一 C1，周一本地流程处理）: ${
+            offmapCodes.slice(0, 10).join(",")
+          }${offmapCodes.length > 10 ? ",…" : ""}`,
+        ]
+        : [],
+    );
+    warnParts.push(
+      noSnap.length > 0
+        ? [`截面缺该行业 ETF（走 stale）: ${noSnap.join(",")}`]
+        : [],
+    );
+
+    const staleInds = new Set([...noSnap, ...kn.failed.map((f) => f.ind)]);
+    const computed = gsError || inputs.length === 0
+      ? []
+      : computeSectorRows(inputs);
+
+    const outRows: DailyRow[] = [];
+    let staleRows = 0;
+    const dropped: string[] = [];
+    for (const r of computed) {
+      const needStale = staleInds.has(r.ind);
+      const prev = prevByInd.get(r.ind);
+      if (needStale && prev) {
+        outRows.push(shapeStaleRow(prev, today));
+        staleRows++;
+      } else {
+        if (needStale && !prev) dropped.push(r.ind);
+        outRows.push(toDbRow(r, today, needStale));
+        if (needStale && !prev) staleRows++; // 无昨日行可 copy ⇒ 当日行标 stale，绝不静默丢（C5）
+      }
+    }
+    if (gsError) {
+      // 整轮截面失败 ⇒ 昨日整批 copy 到今日（labels 原样，不重算）
+      outRows.length = 0;
+      staleRows = 0;
+      for (const prev of prevRows) {
+        if (selInds.has(prev.ind)) {
+          outRows.push(shapeStaleRow(prev, today));
+          staleRows++;
+        }
+      }
+      if (outRows.length === 0) {
+        warnParts.push([
+          "stale 降级无可 copy 的昨日批次 ⇒ 本轮不写库，保留旧批次",
+        ]);
+      }
+    }
+    if (dropped.length > 0) {
+      warnParts.push([
+        `无昨日行、保留当日降级行并置 stale: ${dropped.join(",")}`,
+      ]);
+    }
+    if (outRows.length > 0) {
+      await upsert(
+        outRows as unknown as Record<string, unknown>[],
+        "sector_rotation_daily",
+        "batch_date,ind",
+      );
+    }
+
+    // ⑥ S4：Q 腿复活探测（false→true 才 log 一次）
+    if (isQResurrected(prevRows, qAlive)) console.log("Q_RESURRECTED");
+
+    const lists = rankLists(computed);
+    const acc = lists.accumulating;
+    // mode=backfill 专用响应：刷新前后对照（批次不增 + accumulating 刷新）+ 历史深度/行数取证
+    if (mode === "backfill") {
+      const dailyAfter = await readDailyStats();
       return Response.json({
         ok: outRows.length > 0,
         mode,
         batch_date: today,
+        etfs: bf?.etfs ?? reps.length,
+        rows_added: bf?.rowsAdded ?? 0,
+        rows_written: bf?.rowsWritten ?? 0,
+        pages_total: bf?.pages ?? 0,
+        kline_min: bf?.minDate ?? null,
+        kline_max: bf?.maxDate ?? null,
+        kline_failed: (bf?.failed.length ?? 0) + kn.failed.length,
+        batches_before: dailyBefore?.batches ?? null,
+        batches_after: dailyAfter.batches,
+        accumulating_before: dailyBefore?.latestAcc ?? null,
+        // 与 before 同口径读【已落库批次】的 pos52-null 计数：
+        //  整轮 GS 失败/computed 为空时，刷新轮不写库 ⇒ after 应如实等于 before（未变），
+        //  不能用内存 acc（那会把「本轮没算」误报成「accumulating 归零」）。
+        accumulating_after: dailyAfter.latestAcc,
         industries: outRows.length,
         up: lists.up.length,
         down: lists.down.length,
         entangled: lists.entangled,
-        accumulating: acc,
-        accumulating_inds: splitByBarsN(computed).accumulating.map((r) =>
-          `${r.ind}(n=${r.barsN})`
-        ),
-        up_list: lists.up.slice(0, 10).map((r) =>
-          `${r.ind}:${Math.round(r.m60 * 1000) / 10}`
-        ),
-        down_list: lists.down.slice(0, 10).map((r) =>
-          `${r.ind}:${Math.round(r.m60 * 1000) / 10}`
-        ),
         stale_rows: staleRows,
-        kline_added: kn.added,
-        kline_failed: kn.failed.length,
         gs_rows: snap.size,
         gs_offmap: offmapCodes.length,
-        truncated,
-        q_alive: qAlive,
-        q_resurrected: isQResurrected(prevRows, qAlive),
         prev_batch_date: prevRows[0]?.batch_date ?? null,
         error: gsError || undefined,
         warnings: aggregateWarnings(warnParts),
       });
-    } catch (e) {
-      return Response.json({
-        ok: false,
-        error: String(e),
-        batch_date: today,
-        warnings: aggregateWarnings(warnParts),
-      }, { status: 500 });
     }
-  });
+    return Response.json({
+      ok: outRows.length > 0,
+      mode,
+      batch_date: today,
+      industries: outRows.length,
+      up: lists.up.length,
+      down: lists.down.length,
+      entangled: lists.entangled,
+      accumulating: acc,
+      accumulating_inds: splitByBarsN(computed).accumulating.map((r) =>
+        `${r.ind}(n=${r.barsN})`
+      ),
+      up_list: lists.up.slice(0, 10).map((r) =>
+        `${r.ind}:${Math.round(r.m60 * 1000) / 10}`
+      ),
+      down_list: lists.down.slice(0, 10).map((r) =>
+        `${r.ind}:${Math.round(r.m60 * 1000) / 10}`
+      ),
+      stale_rows: staleRows,
+      kline_added: kn.added,
+      kline_failed: kn.failed.length,
+      gs_rows: snap.size,
+      gs_offmap: offmapCodes.length,
+      truncated,
+      q_alive: qAlive,
+      q_resurrected: isQResurrected(prevRows, qAlive),
+      prev_batch_date: prevRows[0]?.batch_date ?? null,
+      error: gsError || undefined,
+      warnings: aggregateWarnings(warnParts),
+    });
+  } catch (e) {
+    return Response.json({
+      ok: false,
+      error: String(e),
+      batch_date: today,
+      warnings: aggregateWarnings(warnParts),
+    }, { status: 500 });
+  }
+}
+
+if (!Deno.env.get("SECTOR_TREND_DISABLE_SERVE")) {
+  Deno.serve((req: Request) => handle(req));
 }

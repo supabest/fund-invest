@@ -58,13 +58,33 @@ const toStr = (
   ? String(v)
   : "");
 
-// data[] → EtfSnapRow[]（ofcode/ofname/endamt/temperRegion/range60d/sharpe1yrank/hayjqidu；缺列→null）
-export function parseSearchResp(json: unknown): EtfSnapRow[] {
-  const j = json as { result?: { code?: number }[]; data?: unknown } | null;
-  if (!j || typeof j !== "object") return [];
-  if (j.result?.[0]?.code !== 0) return []; // 业务失败码（鉴权/参数）当空截面，交由 fetchSegments 记 warning
+// data[] → 行集 + 业务码（终审 I-3：result.code≠0 不得再坑塌成「空截面」）。
+// 行为不变：业务失败依旧 rows=[]（MIN_ROWS/重试/pacing 语义一字不改），只是把码与 msg 一并上抛供透传。
+// bizMsg 是未脱敏原文（可能回显被打码的 apiKey），调用方必须先过 safeGsMsg 才允许进任何文案。
+export interface ParsedSearch {
+  rows: EtfSnapRow[];
+  fail: boolean; // true ⇒ result[0].code 缺失或非 0（含鉴权失效/参数错误/日限额）
+  bizCode: number | null;
+  bizMsg: string;
+}
+
+export function parseSearchFull(json: unknown): ParsedSearch {
+  const j = json as
+    | { result?: { code?: number; msg?: unknown }[]; data?: unknown }
+    | null;
+  if (!j || typeof j !== "object") return { rows: [], fail: true, bizCode: null, bizMsg: "" };
+  const first = Array.isArray(j.result) ? j.result[0] : undefined;
+  if (first?.code !== 0) {
+    // 业务失败码（鉴权/参数/197006 日限额…）或 result 缺失 → 当空截面，但码必须透出
+    return {
+      rows: [],
+      fail: true,
+      bizCode: typeof first?.code === "number" ? first.code : null,
+      bizMsg: toStr(first?.msg),
+    };
+  }
   const data = Array.isArray(j.data) ? j.data : null;
-  if (!data) return [];
+  if (!data) return { rows: [], fail: false, bizCode: null, bizMsg: "" };
   const out: EtfSnapRow[] = [];
   for (const raw of data) {
     if (!raw || typeof raw !== "object") continue;
@@ -81,7 +101,52 @@ export function parseSearchResp(json: unknown): EtfSnapRow[] {
       hay: hay === "" ? null : hay,
     });
   }
-  return out;
+  return { rows: out, fail: false, bizCode: null, bizMsg: "" };
+}
+
+// data[] → EtfSnapRow[]（ofcode/ofname/endamt/temperRegion/range60d/sharpe1yrank/hayjqidu；缺列→null）
+export function parseSearchResp(json: unknown): EtfSnapRow[] {
+  return parseSearchFull(json).rows;
+}
+
+// —— 文案加工（终审 I-3）：码必透，msg 只取脱敏后的部分；绝不把可能含凭据的原文拼进去 ——
+const MSG_MAX = 40;
+const CRED_TOKEN_RE = /[A-Za-z0-9_\-]{12,}/g; // 12+ 位字母数字混排 ⇒ 一律当作凭据形态打码
+const URL_RE = /https?:\/\/\S+/g; // URL 可能带 apiKey
+const reLit = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+export function safeGsMsg(msg: string, apiKey: string): string {
+  if (!msg) return "";
+  let s = String(msg);
+  const key = String(apiKey ?? "").trim();
+  if (key.length >= 4) {
+    s = s.replace(new RegExp(reLit(key), "g"), "***"); // 整串 key
+    // 打码后的 key 片段（前 6 位同形 + 任意尾）也一律打码
+    s = s.replace(new RegExp(`${reLit(key.slice(0, 6))}[A-Za-z0-9_*\\-]*`, "g"), "***");
+  }
+  s = s.replace(URL_RE, "<url>").replace(CRED_TOKEN_RE, "***");
+  return s.length > MSG_MAX ? s.slice(0, MSG_MAX) : s;
+}
+
+export const EMPTY_SNAP_TEXT = "GS 空截面（业务码=0 且 data 为空）"; // 与真空返数据可区分
+
+export function bizFailText(code: number | null, msg: string, apiKey: string): string {
+  const tag = `GS 业务码=${code === null ? "未知" : code}`;
+  const m = safeGsMsg(msg, apiKey);
+  return m ? `${tag} msg="${m}"` : tag;
+}
+
+// 整轮降级文案：无业务码时不凭空提及“业务码”（避免误导定性）
+export function minRowsText(size: number, tags: string[], segTotal: number): string {
+  const base = `MIN_ROWS 违例: 并集去重 ${size} < ${MIN_ROWS}（快照异常）`;
+  if (tags.length === 0) return base;
+  const counts = new Map<string, number>();
+  for (const t of tags) counts.set(t, (counts.get(t) ?? 0) + 1);
+  const dist = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([t, n]) => `${t}×${n}/${segTotal} 段`)
+    .join(", ");
+  return `${base} 失败码分布: ${dist}`;
 }
 
 async function segFetch(
@@ -97,9 +162,11 @@ async function segFetch(
         signal: AbortSignal.timeout(GS_REQ_TIMEOUT_MS),
       });
       if (!r.ok) throw new Error(`GS http ${r.status}`);
-      const rows = parseSearchResp(await r.json());
-      if (rows.length === 0) throw new Error("GS 空截面/业务失败码"); // 含 result.code≠0（如 apiKey 失效）
-      return rows;
+      const parsed = parseSearchFull(await r.json());
+      // 终审 I-3：业务失败码不再与「真空截面」同文案（197006 / 鉴权失效 / 参数错直接现形于 warning）
+      if (parsed.fail) throw new Error(bizFailText(parsed.bizCode, parsed.bizMsg, apiKey));
+      if (parsed.rows.length === 0) throw new Error(EMPTY_SNAP_TEXT);
+      return parsed.rows;
     } catch (e) {
       // 网络错误 message 可能内嵌含 apiKey 的完整 URL → 脱敏（先例：stock-score/gs.ts、tencent.ts）
       lastErr = e instanceof TypeError
@@ -117,11 +184,16 @@ export interface SegSnapshot {
   warnings: string[];
 }
 
-// 15 分段串行 + 400ms pacing；单段失败（重试后）记 warning 继续；满 100 记 truncated；并集 <300 → throw('MIN_ROWS')
+// 15 分段串行 + 400ms pacing；单段失败（重试后）记 warning 继续（warning 文本自带 GS 业务码，I-3）；
+// 满 100 记 truncated；并集 <300 → throw(MIN_ROWS + 失败码分布)（段数/重试/pacing/MIN_ROWS 语义一律不变）
+const CODE_TAG_RE = /GS 业务码=(?:\d+|未知)/;
+const SEG_TOTAL = AMT_BANDS.length * TEMPERS.length;
+
 export async function fetchSegments(apiKey: string): Promise<SegSnapshot> {
   const rows = new Map<string, EtfSnapRow>();
   const truncated: string[] = [];
   const warnings: string[] = [];
+  const failTags: string[] = [];
   for (const amt of AMT_BANDS) {
     for (const tem of TEMPERS) {
       const seg = `amt=${amt}×temper${tem}`;
@@ -129,11 +201,12 @@ export async function fetchSegments(apiKey: string): Promise<SegSnapshot> {
       try {
         segRows = await segFetch(amt, tem, apiKey);
       } catch (e) {
+        const m = e instanceof Error ? e.message : String(e);
         warnings.push(
-          `${seg} 取数失败（重试 ${ATTEMPTS} 次后跳过）: ${
-            e instanceof Error ? e.message : String(e)
-          }`,
+          `${seg} 取数失败（重试 ${ATTEMPTS} 次后跳过）: ${m}`,
         );
+        const hit = CODE_TAG_RE.exec(m)?.[0]; // throw 时 warnings 会丢 ⇒ 码另存一份进 throw 文案
+        if (hit) failTags.push(hit);
       }
       if (segRows) {
         if (segRows.length === CAP) {
@@ -149,9 +222,7 @@ export async function fetchSegments(apiKey: string): Promise<SegSnapshot> {
     }
   }
   if (rows.size < MIN_ROWS) {
-    throw new Error(
-      `MIN_ROWS 违例: 并集去重 ${rows.size} < ${MIN_ROWS}（快照异常）`,
-    );
+    throw new Error(minRowsText(rows.size, failTags, SEG_TOTAL));
   }
   return { rows, truncated, warnings };
 }

@@ -1,10 +1,11 @@
-// index_test.ts — 只覆盖 index.ts 抽出的纯编排位（brief Step 3 注：fetch 链以 ping 模式线上验证代替）
-// 覆盖：theme 字典映射 / 未命中字典键 / SectorRow→DB 行 snake_case 整形 / C3 accumulating 分流与榜单排序纪律 /
-//       stale 行整形 / warnings 聚合 / Q 复活判定 / assembleInputs（宇宙×截面×K线×prevMp）。
+// index_test.ts — 覆盖 index.ts 抽出的纯编排位 + 非交易日守卫的编排顺序（终审 I-1）+ bars_n 落库载荷（终审 I-2）
+// 覆盖：theme 字典映射 / 未命中字典键 / SectorRow→DB 行 snake_case 整形（含 bars_n）/ C3 accumulating 分流与榜单排序纪律 /
+//       stale 行整形 / warnings 聚合 / Q 复活判定 / assembleInputs（宇宙×截面×K线×prevMp）/
+//       tradingDayGuard 判据 + handle() 端到端（fetch 桩 + GS spy）证明「守卫在 ②K线后、③GS 前」。
 // 先关 serve 守卫再动态 import，避免 import 即绑端口（与 stock-score/index_test.ts 同模式）。
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import type { Bar, EtfSnap, SectorRow } from "./engine.ts";
-import type { EtfSnapRow } from "./gs_etf.ts";
+import type { EtfSnapRow, SegSnapshot } from "./gs_etf.ts";
 import type { MapRow } from "./index.ts";
 
 Deno.env.set("SECTOR_TREND_DISABLE_SERVE", "1");
@@ -20,6 +21,8 @@ const {
   assembleInputs,
   klineOneQuery,
   shouldFlush,
+  tradingDayGuard,
+  handle,
   BARS_FULL,
 } = await import("./index.ts");
 
@@ -121,9 +124,10 @@ Deno.test("unmatchedThemeKeys: 字典中在库里没有对应行业的键（只�
   );
 });
 
-// ---------- SectorRow → DB 行（T3↔T4 交接面：列名必须贴 DDL snake_case，无 bars_n 列） ----------
-Deno.test("toDbRow: 23 引擎字段 → 24 列 DDL 形状；barsN 不落库（表无该列）", () => {
-  const r = toDbRow(row({ theme: "机器人" }), "2026-10-01", false);
+// ---------- SectorRow → DB 行（T3↔T4 交接面：列名必须贴 DDL snake_case） ----------
+// 终审 I-2：sector_rotation_daily 补 bars_n 列 ⇒ barsN 必须落库（免歧义区分「样本不足的 0 兜底」与「真实平盘 0」）
+Deno.test("toDbRow: 24 引擎字段 → 25 列 DDL 形状；barsN → bars_n 原样落库（不 r4 取整、不丢）", () => {
+  const r = toDbRow(row({ theme: "机器人", barsN: 133 }), "2026-10-01", false);
   assertEquals(r, {
     batch_date: "2026-10-01",
     ind: "银行",
@@ -149,9 +153,11 @@ Deno.test("toDbRow: 23 引擎字段 → 24 列 DDL 形状；barsN 不落库（�
     q: null,
     theme: "机器人",
     stale: false,
+    bars_n: 133,
   });
-  assertEquals("bars_n" in r, false);
-  assertEquals("barsN" in r, false);
+  assertEquals(r.bars_n, 133);
+  assertEquals("barsN" in r, false); // 落库一律 snake_case
+  assertEquals(toDbRow(row({ barsN: 0 }), "2026-10-01", false).bars_n, 0); // 0 根也要如实落，不得兜成 null
 });
 
 // ---------- C3：barsN<250 不得当真实涨跌参与排序 ----------
@@ -209,7 +215,8 @@ Deno.test("shapeStaleRow: 换 batch_date + stale=true，其余（含 labels）�
   assertEquals(s.labels, []);
   assertEquals(s.m60, -0.1);
   assertEquals(s.pos52, null);
-  assertEquals(Object.keys(s).length, 24);
+  assertEquals(s.bars_n, 640); // stale copy 整行搬，bars_n 原样沿用昨日（不重算）
+  assertEquals(Object.keys(s).length, 25);
 });
 
 Deno.test("shapeStaleRow: 不改传入对象（纯函数）", () => {
@@ -381,4 +388,302 @@ Deno.test("shouldFlush: 每 N 只冲刷一次 + 最后一只必冲刷（1-based 
   assertEquals(shouldFlush(110, 110, 20), true); // 收尾
   assertEquals(shouldFlush(40, 40, 20), true); // 总数恰为批大小：既是整批也是收尾
   assertEquals(shouldFlush(1, 1, 20), true); // 单只也要冲刷
+});
+
+// ============ 终审 Important-1：非交易日不写新批次 ============
+// 判据（用户拍板逐字）：全宇宙 kline_added === 0 && kline_failed === 0 ⇒ 非交易日 ⇒ 不 mint、不写库。
+// 腾讯整体宕机（failed>0）属失败不属假日 ⇒ 不得 skip，走既有 per-industry stale copy。
+Deno.test("tradingDayGuard: added=0&failed=0 → skip；failed>0 或 added>0 → 不 skip；今日已有批次 → reason 区分", () => {
+  assertEquals(
+    tradingDayGuard({
+      klineAdded: 0,
+      klineFailed: 0,
+      latestBatch: "2026-09-30",
+      today: "2026-10-01",
+    }),
+    { skip: true, reason: "non_trading_day_skip" },
+  );
+  // 腾讯整体宕机：那是失败，不是非交易日
+  assertEquals(
+    tradingDayGuard({
+      klineAdded: 0,
+      klineFailed: 110,
+      latestBatch: null,
+      today: "2026-10-01",
+    }),
+    { skip: false, reason: null },
+  );
+  // 部分行业有新 bar ⇒ 真实交易日
+  assertEquals(
+    tradingDayGuard({
+      klineAdded: 1,
+      klineFailed: 0,
+      latestBatch: null,
+      today: "2026-10-01",
+    }),
+    { skip: false, reason: null },
+  );
+  // 同夜幂等重跑（真实交易日已写过今日）：仍不重写，但 reason 必须能区分
+  assertEquals(
+    tradingDayGuard({
+      klineAdded: 0,
+      klineFailed: 0,
+      latestBatch: "2026-10-01",
+      today: "2026-10-01",
+    }),
+    { skip: true, reason: "already_written_today" },
+  );
+  // 空库（首跑无任何批次）
+  assertEquals(
+    tradingDayGuard({
+      klineAdded: 0,
+      klineFailed: 0,
+      latestBatch: null,
+      today: "2026-10-01",
+    }),
+    { skip: true, reason: "non_trading_day_skip" },
+  );
+});
+
+// ---- handle() 端到端：fetch 桩（REST + 腾讯）+ GS 截面 spy（顺序硬证明）----
+const TODAY = new Date().toISOString().slice(0, 10);
+const YDAY = new Date(
+  Date.parse(`${TODAY}T00:00:00Z`) - 86_400_000,
+).toISOString().slice(0, 10);
+const TOKEN = "test-token";
+const GS_KEY = "FAKE_KEY_FOR_TEST_ONLY";
+const REST_BASE = "https://fake.supabase.co";
+
+const barRow = (d: string) => [d, "1.20", "1.25", "1.26", "1.19", "1000"]; // [date,open,close,high,low,vol]
+const tailRow = (d: string) => ({
+  trade_date: d,
+  close: 1.25,
+  volume: 1000,
+});
+const MAP_ROWS: MapRow[] = [{
+  etf_code: "512800",
+  etf_name: "银行ETF",
+  canonical_ind: "银行",
+  amt: 99,
+  is_rep: true,
+}];
+const SNAP: SegSnapshot = {
+  rows: new Map<string, EtfSnapRow>([[
+    "512800",
+    { code: "512800", name: "银行ETF", amt: 99, tem: 3, r60: 1.5, sharpe: 60, hay: null },
+  ]]),
+  truncated: [],
+  warnings: [],
+};
+
+interface NetStub {
+  writes: { table: string; body: Record<string, unknown>[] }[];
+  gsHttpCalls: number;
+  tencentCalls: number;
+  restore: () => void;
+}
+
+function stubNetwork(o: {
+  tail: { trade_date: string; close: number; volume: number }[];
+  tencent: (string | number)[][] | "malformed"; // "malformed" ⇒ 腾讯宕机/吐畸形（fetchRecentKline 3 次退避后 throw）
+  dailyLatest: { batch_date: string }[]; // 守卫读库（select=batch_date&order=desc&limit=1）
+  prevBatch?: Record<string, unknown>[]; // ④ 昨日整批
+}): NetStub {
+  const writes: NetStub["writes"] = [];
+  let gsHttpCalls = 0;
+  let tencentCalls = 0;
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (url.includes("ifzq.gtimg.cn")) {
+      tencentCalls++;
+      if (o.tencent === "malformed") {
+        return Promise.resolve(Response.json({ data: { unexpected: {} } }));
+      }
+      const sym = decodeURIComponent(
+        new URL(url).searchParams.get("param")!.split(",")[0],
+      );
+      return Promise.resolve(Response.json({ data: { [sym]: { qfqday: o.tencent } } }));
+    }
+    if (url.includes("guosen.com.cn")) {
+      gsHttpCalls++; // skip 分支下必须为 0（即使依赖了真 fetchSegments 也会被发现）
+      return Promise.resolve(Response.json({ result: [{ code: 0 }], data: [] }));
+    }
+    const u = new URL(url);
+    const q = u.pathname + u.search;
+    if (method === "POST") {
+      const table = q.replace("/rest/v1/", "").split("?")[0];
+      writes.push({
+        table,
+        body: JSON.parse(String(init?.body ?? "[]")) as Record<string, unknown>[],
+      });
+      return Promise.resolve(Response.json([], { status: 201 }));
+    }
+    if (q.startsWith("/rest/v1/sector_etf_map")) {
+      return Promise.resolve(Response.json(MAP_ROWS));
+    }
+    if (q.startsWith("/rest/v1/sector_kline")) {
+      return Promise.resolve(Response.json(o.tail));
+    }
+    if (q.startsWith("/rest/v1/sector_rotation_daily")) {
+      if (q.includes("select=batch_date&")) {
+        return Promise.resolve(Response.json(o.dailyLatest));
+      }
+      return Promise.resolve(Response.json(o.prevBatch ?? []));
+    }
+    return Promise.resolve(Response.json([], { status: 200 }));
+  }) as typeof fetch;
+  return {
+    writes,
+    get gsHttpCalls() {
+      return gsHttpCalls;
+    },
+    get tencentCalls() {
+      return tencentCalls;
+    },
+    restore: () => (globalThis.fetch = real),
+  };
+}
+
+function runReq(): Request {
+  return new Request(`${REST_BASE}/functions/v1/sector-trend?mode=run`, {
+    headers: { Authorization: `Bearer ${TOKEN}` },
+  });
+}
+
+function gsSpy(box: { n: number }): { fetchSegments: () => Promise<SegSnapshot> } {
+  return {
+    fetchSegments: async () => {
+      box.n++;
+      return SNAP;
+    },
+  };
+}
+
+Deno.test("I-1 非交易日 skip：GS 截面一次都没被调用（顺序硬证明）+ 零写库 + reason/取证字段齐全", async () => {
+  Deno.env.set("SECTOR_TREND_TOKEN", TOKEN);
+  Deno.env.set("GS_API_KEY", GS_KEY);
+  Deno.env.set("SUPABASE_URL", REST_BASE);
+  const s = stubNetwork({
+    tail: [tailRow(YDAY)],
+    tencent: [barRow(YDAY)], // 全宇宙无新 bar ⇒ added=0
+    dailyLatest: [{ batch_date: YDAY }],
+  });
+  const box = { n: 0 };
+  try {
+    const j = await (await handle(runReq(), gsSpy(box))).json() as Record<
+      string, unknown
+    >;
+    assertEquals(box.n, 0, "守卫必须在 ③GS 之前提前返回，否则整晚 15 段配额白烧");
+    assertEquals(s.gsHttpCalls, 0, "不得有任何 GS HTTP 调用");
+    assertEquals(s.writes.length, 0, "skip 分支不得产生任何写库调用");
+    assertEquals(j.ok, true);
+    assertEquals(j.skipped, true);
+    assertEquals(j.reason, "non_trading_day_skip");
+    assertEquals(j.kline_added, 0);
+    assertEquals(j.kline_failed, 0);
+    assertEquals(j.latest_batch_date, YDAY); // 保留上一真实批次为最新
+    assertEquals(j.industries, 0);
+    assertEquals(j.batch_date, TODAY); // 既有字段语义不变（请求日）
+    assertEquals(j.mode, "run");
+    assertEquals(s.tencentCalls, 1, "②K线增量已完整跑过（守卫是在它之后判的）");
+  } finally {
+    s.restore();
+    Deno.env.delete("SECTOR_TREND_TOKEN");
+    Deno.env.delete("GS_API_KEY");
+    Deno.env.delete("SUPABASE_URL");
+  }
+});
+
+Deno.test("I-1 同夜幂等重跑：今日批次已存在且 added=0 → 仍 skip，reason=already_written_today（与假日可区分）", async () => {
+  Deno.env.set("SECTOR_TREND_TOKEN", TOKEN);
+  Deno.env.set("GS_API_KEY", GS_KEY);
+  Deno.env.set("SUPABASE_URL", REST_BASE);
+  const s = stubNetwork({
+    tail: [tailRow(YDAY)],
+    tencent: [barRow(YDAY)],
+    dailyLatest: [{ batch_date: TODAY }], // 今日已写过
+  });
+  const box = { n: 0 };
+  try {
+    const j = await (await handle(runReq(), gsSpy(box))).json() as Record<
+      string, unknown
+    >;
+    assertEquals(j.skipped, true);
+    assertEquals(j.reason, "already_written_today");
+    assertEquals(j.latest_batch_date, TODAY);
+    assertEquals(box.n, 0);
+    assertEquals(s.writes.length, 0);
+  } finally {
+    s.restore();
+    Deno.env.delete("SECTOR_TREND_TOKEN");
+    Deno.env.delete("GS_API_KEY");
+    Deno.env.delete("SUPABASE_URL");
+  }
+});
+
+Deno.test("I-1 腾讯整体宕机（failed>0）→ 不得 skip：照旧打 GS 并走 per-industry stale 路径", async () => {
+  Deno.env.set("SECTOR_TREND_TOKEN", TOKEN);
+  Deno.env.set("GS_API_KEY", GS_KEY);
+  Deno.env.set("SUPABASE_URL", REST_BASE);
+  const s = stubNetwork({
+    tail: [tailRow(YDAY)],
+    tencent: "malformed", // 吐不出可用 bar ⇒ fetchRecentKline 3 次退避后 throw ⇒ kline_failed>0
+    dailyLatest: [{ batch_date: YDAY }],
+  });
+  const box = { n: 0 };
+  try {
+    const j = await (await handle(runReq(), gsSpy(box))).json() as Record<
+      string, unknown
+    >;
+    assertEquals(box.n, 1, "failed>0 属失败不属假日，必须继续 ③GS");
+    assertEquals(j.skipped, undefined);
+    assertEquals(j.reason, undefined);
+    assertEquals(j.kline_failed, 1);
+    assertEquals(j.industries, 1, "不静默丢行业");
+    assertEquals(j.stale_rows, 1); // C5：无昨日行可 copy ⇒ 当日行置 stale
+    assertEquals((j.warnings as string[]).some((w) => w.includes("kline 失败")), true);
+  } finally {
+    s.restore();
+    Deno.env.delete("SECTOR_TREND_TOKEN");
+    Deno.env.delete("GS_API_KEY");
+    Deno.env.delete("SUPABASE_URL");
+  }
+});
+
+Deno.test("I-1 added>0 → 不 skip；I-2 写库载荷 bars_n 等于引擎入参 bar 数", async () => {
+  Deno.env.set("SECTOR_TREND_TOKEN", TOKEN);
+  Deno.env.set("GS_API_KEY", GS_KEY);
+  Deno.env.set("SUPABASE_URL", REST_BASE);
+  const s = stubNetwork({
+    tail: [tailRow(YDAY)],
+    tencent: [barRow(YDAY), barRow(TODAY)], // 今日新 bar ⇒ added=1（真实交易日）
+    dailyLatest: [{ batch_date: YDAY }],
+  });
+  const box = { n: 0 };
+  try {
+    const j = await (await handle(runReq(), gsSpy(box))).json() as Record<
+      string, unknown
+    >;
+    assertEquals(box.n, 1);
+    assertEquals(j.skipped, undefined);
+    assertEquals(j.reason, undefined);
+    assertEquals(j.kline_added, 1);
+    const dailyWrite = s.writes.find((w) =>
+      w.table === "sector_rotation_daily"
+    );
+    assertEquals(dailyWrite !== undefined, true, "真实交易日必写 sector_rotation_daily");
+    const row0 = dailyWrite!.body[0] as Record<string, unknown>;
+    assertEquals(row0.bars_n, 2, "bars_n = 本轮引擎入参的 K 线根数（YDAY+TODAY）");
+    assertEquals(row0.batch_date, TODAY);
+    assertEquals(row0.stale, false);
+    // 新 bar 确实先落 sector_kline
+    assertEquals(s.writes.some((w) => w.table === "sector_kline"), true);
+  } finally {
+    s.restore();
+    Deno.env.delete("SECTOR_TREND_TOKEN");
+    Deno.env.delete("GS_API_KEY");
+    Deno.env.delete("SUPABASE_URL");
+  }
 });
