@@ -379,3 +379,31 @@ git add index.html && git commit -m "feat(sector): 基金页「板块轮动」�
 1. `deno check supabase/functions/sector-trend/*.ts scripts/sector_normalize.ts scripts/build_universe.ts` 零错误；`deno test -A supabase/functions/ scripts/` 全绿（57 旧测不回归 + 新增全过）。
 2. 线上：明日 22:30 cron 首跑后 `select batch_date,count(*) from sector_rotation_daily group by 1` 出现今日批次；连续 2 日跟踪 incremental 不产生重复日期洞。
 3. spec §8 三行业互洽核对通过；GS `hayjqidu` 若某晚回填，q_alive=true 当日行业分权重应切换（手工抽验 1 行业 ±0.5）。
+
+---
+
+## 交付记录与遗留（V1 收尾，2026-10-02 凌晨）
+
+> 本节由控制者在 4 个任务全部通过逐任务评审 + 整分支终审后追加，用来替代 `.superpowers/sdd/` 里那份 git-ignored 的 SDD 台账；下列数字全部经独立 SELECT / 复跑测试取证，非转述。
+
+### 落地状态
+- 分支 `feat/sector-rotation`，`2cc230d..686fe12`；三表 + RLS（三表仅 SELECT 策略，anon/authenticated 无写 grant，写路径靠 service_role 旁路）、nightly 函数 **v10 ACTIVE**、cron **job9 `sector-trend-nightly` `35 14 * * *` UTC = 22:35 北京**（错峰 job6）。
+- 测试：`deno check` 0 错误；`deno test -A supabase/functions/ scripts/` **150 passed**（functions 115 + scripts 35；基线 139 不回归）。
+- 生产数据：`sector_rotation_daily` = 1 批次 `2026-09-30` × 110 行，`bars_n` 110/110 已填（min 6 / max 1920），`stale` 全 false，`dm20` 全 null（首跑 prevMp 缺失，属预期）；`sector_kline` 134,881 行（2018-10-09..2026-09-30）；`sector_etf_map` 417 行 / 110 代表 / 110 行业。
+- 守卫生产取证（pg_net，与 cron 同路径，req 86）：`ok:true skipped:true reason:"non_trading_day_skip" latest_batch_date:"2026-09-30" kline_added:0 kline_failed:0`，事后库未变。
+
+### 过程中被推翻的判断（写下来防止有人再踩）
+1. `--profit` 类参数与 GS 的 `range60d/sharpe1yrank` 是**比率不是百分数**，`pos52/mp/dm20` 才是 0-100 点位。
+2. `sector_rotation_daily` 原本**没有 bars_n 列**，"数据积累中"只能用 `pos52 IS NULL` 作代理（现 I-2 已补真列）；且 `pos52 = 0` 是有效值（4 行，恰在 52 周低点），**禁止 falsy 判断**。
+3. 控制者曾裁"累积中行整体排除双榜"（C3），与 spec L94「历史不足者**参与榜单**」冲突 → 以实现者引用的 spec 为准，前端已纠正；同类纠正还有 `mp` 是本轮横截面秩（冒烟与全量不可比）。
+4. 控制者曾记"cron 里有链 SQL、仓库无副本"——**假的**：job 5-9 全是裸 `net.http_post`，无任何链；"周一宇宙重建+归一校验"按 C1 是本地人工流程，无调度。
+5. 控制者曾判"skip 响应缺 kline_added/kline_failed"——**假的**，306 字节原文两次独立复核均在，是取证读漏。
+
+### V1.1 待办（按性价比排序，均非上线阻塞）
+1. **周一宇宙重建 + 归一校验的自动化**（spec §6-③ 的调度半边从未落地；当前只有 nightly 响应里的 `offmapCodes` 文本，无人消费）。最小切口：`scripts/` 里加一条可定时的人工确认式流程，或在守卫后追加"map 外 ETF 数 > 阈值 ⇒ 显式告警"。
+2. **`label_stats` 月度滚动重算**（§6-⑥）：需要全历史重跑能力；现在前端脚注用的是 2026-09-30 回测静态数字。
+3. **第二个消费方接 `bars_n`**：`<21 m20 不可算 / <61 m60 不可算且 dev60 为短窗口口径 / <250 pos52与标签留空`——日报或回测若按 `m60=0` 排序/统计，不滤 bars_n 就会把兜底当平盘。
+4. 守卫判据的两个已知边界（终审 M-2/M-3）：新入宇宙 ETF 在假日深灌历史 bar 会使 `added>0` 而 mint 假日批；带 `inds/limit` 的人工触发可绕开守卫写部分批次（生产 cron 不带过滤，故只影响手工）。收紧方案已给：判据改为"任一新增 bar 的 `trade_date === today`" + `reps.length < 全宇宙 ⇒ 拒绝 mint`。
+5. 前端 parked Minor：`sectorIsStaleReq` 是被测但非运行时所用谓词（生产走 `isCurrent`，二者等价）→ 一行改委托；`escapeHtml` 测试 shim 双份；呈现层 DOM 胶水无测；768px 桌面段未实渲。
+6. 运维：job 5-8 的 pg_net 仍是默认 5s 超时（同一隐患，本轮只修了 job9 → 300s）；deploy.ts 与模块的 lockstep 靠自觉，建议部署前置 `build.ts` + `git diff --exit-code`。
+7. `warnings jsonb` 落库（§3.2 要求，现只进 HTTP 响应）。
