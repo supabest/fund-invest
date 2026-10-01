@@ -88,6 +88,12 @@ export interface SectorReqGuard {
   isCurrent(id: number): boolean;
 }
 
+/** 收尾新增：整卡折叠状态（实现体在 SECTOR_PURE 块，按钮文案与卡片体可见性的唯一真相源） */
+export interface SectorFoldState {
+  label: string;
+  bodyShown: boolean;
+}
+
 /** 注入的单行 count 取数（页面传 sector_kline head count，测试传假实现） */
 // deno-lint-ignore no-explicit-any
 export type AccCountFetcher = (pk: any) => any;
@@ -107,7 +113,7 @@ const EXPORT_NAMES = [
   "sectorSummaryCounts", "sectorDisplayMetrics", "sectorWorstRow", "sectorThemeGroups",
   "sectorThemeSummaries", "sectorNum", "fmtRatioPct", "fmtPoints", "fmtScoreVal",
   "fmtVr", "sectorLabelDots", "matchApproxPools",
-  "sectorBuildAccCounts", "sectorIsStaleReq", "sectorCreateReqGuard",
+  "sectorBuildAccCounts", "sectorIsStaleReq", "sectorCreateReqGuard", "sectorFoldState",
 ];
 
 async function load(): Promise<Record<string, unknown>> {
@@ -223,4 +229,9 @@ export function sectorIsStaleReq(reqSeq: number, latestSeq: number): boolean {
 }
 export function sectorCreateReqGuard(): SectorReqGuard {
   return fn("sectorCreateReqGuard")() as SectorReqGuard;
+}
+// 收尾新增：整卡折叠。页面里按钮文案与 sectorCardHtml 的早退分支都走这个函数，
+// 不存在第二份「折叠时显示什么」的副本；实现体唯一住在 index.html SECTOR_PURE 块。
+export function sectorFoldState(collapsed: unknown): SectorFoldState {
+  return fn("sectorFoldState")(collapsed) as SectorFoldState;
 }

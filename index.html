@@ -214,6 +214,9 @@
   .sector-etf-row:last-child{border-bottom:none;}
   .sector-etf-row .nm{color:var(--ivory);}
   .sector-etf-rep{color:var(--gold); font-size:10.5px;}
+  .sector-fold{background:transparent; border:1px solid var(--line-strong); color:var(--muted); font-size:11.5px; padding:2px 10px; border-radius:14px; cursor:pointer; font-family:var(--sans); white-space:nowrap;}
+  .sector-fold:hover{color:var(--ivory);}
+  .sector-title-right{display:flex; align-items:center; gap:8px;}
   .sector-more{display:block; width:calc(100% - 32px); margin:8px 16px 12px; padding:8px; border:1px dashed var(--line-strong); background:transparent; color:var(--muted); font-size:11.5px; border-radius:7px; cursor:pointer; font-family:var(--sans);}
   .sector-theme{display:flex; flex-wrap:wrap; gap:8px; padding:6px 16px 14px;}
   .sector-theme-item{flex:1 1 calc(50% - 8px); min-width:0; border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:11.5px; display:flex; gap:6px; align-items:center; flex-wrap:wrap;}
@@ -283,6 +286,7 @@
     .sector-line1{font-size:15px;}
     .sector-state{font-size:12px;}
     .sector-theme-item, .sector-etf-row, .sector-more{font-size:13px;}
+    .sector-fold{font-size:12.5px;}
     .sector-foot{font-size:12.5px;}
   }
 </style>
@@ -340,7 +344,7 @@
 </div>
 
 <div class="section">
-  <div class="section-title">板块轮动 <span class="hint">行业代表ETF均线五态 · 与个股评分口径分立，不合成</span></div>
+  <div class="section-title"><span>板块轮动</span><span class="sector-title-right"><span class="hint">行业代表ETF均线五态 · 与个股评分口径分立，不合成</span><button class="sector-fold" id="sectorFoldBtn" aria-controls="sectorCardRoot" style="display:none;"></button></span></div>
   <div id="sectorCardRoot"></div>
 </div>
 
@@ -907,11 +911,29 @@ function sectorCreateReqGuard(){
     isCurrent(id){ return id === seq; }
   };
 }
+// 收尾新增：整卡折叠的唯一真相源 —— 按钮文案与卡片体是否渲染两个消费方都取此处，
+// 避免「按钮说展开、卡片已折」这类双份状态打架。折叠粒度=整卡，概要行常显。
+// 取 `=== true` 严格判据：undefined / null / 'yes' 等非 true 值一律归为展开，保证「默认展开」不依赖调用方传对值。
+function sectorFoldState(collapsed){
+  return collapsed === true
+    ? { label: '展开 ▾', bodyShown: false }
+    : { label: '收起 ▴', bodyShown: true };
+}
 // ==== SECTOR_PURE_END ====
 
 const SECTOR_DOWN_PREVIEW = 20; // 调整榜默认预览条数（本批次 74 条，移动端不至于冗长）
 let sectorLastRows = [];       // 上一次渲染的行（展开/收起重绘使用，也供控制台合成行验证 stale 分支）
-let sectorUi = { showAllDown:false, showEntangled:false }; // 修复轮1：累积中行已并入各榜，不再单独成组
+// 折叠态跨刷新记忆：与 dinvest_tab 同一范式（读写各自 try/catch 包住）——
+// 无痕模式/存储被禁时静默降级为默认展开，不能因此白屏。localStorage 按访问地址隔离。
+const SECTOR_COLLAPSED_KEY = 'dinvest_sector_collapsed';
+function sectorReadCollapsedPref(){
+  try{ return localStorage.getItem(SECTOR_COLLAPSED_KEY) === '1'; }catch(e){ return false; }
+}
+function sectorWriteCollapsedPref(v){
+  try{ localStorage.setItem(SECTOR_COLLAPSED_KEY, v ? '1' : '0'); }catch(e){}
+}
+// collapsed 默认 false = 默认展开（无存储或读失败时 sectorReadCollapsedPref 返回 false）
+let sectorUi = { showAllDown:false, showEntangled:false, collapsed:sectorReadCollapsedPref() }; // 修复轮1：累积中行已并入各榜，不再单独成组
 const sectorReqGuard = sectorCreateReqGuard(); // 修复轮2（评审 I1）：loadSectorRotation 请求序号守卫（允许同时在飞多个请求，只有最新者可写状态/渲染）
 
 async function loadSectorRotation(){
@@ -968,6 +990,9 @@ async function loadThsPoolNames(){
 function renderSectorPlaceholder(msg){
   const root = document.getElementById('sectorCardRoot');
   if(!root) return;
+  // 无批次/读取失败时隐藏折叠按钮 —— 没什么可折，不能出现一个点开是空的「展开」
+  const fb = document.getElementById('sectorFoldBtn');
+  if(fb) fb.style.display = 'none';
   // cron 已错峰到 22:35（brief 写 22:30，与生产 reschedule 后的实际排程不一致，取生产值）
   root.innerHTML = `<div class="sector-card"><div class="sector-summary">${escapeHtml(msg || '尚无批次，等待今晚 22:35 跑批')}</div></div>`;
 }
@@ -1066,10 +1091,14 @@ function sectorCardHtml(rows){
     const d = arr.filter(r=>sectorIsDegenerate(r, accCounts)).length;
     return a ? '；含数据积累中 ' + a + (d ? '（其中 ' + d + ' 行均线不足，置底标灰）' : '') : '';
   };
-  return `<div class="sector-card">
-    <div class="sector-summary">向上 <b>${counts.up}</b> · 纠缠 <b>${counts.entangled}</b> · 调整 <b>${counts.down}</b>
+  const fold = sectorFoldState(sectorUi.collapsed);
+  const summary = `<div class="sector-summary">向上 <b>${counts.up}</b> · 纠缠 <b>${counts.entangled}</b> · 调整 <b>${counts.down}</b>
       · 数据积累中 <b>${counts.accumulating}</b> · 批次 ${escapeHtml(String(batch))}
-      ${isStale?'<span class="sector-stale">数据陈旧(昨日批次)</span>':''}</div>
+      ${isStale?'<span class="sector-stale">数据陈旧(昨日批次)</span>':''}</div>`;
+  // 折叠态只输出概要行（不是 display:none）—— 调整榜 74 行不进 DOM；主题映射与脚注一并收起
+  if(!fold.bodyShown) return `<div class="sector-card">${summary}</div>`;
+  return `<div class="sector-card">
+    ${summary}
     <div class="sector-list-title">向上趋势榜 ${lists.up.length}<span class="sector-list-sub">强多头 / 多头 · 按 60 日涨跌降序 · 历史不足 250 根者已并入本榜${accNote(lists.up)} · 点开行可见本行业全部入池ETF</span></div>
     ${lists.up.length ? sectorListHtml(lists.up, accCounts, pools) : '<div class="sector-list-title sector-muted">本批次无向上行业</div>'}
     <div class="sector-list-title">调整趋势榜 ${lists.down.length}<span class="sector-list-sub">走弱 / 空头排列 · 按 60 日涨跌升序 · 历史不足 250 根者已并入本榜${accNote(lists.down)}</span></div>
@@ -1088,6 +1117,8 @@ function renderSectorCard(rows){
   const root = document.getElementById('sectorCardRoot');
   if(!root || !rows || !rows.length) return;
   sectorLastRows = rows;
+  // 按钮住在 section-title（卡片 root 之外），重绘 innerHTML 不经过它，文案与可见性需单独同步
+  setSectorFoldBtn(sectorFoldState(sectorUi.collapsed));
   root.innerHTML = sectorCardHtml(rows);
   bindSectorCard(root);
 }
@@ -1100,6 +1131,24 @@ function sectorEtfListHtml(data, error){
     const amt = (e.amt === null || e.amt === undefined || !isFinite(Number(e.amt))) ? '—' : Number(e.amt).toFixed(1);
     return `<div class="sector-etf-row"><span>${escapeHtml(String(e.etf_code))}</span><span class="nm">${escapeHtml(String(e.etf_name||''))}</span><span class="sector-muted">规模 <em>${amt}</em> 亿</span>${e.is_rep?'<span class="sector-etf-rep">代表</span>':''}</div>`;
   }).join('');
+}
+
+// 按钮在卡片外，bindSectorCard(root) 管不到它；dataset 守一键只绑一次，避免重绘累加监听器。
+function setSectorFoldBtn(fold){
+  const btn = document.getElementById('sectorFoldBtn');
+  if(!btn) return;
+  btn.style.display = '';
+  btn.textContent = fold.label;
+  btn.setAttribute('aria-expanded', fold.bodyShown ? 'true' : 'false');
+  if(btn.dataset.bound === '1') return;
+  btn.dataset.bound = '1';
+  btn.addEventListener('click', ()=>{
+    sectorUi.collapsed = !sectorUi.collapsed;
+    sectorWriteCollapsedPref(sectorUi.collapsed);
+    setSectorFoldBtn(sectorFoldState(sectorUi.collapsed));
+    // 重绘取 sectorLastRows：showAllDown / showEntangled 不清零，折前什么样折后展开就什么样
+    renderSectorCard(sectorLastRows);
+  });
 }
 
 function bindSectorCard(root){
