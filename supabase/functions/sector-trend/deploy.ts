@@ -299,6 +299,83 @@ async function fetchRecentKline(
     : new Error(`tencent kline failed sym=${symbol}`);
 }
 
+// —— Task 3b T3b-1：日期翻页历史回填（spec §2.1/S2「640根/次按日期翻页回 2019-01」；评审 I-2）——
+// 现有 fetchRecentKline/parseKline/toSymbol 行为与签名不变；以下均为新增导出，只服务 backfill 链路。
+// 纯逻辑（prevDay/mergeDedup）与翻页编排（fetchHistoryKline，fetchPage/sleepFn 可注入）分离，便于单测。
+
+const HISTORY_START = "2019-01-01"; // spec §2.1 回测起点
+const HISTORY_LMT = 640; // 腾讯单次上限 640 根
+const HISTORY_MAX_PAGES = 6; // 已实证回测做法：最多 6 页
+const HISTORY_MIN_ROWS = 30; // 本批 <30 行视为已拉到上市头，不再翻页
+const HISTORY_PACING_MS = 300; // spec §3.2：0.3s/请求（批间）
+
+// 日历日前一天（UTC 解析避免时区漂移）；非 ISO 格式 throw（调用方传的都是 YYYY-MM-DD）
+function prevDay(date: string): string {
+  const t = Date.parse(`${date}T00:00:00Z`);
+  if (!Number.isFinite(t)) throw new Error(`prevDay 非法日期: ${date}`);
+  return new Date(t - 86_400_000).toISOString().slice(0, 10);
+}
+
+// 多页去重合并：按 pages 传入顺序遍历，同 date 后写覆盖；结果按 date 严格升序。
+// 翻页是从近期往远期拉（pages[0]=最新页…pages[n]=最旧页），同 date 边界以更早写入者为准，仅影响极少重叠日，取覆盖语义即可。
+function mergeDedup(pages: KlineResp[][]): KlineResp[] {
+  const byDate = new Map<string, KlineResp>();
+  for (const page of pages) {
+    for (const r of page) byDate.set(r.date, r); // 后写覆盖
+  }
+  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+// 单页拉取（默认复用 fetchRecentKline，含 3 次退避；测试可注入 fake）
+type FetchPage = (
+  symbol: string,
+  end: string,
+  lmt: number,
+) => Promise<KlineResp[]>;
+
+interface HistoryOpts {
+  start?: string; // 起始日（首行 <= 此日即停），默认 2019-01-01
+  end?: string; // 首页右端（含），调用方传今日
+  lmt?: number; // 单次上限，默认 640
+  maxPages?: number; // 页数上限，默认 6
+  minRows?: number; // 本批续页阈值，默认 30
+  pacingMs?: number; // 批间 pacing，默认 300
+  fetchPage?: FetchPage; // 注入网络
+  sleepFn?: (ms: number) => Promise<void>; // 注入 pacing（测试可免等待）
+}
+
+// 日期翻页拉全历史（回测实证算法）：单次 640；取回后若首行日期 > start 且本批 >= minRows，
+// 则 end = 首行前一天再拉下一批；最多 maxPages 页；批间 pacingMs pacing；日期去重合并升序。
+// 终止条件命中即停（含末页恰为 maxPages 时不再 sleep）。限流纪律：串行、无并发（C7）。
+async function fetchHistoryKline(
+  symbol: string,
+  opts: HistoryOpts = {},
+): Promise<KlineResp[]> {
+  const start = opts.start ?? HISTORY_START;
+  const lmt = opts.lmt ?? HISTORY_LMT;
+  const maxPages = opts.maxPages ?? HISTORY_MAX_PAGES;
+  const minRows = opts.minRows ?? HISTORY_MIN_ROWS;
+  const pacingMs = opts.pacingMs ?? HISTORY_PACING_MS;
+  const fetchPage = opts.fetchPage ??
+    ((s, e, l) => fetchRecentKline(s, e, l));
+  const sleepFn = opts.sleepFn ?? sleep;
+
+  const pages: KlineResp[][] = [];
+  let curEnd = opts.end ?? new Date().toISOString().slice(0, 10);
+  for (let page = 1; page <= maxPages; page++) {
+    const batch = await fetchPage(symbol, curEnd, lmt);
+    pages.push(batch);
+    const firstDate = batch.length > 0 ? batch[0].date : "";
+    // 续页判据：本批拉满量级(>=minRows) 且 首行仍晚于起始日 且 未到页数上限
+    const shouldContinue = batch.length >= minRows && firstDate !== "" &&
+      firstDate > start;
+    if (!shouldContinue || page === maxPages) break;
+    curEnd = prevDay(firstDate);
+    await sleepFn(pacingMs); // 批间 pacing，末页不等待
+  }
+  return mergeDedup(pages);
+}
+
 // gs_etf.ts —— 国信 gs-etf-filter「行业型 ETF 截面」适配器（brief Step 2；spec §2.1 15 分段矩阵 / §3.2 纪律）
 // 每晚 15 分段串行拉取（class1=1 行业型；endamt 规模段 × temperRegion 估值档），供：
 //   ① 当日 V/L/M 因子腿（temperRegion→V、endamt→L、range60d/sharpe1yrank→M）
@@ -484,6 +561,7 @@ const READ_WINDOW_DAYS = 450; // DB 尾读日历日窗口（≈290 交易日 > 2
 const KLINE_PACING_MS = 300; // spec §3.2
 const UPSERT_CHUNK = 1000; // 与 stock-score/upsert 同粒度
 const KLINE_FLUSH_EVERY = 20; // 每 20 只代表 ETF 冲刷一次 sector_kline（防 wall-clock 截断丢整轮深拉成果）
+const BACKFILL_START = "2019-01-01"; // Task 3b T3b-1：历史翻页起点（spec §2.1/S2；评审 I-2，pos52/未来 label_stats 需多年历史）
 // 注：MIN_ROWS 快照守卫单一定义在 gs_etf.fetchSegments（编排层不重复声明，避免 bundle 重名）
 
 // —— 类型 ——
@@ -885,6 +963,116 @@ async function updateKlines(
   return { barsByCode, added: nAdded, failed };
 }
 
+// —— Task 3b T3b-1 mode=backfill：逐只代表 ETF 日期翻页拉全历史并 upsert sector_kline ——
+// 限流纪律（C7）：fetchHistoryKline 内部页间 0.3s；本函数再保证 ETF 间 ≥ 0.3s（末页后无内部 sleep），
+// 全程串行无并发；连续失败不在此重试加频（交由上层观察 failed 列表判断是否疑似限流）。
+interface BackfillStats {
+  etfs: number;
+  rowsAdded: number; // 相对 pre-read 已存日期的新增行数（pre-read 受 PostgREST 1000 行上限约束，重跑时可能低估存量 ⇒ rowsAdded 偏大但不改变幂等结果）
+  rowsWritten: number; // 本次 upsert 写出的去重历史总行数（含已存，merge-duplicates 幂等）
+  pages: number; // fetchPage 调用次数（翻页总量，用于限流取证）
+  failed: { etf_code: string; ind: string; err: string }[];
+  minDate: string | null;
+  maxDate: string | null;
+}
+
+async function backfillHistory(
+  reps: MapRow[],
+  today: string,
+): Promise<BackfillStats> {
+  const out: BackfillStats = {
+    etfs: reps.length,
+    rowsAdded: 0,
+    rowsWritten: 0,
+    pages: 0,
+    failed: [],
+    minDate: null,
+    maxDate: null,
+  };
+  const buffer: {
+    etf_code: string;
+    trade_date: string;
+    close: number;
+    volume: number;
+  }[] = [];
+  for (let idx = 0; idx < reps.length; idx++) {
+    const rep = reps[idx];
+    if (!SAFE_CODE.test(rep.etf_code)) {
+      out.failed.push({
+        etf_code: rep.etf_code,
+        ind: rep.canonical_ind,
+        err: "非法 etf_code（防过滤器注入，跳过）",
+      });
+      continue;
+    }
+    const sym = toSymbol(rep.etf_code, null);
+    try {
+      // 已存日期（升序，受 1000 行上限；首跑存量 ≤640 完整）
+      const pre = await readTable<{ trade_date: string }>(
+        `sector_kline?select=trade_date&etf_code=eq.${rep.etf_code}&order=trade_date.asc`,
+      ).catch(() => []);
+      const existing = new Set(pre.map((p) => p.trade_date));
+      const countingFetch: FetchPage = async (s, e, l) => {
+        out.pages++;
+        return fetchRecentKline(s, e, l);
+      };
+      const hist = await fetchHistoryKline(sym, {
+        start: BACKFILL_START,
+        end: today,
+        fetchPage: countingFetch,
+      });
+      let added = 0;
+      for (const b of hist) {
+        buffer.push({
+          etf_code: rep.etf_code,
+          trade_date: b.date,
+          close: b.close,
+          volume: b.volume,
+        });
+        if (!existing.has(b.date)) added++;
+        if (out.minDate === null || b.date < out.minDate) out.minDate = b.date;
+        if (out.maxDate === null || b.date > out.maxDate) out.maxDate = b.date;
+      }
+      out.rowsAdded += added;
+      out.rowsWritten += hist.length;
+    } catch (e) {
+      out.failed.push({
+        etf_code: rep.etf_code,
+        ind: rep.canonical_ind,
+        err: e instanceof Error ? e.message : String(e),
+      });
+    }
+    await sleep(KLINE_PACING_MS); // ETF 间也保持 ≥0.3s（页内已由 fetchHistoryKline pacing）
+    if (
+      buffer.length > 0 && shouldFlush(idx + 1, reps.length, KLINE_FLUSH_EVERY)
+    ) {
+      await upsert(buffer, "sector_kline", "etf_code,trade_date"); // 分批冲刷，崩中间不丢已拉历史
+      buffer.length = 0;
+    }
+  }
+  if (buffer.length > 0) {
+    await upsert(buffer, "sector_kline", "etf_code,trade_date");
+  }
+  return out;
+}
+
+// 批次统计（刷新前后对照用，纯读）：distinct batch_date 数、最新批次、最新批次内 pos52 IS NULL（= accumulating 代理，D4 已严格等价）计数。
+// 注：limit=500 与 readPrevBatch 同口径；若批次数 × 行业数 > 500，batches/latestAcc 为近似（order desc 保证最新批次必完整）。
+async function readDailyStats(): Promise<
+  { batches: number; latestAcc: number; latest: string | null }
+> {
+  const rows = await readTable<{ batch_date: string; pos52: number | null }>(
+    "sector_rotation_daily?select=batch_date,pos52&order=batch_date.desc&limit=500",
+  ).catch(() => []);
+  if (rows.length === 0) return { batches: 0, latestAcc: 0, latest: null };
+  const set = new Set(rows.map((r) => r.batch_date));
+  const latest = rows[0].batch_date;
+  const latestAcc =
+    rows.filter((r) => r.batch_date === latest && r.pos52 === null)
+      .length;
+  return { batches: set.size, latestAcc, latest };
+}
+
 // 守卫仅针对单测场景（index_test.ts 先设 SECTOR_TREND_DISABLE_SERVE 再动态 import）；
 // 线上 Edge 不会注入该变量，Deno.serve 注册行为不变（同 stock-score）。
 if (!Deno.env.get("SECTOR_TREND_DISABLE_SERVE")) {
@@ -954,6 +1142,46 @@ if (!Deno.env.get("SECTOR_TREND_DISABLE_SERVE")) {
       );
 
       // ② 腾讯K线增量（0.3s pacing + 3 次退避重试；单只失败只计数，不中断）
+      //   mode=backfill：先逐只代表 ETF 日期翻页拉全历史 upsert（走与 run 相同的鉴权/宇宙/写入链路），
+      //   再自动续跑下面与 mode=run 相同的当日计算（pos52/dev60/labels 基于新历史刷新）。
+      //   阀门（防 edge wall-clock 截断，沿用 Task 3 mode=run&stage=kline 分批实证做法）：
+      //     &stage=history[&limit&offset] = 仅分页拉取（可分批），不做计算轮即早返回；
+      //     &stage=compute = 跳过分页，仅跑计算轮（分页已由前序 stage=history 完成）。
+      let bf: BackfillStats | null = null;
+      let dailyBefore: {
+        batches: number;
+        latestAcc: number;
+        latest: string | null;
+      } | null = null;
+      if (mode === "backfill") {
+        dailyBefore = await readDailyStats();
+        if (stage !== "compute") {
+          bf = await backfillHistory(reps, today);
+          if (bf.failed.length > 0) {
+            warnParts.push(
+              bf.failed.map((f) =>
+                `backfill 失败 ${f.etf_code}(${f.ind}): ${f.err}`
+              ),
+            );
+          }
+        }
+        if (stage === "history") {
+          return Response.json({
+            ok: true,
+            mode,
+            stage,
+            batch_date: today,
+            etfs: reps.length,
+            rows_added: bf?.rowsAdded ?? 0,
+            rows_written: bf?.rowsWritten ?? 0,
+            pages_total: bf?.pages ?? 0,
+            kline_min: bf?.minDate ?? null,
+            kline_max: bf?.maxDate ?? null,
+            kline_failed: bf?.failed.length ?? 0,
+            warnings: aggregateWarnings(warnParts),
+          });
+        }
+      }
       const kn = await updateKlines(reps, today);
       if (kn.failed.length > 0) {
         warnParts.push(
@@ -1080,6 +1308,36 @@ if (!Deno.env.get("SECTOR_TREND_DISABLE_SERVE")) {
 
       const lists = rankLists(computed);
       const acc = lists.accumulating;
+      // mode=backfill 专用响应：刷新前后对照（批次不增 + accumulating 刷新）+ 历史深度/行数取证
+      if (mode === "backfill") {
+        const dailyAfter = await readDailyStats();
+        return Response.json({
+          ok: outRows.length > 0,
+          mode,
+          batch_date: today,
+          etfs: bf?.etfs ?? reps.length,
+          rows_added: bf?.rowsAdded ?? 0,
+          rows_written: bf?.rowsWritten ?? 0,
+          pages_total: bf?.pages ?? 0,
+          kline_min: bf?.minDate ?? null,
+          kline_max: bf?.maxDate ?? null,
+          kline_failed: (bf?.failed.length ?? 0) + kn.failed.length,
+          batches_before: dailyBefore?.batches ?? null,
+          batches_after: dailyAfter.batches,
+          accumulating_before: dailyBefore?.latestAcc ?? null,
+          accumulating_after: acc,
+          industries: outRows.length,
+          up: lists.up.length,
+          down: lists.down.length,
+          entangled: lists.entangled,
+          stale_rows: staleRows,
+          gs_rows: snap.size,
+          gs_offmap: offmapCodes.length,
+          prev_batch_date: prevRows[0]?.batch_date ?? null,
+          error: gsError || undefined,
+          warnings: aggregateWarnings(warnParts),
+        });
+      }
       return Response.json({
         ok: outRows.length > 0,
         mode,
