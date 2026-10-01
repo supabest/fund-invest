@@ -18,6 +18,8 @@ const {
   aggregateWarnings,
   isQResurrected,
   assembleInputs,
+  klineOneQuery,
+  shouldFlush,
   BARS_FULL,
 } = await import("./index.ts");
 
@@ -353,4 +355,30 @@ Deno.test("assembleInputs: 截面 amt 缺失(NA) 的 ETF 不入池（不可加�
   );
   assertEquals(inputs[0].nEtf, 1);
   assertEquals(inputs[0].etfs.map((e) => e.code), ["512800"]);
+});
+
+// ---------- PostgREST 尾读查询串（线上首次冒烟跑出 PGRST100：in(...) 不是合法操作符形式） ----------
+Deno.test("klineOneQuery: 单 ETF 尾读（order desc + limit 钉住，绝不依赖 PostgREST 默认行上限）", () => {
+  // 线上冒烟实测：一次 in.() 取 20 只×302 行被 1000 行上限静默截断（limit=6 的探针 kline_added=1826，limit=3 为 0）
+  assertEquals(
+    klineOneQuery("512800", "2025-07-18", 300),
+    "sector_kline?select=trade_date,close,volume&etf_code=eq.512800&trade_date=gte.2025-07-18&order=trade_date.desc&limit=300",
+  );
+});
+
+Deno.test("klineOneQuery: 非 [A-Za-z0-9._-] 的 code → null（防过滤器注入）", () => {
+  assertEquals(klineOneQuery("1'or'1=1", "2025-07-18", 300), null);
+  assertEquals(klineOneQuery("a b", "2025-07-18", 300), null);
+  assertEquals(klineOneQuery("", "2025-07-18", 300), null);
+});
+
+// （旧 klineTailQuery 批量 in.() 形式已删除：单请求行上限不可靠，改走单 ETF 查询）
+
+// ---------- K线落库分批冲刷（防 Edge wall-clock 截断时丢整轮已拉取的 bar） ----------
+Deno.test("shouldFlush: 每 N 只冲刷一次 + 最后一只必冲刷（1-based 索引）", () => {
+  assertEquals(shouldFlush(20, 110, 20), true); // 整批
+  assertEquals(shouldFlush(21, 110, 20), false);
+  assertEquals(shouldFlush(110, 110, 20), true); // 收尾
+  assertEquals(shouldFlush(40, 40, 20), true); // 总数恰为批大小：既是整批也是收尾
+  assertEquals(shouldFlush(1, 1, 20), true); // 单只也要冲刷
 });

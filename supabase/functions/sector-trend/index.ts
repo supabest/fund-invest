@@ -28,9 +28,9 @@ export const BARS_FULL = 250; // spec §5 标签门槛 = C3 accumulating 分界
 const DEPTH_LMT = 640; // spec S2：腾讯单次最多 640 根（历史不足时先深拉一次）
 const TAIL_KEEP = 300; // 引擎窗口上限（pos52 需 250 根，留余量）
 const READ_WINDOW_DAYS = 450; // DB 尾读日历日窗口（≈290 交易日 > 250）
-const IN_CHUNK = 20; // PostgREST in 查询分块（ETF 数）
 const KLINE_PACING_MS = 300; // spec §3.2
 const UPSERT_CHUNK = 1000; // 与 stock-score/upsert 同粒度
+const KLINE_FLUSH_EVERY = 20; // 每 20 只代表 ETF 冲刷一次 sector_kline（防 wall-clock 截断丢整轮深拉成果）
 // 注：MIN_ROWS 快照守卫单一定义在 gs_etf.fetchSegments（编排层不重复声明，避免 bundle 重名）
 
 // —— 类型 ——
@@ -306,39 +306,44 @@ async function readTable<T>(path: string): Promise<T[]> {
   return (await r.json()) as T[];
 }
 
-const inList = (codes: string[]) =>
-  codes.map((c) => `'${c.replace(/'/g, "''")}'`).join(",");
+const SAFE_CODE = /^[A-Za-z0-9._-]+$/;
 
-// C3 尾读：一次 in 查询拿一批 ETF 的近 ~290 根（窗口内必然覆盖 250 门槛判定）
+// PostgREST 尾读查询串（纯函数，单测钉住）：
+//  - 单 ETF 等值过滤 + order desc + limit：单次响应行数一定 < 平台上限（实测批量 in.() 取 20×302 行被 1000 行上限静默截断）
+//  - code 含引号/空格等一律拒绝（返回 null），避免过滤器注入
+export function klineOneQuery(
+  code: string,
+  cutoff: string,
+  limit: number,
+): string | null {
+  if (!SAFE_CODE.test(code)) return null;
+  return `sector_kline?select=trade_date,close,volume&etf_code=eq.${code}&trade_date=gte.${cutoff}&order=trade_date.desc&limit=${limit}`;
+}
+
+// 分批冲刷判定（纯函数）：i 为 1-based 已处理只数
+export function shouldFlush(i: number, total: number, every: number): boolean {
+  return every > 0 && (i % every === 0 || i >= total);
+}
+
+// C3 尾读：逐只 ETF 取窗口内最近 TAIL_KEEP 根（单请求行数 ≤ TAIL_KEEP，消除批量截断风险）
 async function readBarsTail(codes: string[]): Promise<Map<string, Bar[]>> {
   const out = new Map<string, Bar[]>();
   for (const c of codes) out.set(c, []);
   const cutoff = new Date(Date.now() - READ_WINDOW_DAYS * 86_400_000)
     .toISOString().slice(0, 10);
-  for (let i = 0; i < codes.length; i += IN_CHUNK) {
-    const chunk = codes.slice(i, i + IN_CHUNK);
+  for (const code of codes) {
+    const path = klineOneQuery(code, cutoff, TAIL_KEEP);
+    if (!path) continue;
     const rows = await readTable<
-      {
-        etf_code: string;
-        trade_date: string;
-        close: number;
-        volume: number | null;
-      }
-    >(
-      `sector_kline?select=etf_code,trade_date,close,volume&etf_code=in(${
-        inList(chunk)
-      })&trade_date=gte.${cutoff}&order=etf_code.asc,trade_date.asc`,
-    );
-    for (const r of rows) {
-      const arr = out.get(r.etf_code);
-      if (!arr) continue;
-      arr.push({
-        date: r.trade_date,
-        close: Number(r.close),
-        volume: Number(r.volume ?? 0),
-      });
-      if (arr.length > TAIL_KEEP) arr.shift();
-    }
+      { trade_date: string; close: number; volume: number | null }
+    >(path);
+    const arr: Bar[] = rows.map((r) => ({
+      date: r.trade_date,
+      close: Number(r.close),
+      volume: Number(r.volume ?? 0),
+    }));
+    arr.reverse(); // desc 取回 → 转时间升序（引擎把末根作今日收盘）
+    out.set(code, arr);
   }
   return out;
 }
@@ -378,7 +383,9 @@ async function updateKlines(
     volume: number;
   }[] = [];
   const failed: KlineResult["failed"] = [];
-  for (const rep of reps) {
+  let nAdded = 0;
+  for (let idx = 0; idx < reps.length; idx++) {
+    const rep = reps[idx];
     const sym = toSymbol(rep.etf_code, null);
     const stored = barsByCode.get(rep.etf_code) ?? [];
     const lmt = stored.length < BARS_FULL ? DEPTH_LMT : 5;
@@ -400,6 +407,7 @@ async function updateKlines(
       }
       while (stored.length > TAIL_KEEP) stored.shift();
       barsByCode.set(rep.etf_code, stored);
+      nAdded += fresh;
       if (fresh > 0 && lmt === 5) {
         console.log(`kline ${rep.etf_code} +${fresh}`);
       }
@@ -411,11 +419,17 @@ async function updateKlines(
       });
     }
     await sleep(KLINE_PACING_MS); // spec §3.2：0.3 秒/请求
+    if (
+      added.length > 0 && shouldFlush(idx + 1, reps.length, KLINE_FLUSH_EVERY)
+    ) {
+      await upsert(added, "sector_kline", "etf_code,trade_date"); // 分批冲刷，崩在中间也不丢已拉到的 bar
+      added.length = 0;
+    }
   }
   if (added.length > 0) {
     await upsert(added, "sector_kline", "etf_code,trade_date");
   }
-  return { barsByCode, added: added.length, failed };
+  return { barsByCode, added: nAdded, failed };
 }
 
 // 守卫仅针对单测场景（index_test.ts 先设 SECTOR_TREND_DISABLE_SERVE 再动态 import）；
