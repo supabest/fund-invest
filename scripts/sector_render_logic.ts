@@ -82,6 +82,16 @@ export interface ThemeSummary {
   labels: string[];
 }
 
+/** 修复轮2（评审 I1）：请求序号竞态守卫（实现体在 SECTOR_PURE 块，此处仅类型） */
+export interface SectorReqGuard {
+  begin(): number;
+  isCurrent(id: number): boolean;
+}
+
+/** 注入的单行 count 取数（页面传 sector_kline head count，测试传假实现） */
+// deno-lint-ignore no-explicit-any
+export type AccCountFetcher = (pk: any) => any;
+
 const MARKER =
   /\/\/ ==== SECTOR_PURE_BEGIN ====([\s\S]*?)\/\/ ==== SECTOR_PURE_END ====/;
 // 块内 sectorLabelDots 调用页面既有的 escapeHtml（index.html），抽取执行时注入同实现 shim，
@@ -97,6 +107,7 @@ const EXPORT_NAMES = [
   "sectorSummaryCounts", "sectorDisplayMetrics", "sectorWorstRow", "sectorThemeGroups",
   "sectorThemeSummaries", "sectorNum", "fmtRatioPct", "fmtPoints", "fmtScoreVal",
   "fmtVr", "sectorLabelDots", "matchApproxPools",
+  "sectorBuildAccCounts", "sectorIsStaleReq", "sectorCreateReqGuard",
 ];
 
 async function load(): Promise<Record<string, unknown>> {
@@ -198,4 +209,18 @@ export function sectorLabelDots(labels: unknown): string {
 }
 export function matchApproxPools(ind: string | null | undefined, pools: string[] | null | undefined): string[] {
   return fn("matchApproxPools")(ind, pools);
+}
+// 修复轮2（评审 I1）：累积中行 head count 并发化（含内部 sectorIsAccumulating 过滤）。
+// 实现体唯一住在 index.html SECTOR_PURE 块，本模块只抽出不复制。
+export function sectorBuildAccCounts(
+  rows: SectorRow[] | null | undefined,
+  fetchCount: AccCountFetcher,
+): Promise<Map<string, number | null>> {
+  return fn("sectorBuildAccCounts")(rows ?? [], fetchCount);
+}
+export function sectorIsStaleReq(reqSeq: number, latestSeq: number): boolean {
+  return fn("sectorIsStaleReq")(reqSeq, latestSeq);
+}
+export function sectorCreateReqGuard(): SectorReqGuard {
+  return fn("sectorCreateReqGuard")() as SectorReqGuard;
 }

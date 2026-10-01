@@ -881,39 +881,70 @@ function matchApproxPools(ind, pools){
   });
   return hit.sort();
 }
+// 修复轮2（评审 I1）：累积中行的 sector_kline head count 由串行 for…of+await 改为 Promise.all 并发扇出，
+// 慢链路下≈N 个顺序 RT 压成≈1 个。**每行独立 try/catch**（控制要求2）：单行失败只置该行 n=null（沿用已裁决的
+// 「head-count 失败保守按退化」语义，见 sectorIsDegenerate），绝不让整批 Promise.all 拒绝。IO 由调用方注入 fetchCount，
+// 本函数无全局依赖 ⇒ 属纯逻辑、由 scripts/sector_render_logic.ts 门面抽取单测（唯一实现体，无副本）。
+function sectorBuildAccCounts(rows, fetchCount){
+  const acc = (Array.isArray(rows) ? rows : []).filter(sectorIsAccumulating);
+  return Promise.all(acc.map(async (r)=>{
+    let n = null;
+    try{ n = await fetchCount(r.pk_etf); }catch(e){ n = null; }
+    return [String(r.pk_etf), (typeof n === 'number' && isFinite(n)) ? n : null];
+  })).then(pairs=>new Map(pairs));
+}
+// 修复轮2（评审 I1）竞态守卫的谓词：卡片移出 autoRefresh 关键路径（fire-and-forget）后，focus 重入/切页签可让
+// 多个 loadSectorRotation 同时在飞；请求开始时 begin() 取自增序号，写 sectorState/渲染前先 isStaleReq(本次, 最新) ——
+// 只要本请求序号不是最新（迟到的旧响应）就判弃，后到者不得覆盖新批次渲染。序号错乱也按陈旧处理（宁严勿宽）。
+function sectorIsStaleReq(reqSeq, latestSeq){
+  return reqSeq !== latestSeq;
+}
+// 修复轮2（评审 I1）：自增请求序号发生器（闭包持有 seq）。begin() 抢占并返回本次序号；isCurrent(id) 判定 id 是否仍为最新。
+function sectorCreateReqGuard(){
+  let seq = 0;
+  return {
+    begin(){ seq += 1; return seq; },
+    isCurrent(id){ return id === seq; }
+  };
+}
 // ==== SECTOR_PURE_END ====
 
 const SECTOR_DOWN_PREVIEW = 20; // 调整榜默认预览条数（本批次 74 条，移动端不至于冗长）
 let sectorLastRows = [];       // 上一次渲染的行（展开/收起重绘使用，也供控制台合成行验证 stale 分支）
 let sectorUi = { showAllDown:false, showEntangled:false }; // 修复轮1：累积中行已并入各榜，不再单独成组
+const sectorReqGuard = sectorCreateReqGuard(); // 修复轮2（评审 I1）：loadSectorRotation 请求序号守卫（允许同时在飞多个请求，只有最新者可写状态/渲染）
 
 async function loadSectorRotation(){
   if(!cloudReady || !sb) return;
+  const reqId = sectorReqGuard.begin(); // 修复轮2（评审 I1）：抢占本次请求序号；每个写入点前检查 isCurrent，迟到的旧响应（focus 重入/切页签触发的新批次在后）不得覆盖新渲染
+  const stale = ()=>sectorReqGuard.isCurrent(reqId) === false;
   try{
     // 与 loadStockScores 同一范式：先定位最新 batch_date，再整批取回（brief Step1 的 limit(160)+过滤等效）
     const { data: b, error: be } = await sb.from('sector_rotation_daily').select('batch_date')
       .order('batch_date',{ascending:false}).limit(1).maybeSingle();
+    if(stale()) return;
     if(be){ renderSectorPlaceholder('板块轮动批次读取失败（网络或云端异常），下次刷新自动重试'); return; }
     if(!b){ renderSectorPlaceholder(); return; } // 表为空 = 真无批次
     const batch = b.batch_date;
     const { data, error } = await sb.from('sector_rotation_daily').select('*')
       .eq('batch_date', batch).order('m60',{ascending:false}).limit(400);
+    if(stale()) return;
     if(error){ renderSectorPlaceholder('板块轮动批次读取失败（网络或云端异常），下次刷新自动重试'); return; }
     if(!data || !data.length){ renderSectorPlaceholder(); return; }
     const rows = data.filter(r=>r && r.batch_date === batch);
     if(!rows.length){ renderSectorPlaceholder(); return; }
-    // R-T4-1：「数据积累中(n=X)」的 n 走 PostgREST head count，只对累积中的 ≤6 行发请求，不全量拉 K 线
-    const accCounts = new Map();
-    for(const r of rows.filter(sectorIsAccumulating)){
-      try{
-        const { count } = await sb.from('sector_kline').select('*', {count:'exact', head:true}).eq('etf_code', r.pk_etf);
-        accCounts.set(String(r.pk_etf), count);
-      }catch(e){ accCounts.set(String(r.pk_etf), null); }
-    }
+    // R-T4-1 + 修复轮2（评审 I1 ①）：「数据积累中(n=X)」的 n 仍只对累积中行（≤6 行）发 sector_kline head count，
+    // 不全量拉 K 线；串行 for…of+await 改为 Promise.all 并发，每行独立 try/catch → 单行失败仅该行 n=null（保守按退化）
+    const accCounts = await sectorBuildAccCounts(rows, async (pk)=>{
+      const { count } = await sb.from('sector_kline').select('*', {count:'exact', head:true}).eq('etf_code', pk);
+      return count;
+    });
     const poolPools = await loadThsPoolNames();
+    if(stale()) return; // 所有 await 完成后、写入前最后一道守卫：旧请求丢弃，不覆盖新批次
     sectorState = { batch, rows, accCounts, poolPools };
     renderSectorCard(rows);
   }catch(e){
+    if(stale()) return; // 迟到的旧失败不得用降级占位覆盖新渲染
     console.warn('sector rotation load failed', e); // 仅降级，不阻塞页面其他功能
     renderSectorPlaceholder('板块轮动批次读取失败（网络或云端异常），下次刷新自动重试');
   }
@@ -2356,7 +2387,7 @@ async function autoRefreshAll(force){
   let fN = 0, sN = 0;
   try{ fN = await autoRefreshFunds(); }catch(e){}
   try{ sN = await autoRefreshStocks(); }catch(e){}
-  try{ await loadSectorRotation(); }catch(e){} // 板块轮动卡片：挂在页面打开的批量刷新序列末尾（不新起定时器），失败仅降级
+  loadSectorRotation().catch(()=>{}); // 修复轮2（评审 I1 ②）：仍在刷新序列末尾触发（不新起定时器），但改为 fire-and-forget —— 卡片结果非 saveFunds/Toast 所需，不再把 autoRefreshRunning 锁在≤ 10 个串行 RT 上；同时在飞请求由 sectorReqGuard 序号守卫防竞态
   autoRefreshRunning = false;
   if(fN + sN > 0){
     await saveFunds();

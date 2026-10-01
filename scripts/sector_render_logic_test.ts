@@ -331,6 +331,55 @@ Deno.test("matchApproxPools: 互为子串命中；单字池名不参与；去重
   assertEquals(P.matchApproxPools("有色", null), []);
 });
 
+// ---------- 修复轮2（评审 I1）：head count 并发化 + 请求序号竞态守卫 ----------
+Deno.test("sectorBuildAccCounts: 单行 fetch 失败只置该行 n=null，整批不拒绝，其余行保留真实值", async () => {
+  const rows = [row({ ind: "农牧渔", pk_etf: "560210", pos52: null }), row({ ind: "船舶", pk_etf: "560710", pos52: null }), row({ ind: "创业板软件", pk_etf: "159107", pos52: null })];
+  const m = await P.sectorBuildAccCounts(rows, async (pk: Cell) => {
+    if (String(pk) === "560710") throw new Error("network reset"); // 模拟单行 HEAD 失败
+    return String(pk) === "560210" ? 133 : 248;
+  });
+  assertEquals(m.get("560210"), 133);
+  assertEquals(m.get("560710"), null, "失败行必须隔离为 n=null（保守按退化）");
+  assertEquals(m.get("159107"), 248);
+  assertEquals(m.size, 3);
+});
+
+Deno.test("sectorBuildAccCounts: 并发发起——所有请求在同一 await 边界前已启动（串行 for…of+await 做不到）", async () => {
+  const rows = [row({ pk_etf: "A", pos52: null }), row({ pk_etf: "B", pos52: null }), row({ pk_etf: "C", pos52: null })];
+  const started: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((r) => { release = r; });
+  const p = P.sectorBuildAccCounts(rows, async (pk: Cell) => {
+    started.push(String(pk));
+    await gate; // 全部卡在同一闸门：若实现是串行的，这里只会启动 1 行
+    return 1;
+  });
+  assertEquals(started.length, 3, "扇出必须是 Promise.all 并发（串行实现此刻 started.length===1）");
+  release();
+  const m = await p;
+  assertEquals(m.size, 3);
+});
+
+Deno.test("sectorBuildAccCounts: 只对累积中行发请求；空输入 → 空 Map；fetch 返回 null 原样保留（PostgREST 报错时 count 即 null）", async () => {
+  let calls = 0;
+  const m0 = await P.sectorBuildAccCounts([], () => { calls++; return Promise.resolve(1); });
+  assertEquals(m0.size, 0);
+  assertEquals(calls, 0);
+  const mixed = [row({ ind: "普通", pk_etf: "N1", pos52: 50 }), row({ ind: "累积", pk_etf: "X", pos52: null })];
+  const m2 = await P.sectorBuildAccCounts(mixed, (pk: Cell) => { calls++; return Promise.resolve(String(pk) === "X" ? 248 : null); });
+  assertEquals(calls, 1, "pos52 非空的普通行不得发 count 请求");
+  assertEquals(m2.has("N1"), false);
+  assertEquals(m2.get("X"), 248);
+  const m1 = await P.sectorBuildAccCounts([row({ pk_etf: "Y", pos52: null })], () => Promise.resolve(null));
+  assertEquals(m1.get("Y"), null);
+});
+
+Deno.test("sectorIsStaleReq: 只有最新请求可写状态/渲染；迟到的旧响应（fire-and-forget 重入）一律判弃", () => {
+  assertEquals(P.sectorIsStaleReq(1, 1), false, "本请求即最新 → 不得被误杀");
+  assertEquals(P.sectorIsStaleReq(1, 2), true, "后发起的请求已抢占序号 → 旧响应必须丢弃");
+  assertEquals(P.sectorIsStaleReq(3, 2), true, "序号错乱（理论上不应出现）也按陈旧处理，守卫宁严勿宽");
+});
+
 // ---------- 常量表（渲染层与脚注共用） ----------
 Deno.test("主题条常量：四个可覆盖主题按 brief 顺序；美国/日本不覆盖；均衡配置不呈现", () => {
   assertEquals(P.SECTOR_THEME_ORDER, ["电力/绿电", "机器人", "新能源车", "全球资源"]);
