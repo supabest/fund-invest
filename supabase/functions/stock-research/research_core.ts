@@ -119,3 +119,19 @@ export function sanitizeError(raw: string, apiKey: string): string {
   if (s.length > 500) s = s.slice(0, 499) + '…';
   return s;
 }
+
+// 服务商失败原因分类（用户 2026-10-02 要求：失败须显示原因，余额不足 vs 其他）。
+// 只看 HTTP status + 已脱敏响应体关键词，绝不据原始 key 做任何判断。
+export function classifyProviderError(status: number, bodyText: string): string {
+  const b = String(bodyText || '');
+  if (/余额|欠费|额度不足|耗尽|上限|insufficient.*(balance|quota|credit|fund)|arrear|overdue|quota.{0,12}(exceeded|used|limit)|free allocated|1113|1120/i.test(b))
+    return '余额不足或欠费（请检查服务商账户额度）';
+  if (status === 401 || status === 403 || /api[_ ]?key|invalid_key|unauth|forbidden|认证|鉴权|无权/i.test(b))
+    return 'API Key 无效或无权限（请核对 Key 是否正确、是否已开通该模型）';
+  if (status === 429 || /rate.?limit|too many|限流|频繁|1302/i.test(b))
+    return '请求过于频繁（限流，请稍后重试）';
+  if (status === 400 || status === 404 || /invalid|参数|param|model.{0,12}(not found|does not exist|不支持)/i.test(b))
+    return '请求参数或模型名非法';
+  if (status >= 500) return '服务商服务端异常（稍后重试）';
+  return `服务商返回 HTTP ${status}`;
+}

@@ -101,7 +101,8 @@ Deno.test("I-2/密钥红线：provider 401（回显 key）→ 502 failed，error
       assertEquals(r.status, 502);
       const j = await r.json();
       assertEquals(j.ok, false);
-      assertEquals(String(j.error).includes('数据获取失败'), true); // 失败纪律：统一前缀
+      assertEquals(String(j.error).includes('API Key'), true); // 401 → 可读原因（失败须显示原因）
+      assertEquals(String(j.error).includes('401'), true);      // 状态码回显
       assertEquals(String(j.error).includes(KEY), false);          // 响应不回显 key
       const failedWrite = calls.find(c => c.url.includes('on_conflict') && c.body.includes('"failed"'));
       assertEquals(failedWrite ? failedWrite.body.includes(KEY) : true, false); // 落库 error 列不含 key

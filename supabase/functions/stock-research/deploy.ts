@@ -121,10 +121,26 @@ function sanitizeError(raw: string, apiKey: string): string {
   return s;
 }
 
+// 服务商失败原因分类（用户 2026-10-02 要求：失败须显示原因，余额不足 vs 其他）。
+// 只看 HTTP status + 已脱敏响应体关键词，绝不据原始 key 做任何判断。
+function classifyProviderError(status: number, bodyText: string): string {
+  const b = String(bodyText || '');
+  if (/余额|欠费|额度不足|耗尽|上限|insufficient.*(balance|quota|credit|fund)|arrear|overdue|quota.{0,12}(exceeded|used|limit)|free allocated|1113|1120/i.test(b))
+    return '余额不足或欠费（请检查服务商账户额度）';
+  if (status === 401 || status === 403 || /api[_ ]?key|invalid_key|unauth|forbidden|认证|鉴权|无权/i.test(b))
+    return 'API Key 无效或无权限（请核对 Key 是否正确、是否已开通该模型）';
+  if (status === 429 || /rate.?limit|too many|限流|频繁|1302/i.test(b))
+    return '请求过于频繁（限流，请稍后重试）';
+  if (status === 400 || status === 404 || /invalid|参数|param|model.{0,12}(not found|does not exist|不支持)/i.test(b))
+    return '请求参数或模型名非法';
+  if (status >= 500) return '服务商服务端异常（稍后重试）';
+  return `服务商返回 HTTP ${status}`;
+}
+
 
 // providers —— 两家服务商适配器（spec §3）：端点/鉴权/联网参数/响应解析差异全部在此消化，
-// 对外只暴露 callResearch。失败纪律：统一「数据获取失败」前缀 + 服务商名 + 状态码，
-// 绝不换服务商、绝不换渠道、绝不静默降级为无搜索；错误信息经 sanitizeError 抹 key。
+// 对外只暴露 callResearch。失败纪律（用户 2026-10-02 修订：失败须显示原因）：报「服务商名+可读原因」，
+// 绝不换服务商、绝不换渠道、绝不静默降级为无搜索；错误信息经 sanitizeError 抹 key 后才返回。
 
 type ProviderSlug = 'zhipu' | 'bailian';
 
@@ -154,21 +170,21 @@ async function callResearch(
       body: JSON.stringify(buildBody(p, model, prompt)),
     });
   } catch (e) {
-    throw new Error(sanitizeError(`数据获取失败（${spec.label}：网络不可达 ${String(e)}）`, apiKey));
+    throw new Error(sanitizeError(`${spec.label}：网络不可达（无法连接服务商）`, apiKey));
   }
   const text = await resp.text().catch(() => "");
   if (!resp.ok) {
-    // 先对切片原文脱敏再截断：text.slice(0,200) 先截会让跨界 key 变成残片，
-    // 逃出外层 sanitizeError 的全串 split(apiKey) 替换；外层 sanitizeError 保留作双保险。
-    throw new Error(sanitizeError(`数据获取失败（${spec.label}：HTTP ${resp.status} ${sanitizeError(text, apiKey).slice(0, 200)}）`, apiKey));
+    // 原因分类先对响应体脱敏（抹 key）再判定；外层再套一道 sanitizeError 作双保险。
+    const reason = classifyProviderError(resp.status, sanitizeError(text, apiKey));
+    throw new Error(sanitizeError(`${spec.label}：${reason}（HTTP ${resp.status}）`, apiKey));
   }
   let j: { choices?: { message?: { content?: string } }[] };
   try { j = JSON.parse(text); } catch {
-    throw new Error(sanitizeError(`数据获取失败（${spec.label}：响应非 JSON）`, apiKey));
+    throw new Error(sanitizeError(`${spec.label}：响应格式异常（非 JSON）`, apiKey));
   }
   const content = j.choices?.[0]?.message?.content;
   if (typeof content !== 'string' || !content.trim()) {
-    throw new Error(sanitizeError(`数据获取失败（${spec.label}：响应缺少 choices[0].message.content）`, apiKey));
+    throw new Error(sanitizeError(`${spec.label}：响应缺少内容（模型未正常返回）`, apiKey));
   }
   return content;
 }

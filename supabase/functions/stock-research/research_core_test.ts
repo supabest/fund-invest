@@ -1,5 +1,5 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/testing/asserts.ts";
-import { CODE_RE, VERDICTS, buildPrompt, dedupeAction, parseReport, sanitizeError } from "./research_core.ts";
+import { CODE_RE, VERDICTS, buildPrompt, classifyProviderError, dedupeAction, parseReport, sanitizeError } from "./research_core.ts";
 
 // ---- 提示词组装（spec §7：五类信号/六段/禁止词表/来源纪律/财务锚点缺失注明） ----
 Deno.test("buildPrompt: 五类信号与六段结构在提示词中逐条在位", () => {
@@ -123,4 +123,24 @@ Deno.test("CODE_RE: A股6位/港股5位", () => {
 });
 Deno.test("VERDICTS 恰四枚举", () => {
   assertEquals([...VERDICTS].sort().join(","), ["升温", "恶化", "平稳", "降温"].sort().join(","));
+});
+
+// ---- 服务商失败原因分类（用户要求：区分余额不足 vs 其他）----
+Deno.test("classifyProviderError：智谱 1113 余额不足 → 归为余额类（即便 HTTP 429）", () => {
+  assertEquals(classifyProviderError(429, `{"error":{"code":"1113","message":"余额不足"}}`).includes('余额不足'), true);
+});
+Deno.test("classifyProviderError：阿里 Arrearage 欠费 → 余额类", () => {
+  assertEquals(classifyProviderError(400, `{"code":"Arrearage","message":"Access denied due to overdue payment"}`).includes('余额不足或欠费'), true);
+});
+Deno.test("classifyProviderError：invalid_api_key/401 → 鉴权失败类", () => {
+  assertEquals(classifyProviderError(401, `{"error":{"message":"Invalid API key"}}`).includes('API Key 无效'), true);
+});
+Deno.test("classifyProviderError：429 无限流关键词 → 限流类", () => {
+  assertEquals(classifyProviderError(429, "too many requests").includes('频繁'), true);
+});
+Deno.test("classifyProviderError：500/502 → 服务端异常", () => {
+  assertEquals(classifyProviderError(502, "Bad Gateway").includes('服务端异常'), true);
+});
+Deno.test("classifyProviderError：未知 4xx 无关键词 → 兑底携状态码", () => {
+  assertEquals(classifyProviderError(418, "").includes('418'), true);
 });

@@ -43,14 +43,15 @@ Deno.test("bailian: enable_search + search_strategy=max", async () => {
   assertEquals(body.search_options.search_strategy, "max");
 });
 
-Deno.test("HTTP 非 2xx → reject，且错误信息不含 key（脱敏纪律），带状态码", async () => {
+Deno.test("HTTP 非 2xx → reject，错误信息不含 key（脉敏纪律）、带状态码与可读原因", async () => {
   const f = fakeFetch(401, { error: { message: `bad key ${KEY}` } }, {} as never);
   // as Error：catch 回调把 Promise<string> 并成 string|Error，显式收窄才能访问 message
   const err = (await callResearch('zhipu', 'm', KEY, "P", f).catch((e: Error) => e)) as Error;
   assertEquals(err instanceof Error, true);
   assertEquals(err.message.includes(KEY), false);
-  assertEquals(err.message.includes('数据获取失败'), true);
   assertEquals(err.message.includes('401'), true); // 状态码回显
+  assertEquals(err.message.includes('API Key'), true); // 401 → 鉴权失败原因
+  assertEquals(err.message.includes('智谱'), true); // 服务商名
 });
 
 // 钉死边界：key 落在 180-199 区间时，若先 slice 后 sanitize，残片可逃出全串替换。
@@ -66,27 +67,26 @@ Deno.test("HTTP 非 2xx + key 跨 slice 边界 → 先脱敏后截断，无 ≥6
   }
 });
 
-Deno.test("真·非 JSON 响应（status 200）→ reject 「响应非 JSON」", async () => {
+Deno.test("真·非 JSON 响应（status 200）→ reject 「响应格式异常」", async () => {
   const f = fakeFetch(200, "{not json", {} as never);
   const err = (await callResearch('bailian', 'm', KEY, "P", f).catch((e: Error) => e)) as Error;
-  assertEquals(err.message.includes('响应非 JSON'), true);
-  assertEquals(err.message.includes('数据获取失败'), true);
+  assertEquals(err.message.includes('响应格式异常'), true);
 });
 
 Deno.test("200 + content 为空白字符串 → reject（不交空白报告）", async () => {
   const f = fakeFetch(200, { choices: [{ message: { content: "  " } }] }, {} as never);
-  await assertRejects(() => callResearch('zhipu', 'm', KEY, "P", f), Error, '数据获取失败');
+  await assertRejects(() => callResearch('zhipu', 'm', KEY, "P", f), Error, '响应缺少内容');
 });
 
 Deno.test("响应缺 choices/content → reject 带服务商名", async () => {
   const f = fakeFetch(200, { foo: 1 }, {} as never);
-  await assertRejects(() => callResearch('bailian', 'm', KEY, "P", f), Error, '数据获取失败');
+  await assertRejects(() => callResearch('bailian', 'm', KEY, "P", f), Error, '响应缺少内容');
 });
 
-Deno.test("网络异常（fetch throw）→ 统一「数据获取失败」，不回显 URL 细节", async () => {
+Deno.test("网络异常（fetch throw）→ 「网络不可达」，不回显 URL 细节", async () => {
   // deno-lint-ignore require-await -- 模拟网络层 throw，函数体无 await 但须为 async 形态
   const f = (async () => { throw new TypeError("Failed to fetch"); }) as unknown as typeof fetch;
   const err = (await callResearch('zhipu', 'm', KEY, "P", f).catch((e: Error) => e)) as Error;
-  assertEquals(err.message.includes('数据获取失败'), true);
+  assertEquals(err.message.includes('网络不可达'), true);
   assertEquals(err.message.includes(KEY), false);
 });
