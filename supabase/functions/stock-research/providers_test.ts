@@ -43,13 +43,39 @@ Deno.test("bailian: enable_search + search_strategy=max", async () => {
   assertEquals(body.search_options.search_strategy, "max");
 });
 
-Deno.test("HTTP 非 2xx → reject，且错误信息不含 key（脱敏纪律）", async () => {
+Deno.test("HTTP 非 2xx → reject，且错误信息不含 key（脱敏纪律），带状态码", async () => {
   const f = fakeFetch(401, { error: { message: `bad key ${KEY}` } }, {} as never);
   // as Error：catch 回调把 Promise<string> 并成 string|Error，显式收窄才能访问 message
   const err = (await callResearch('zhipu', 'm', KEY, "P", f).catch((e: Error) => e)) as Error;
   assertEquals(err instanceof Error, true);
   assertEquals(err.message.includes(KEY), false);
   assertEquals(err.message.includes('数据获取失败'), true);
+  assertEquals(err.message.includes('401'), true); // 状态码回显
+});
+
+// 钉死边界：key 落在 180-199 区间时，若先 slice 后 sanitize，残片可逃出全串替换。
+Deno.test("HTTP 非 2xx + key 跨 slice 边界 → 先脱敏后截断，无 ≥6 字符 key 残片逃逸", async () => {
+  const body = "x".repeat(190) + KEY; // KEY 恰好跨界：旧写法 slice(0,200) 会截走前 10 字符成为残片
+  const f = fakeFetch(401, body, {} as never);
+  const err = (await callResearch('zhipu', 'm', KEY, "P", f).catch((e: Error) => e)) as Error;
+  const out = err.message;
+  assertEquals(out.includes(KEY), false);
+  assertEquals(out.includes(KEY.slice(0, 12)), false); // 头部探针
+  for (let i = 0; i + 6 <= KEY.length; i++) {
+    assertEquals(out.includes(KEY.slice(i, i + 6)), false, `key 残片逃逸：窗口 ${i} 「${KEY.slice(i, i + 6)}」出现在输出中`);
+  }
+});
+
+Deno.test("真·非 JSON 响应（status 200）→ reject 「响应非 JSON」", async () => {
+  const f = fakeFetch(200, "{not json", {} as never);
+  const err = (await callResearch('bailian', 'm', KEY, "P", f).catch((e: Error) => e)) as Error;
+  assertEquals(err.message.includes('响应非 JSON'), true);
+  assertEquals(err.message.includes('数据获取失败'), true);
+});
+
+Deno.test("200 + content 为空白字符串 → reject（不交空白报告）", async () => {
+  const f = fakeFetch(200, { choices: [{ message: { content: "  " } }] }, {} as never);
+  await assertRejects(() => callResearch('zhipu', 'm', KEY, "P", f), Error, '数据获取失败');
 });
 
 Deno.test("响应缺 choices/content → reject 带服务商名", async () => {

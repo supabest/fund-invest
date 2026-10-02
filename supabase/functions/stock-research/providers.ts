@@ -36,7 +36,9 @@ export async function callResearch(
   }
   const text = await resp.text().catch(() => "");
   if (!resp.ok) {
-    throw new Error(sanitizeError(`数据获取失败（${spec.label}：HTTP ${resp.status} ${text.slice(0, 200)}）`, apiKey));
+    // 先对切片原文脱敏再截断：text.slice(0,200) 先截会让跨界 key 变成残片，
+    // 逃出外层 sanitizeError 的全串 split(apiKey) 替换；外层 sanitizeError 保留作双保险。
+    throw new Error(sanitizeError(`数据获取失败（${spec.label}：HTTP ${resp.status} ${sanitizeError(text, apiKey).slice(0, 200)}）`, apiKey));
   }
   let j: { choices?: { message?: { content?: string } }[] };
   try { j = JSON.parse(text); } catch {
