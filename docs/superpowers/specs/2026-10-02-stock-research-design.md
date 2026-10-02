@@ -41,7 +41,7 @@
 - 前端「生成研究」时若本会话无 key：弹内联小表单——服务商二选一 + key 粘贴框（`type=password`，不回显明文）+ 模型名只读展示。
 - key 存 `sessionStorage`（键 `dinvest_research_cred`，JSON `{provider, key}`）；每次请求体透传给 Edge Function；函数仅在内存使用，**不写库、不进日志、不进响应体**。
 - 换服务商研究时要求重新贴对应家 key（两把 key 互不通用）。
-- Edge Function 自身的 `STOCK_RESEARCH_TOKEN`（新建，进 Secrets，与其他函数惯例一致）仅防端点被未授权调用，与用户 key 无关。
+- 函数鉴权不沿用既有函数的 verify_jwt:false+自定义 token 模式（那会把守卫 token 埋进前端，违背密钥不固化精神）：stock-research 以 **verify_jwt:true** 部署，由 supabase-js 自动附登录用户 JWT，**不新增任何 Secret**；因此使用研究功能需已登录云同步（未登录时入口提示先登录）。
 
 ## 5. 数据模型
 
@@ -70,7 +70,7 @@ create table if not exists stock_fundamental (
 
 沿用 build.ts 拼接 → deploy.ts 单文件部署模式（同 stock-score/sector-trend）。
 
-**POST /stock-research**，`Authorization: Bearer STOCK_RESEARCH_TOKEN`，body `{action, code, provider?, model?, api_key?}`：
+**POST /stock-research**（verify_jwt:true，平台 JWT 守卫，函数内不再自校 token），body `{action, code, provider?, model?, api_key?}`：
 
 - `action:"generate"`：按 §5 防重检查 → 写 `running` 行 → 组装提示词（§7）→ 调服务商（同步等待，Edge `--timeout` 部署参数上调至 300s）→ 解析六段 JSON（解析失败重试一次，仍失败记 `failed`）→ 落 `done/failed` 行 → 返回整行。
 - `action:"status"`：纯读，返回该 code 行（前端刷新/轮询用）。
