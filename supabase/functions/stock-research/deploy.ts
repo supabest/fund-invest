@@ -176,7 +176,7 @@ async function callResearch(
 
 // stock-research —— 产业研究员 Edge Function（编排层，无状态无 cron，全按需）
 // 规则权威: docs/superpowers/specs/2026-10-02-stock-research-design.md §5/§6/§7
-// 鉴权：verify_jwt:true 平台 JWT 守卫（前端登录用户 JWT 由 supabase-js 自动附），函数内不自校 token、不新增 Secret。
+// 鉴权：verify_jwt:true 平台 JWT 守卫 + 函数体内 role 自校（仅 authenticated 可调用，拒 anon；不新增 Secret，终审 I-1）。
 // 密钥纪律：api_key 仅从请求体进、只在内存使用——不落库、不进日志、不进响应体（spec §4）。
 
 
@@ -198,7 +198,7 @@ async function readRow(code: string): Promise<Record<string, unknown> | null> {
   const r = await fetch(`${rest()}/stock_fundamental?code=eq.${encodeURIComponent(code)}`, {
     headers: svcHeaders(),
   });
-  if (!r.ok) throw new Error(`read stock_fundamental ${r.status}`);
+  if (!r.ok) throw new Error(`数据获取失败（stock_fundamental 读取 ${r.status}）`); // 不透传 raw body，避免脏日志（终审 I-2）
   const rows = (await r.json()) as Record<string, unknown>[];
   return rows[0] ?? null;
 }
@@ -208,7 +208,7 @@ async function writeRow(row: Record<string, unknown>): Promise<void> {
     method: 'POST', headers: { ...svcHeaders(), 'Prefer': 'resolution=merge-duplicates' },
     body: JSON.stringify([row]),
   });
-  if (!r.ok) throw new Error(`upsert stock_fundamental ${r.status} ${await r.text()}`);
+  if (!r.ok) throw new Error(`数据获取失败（stock_fundamental 写入 ${r.status}）`); // 不透传 raw body（终审 I-2）
 }
 
 // 财务锚点：该 code 自己的最新批次行（含 extras.mix）；读失败静默 null，spec §7「缺则注明无」。
@@ -222,16 +222,34 @@ async function readAnchors(code: string): Promise<Anchors> {
   } catch { return { scoreRow: null, mixRow: null }; }
 }
 
+// 终审 I-1：verify_jwt:true 仅保证 JWT 由项目密钥签名（不区分角色），本函数只读取已由平台验签的
+// Authorization JWT 的 role claim（不重复验签）。仅 role==='authenticated'（邮箱密码登录）可调用，
+// 拒绝 anon/publishable（落实 spec §4「需已登录」，不新增 Secret）。
+function callerRole(req: Request): string | null {
+  const h = req.headers.get('Authorization') || '';
+  const m = h.match(/^Bearer\s+(\S+)$/i);
+  if (!m) return null;
+  const parts = m[1].split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return typeof payload.role === 'string' ? payload.role : null;
+  } catch { return null; }
+}
+
+// export 供编排层单测直接调 handle（build.ts 会剥除 export 关键字，不影响部署产物）
 async function handle(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS });
   if (req.method !== 'POST') return json({ ok: false, error: 'method not allowed' }, 405);
+  if (callerRole(req) !== 'authenticated') return json({ ok: false, error: '需登录（已认证会话）后使用研究功能' }, 401); // I-1：在任何 DB/provider 调用之前拦截
   let body: { action?: string; code?: string; provider?: string; model?: string; api_key?: string };
   try { body = await req.json(); } catch { return json({ ok: false, error: 'bad json' }, 400); }
   const code = String(body.code ?? '').trim();
   if (!CODE_RE.test(code)) return json({ ok: false, error: '代码格式不符（A股6位/港股5位）' }, 400);
 
   if (body.action === 'status') {
-    return json({ ok: true, row: await readRow(code) });
+    try { return json({ ok: true, row: await readRow(code) }); }
+    catch (e) { return json({ ok: false, error: sanitizeError(String(e), '') }, 502); } // I-2：status 读失败也返结构体，不裸 500
   }
   if (body.action !== 'generate') return json({ ok: false, error: 'action 须为 generate|status' }, 400);
 
@@ -241,17 +259,23 @@ async function handle(req: Request): Promise<Response> {
   if (!spec) return json({ ok: false, error: 'provider 须为 zhipu|bailian' }, 400);
   const apiKey = String(body.api_key ?? '');
   if (apiKey.length < 8) return json({ ok: false, error: '缺少 API Key（本功能密钥随用随贴，不落任何存储）' }, 400);
-  const model = String(body.model ?? '').trim() || spec.defaultModel;
+  // 终审 I-1：model 白名单——缺省或等于 defaultModel 直接用；自定义名仅允安全字符集且≤64，拒绝任意注入（落全局共享表）
+  const rawModel = String(body.model ?? '').trim();
+  if (rawModel && rawModel !== spec.defaultModel && !/^[A-Za-z0-9._:-]{1,64}$/.test(rawModel)) {
+    return json({ ok: false, error: 'model 名称非法' }, 400);
+  }
+  const model = rawModel || spec.defaultModel;
 
   const now = Date.now();
-  const existing = await readRow(code);
-  const act = dedupeAction(existing as { status: string; started_at: string; finished_at: string | null } | null, now);
-  if (act !== 'run' && existing) return json({ ok: true, row: existing, cached: act });
-
   const startedAt = new Date(now).toISOString();
-  await writeRow({ code, provider: slug, model, status: 'running', verdict: null, summary: null, report: null, sources: null, error: null, started_at: startedAt, finished_at: null });
-
   try {
+    // I-2：readRow/dedupe/writeRow(running) 均纳入 try，异常走统一 failed 落库+结构化返回，不逃逸成裸 500
+    const existing = await readRow(code);
+    const act = dedupeAction(existing as { status: string; started_at: string; finished_at: string | null } | null, now);
+    if (act !== 'run' && existing) return json({ ok: true, row: existing, cached: act });
+
+    await writeRow({ code, provider: slug, model, status: 'running', verdict: null, summary: null, report: null, sources: null, error: null, started_at: startedAt, finished_at: null });
+
     const anchors = await readAnchors(code);
     const name = String((anchors.scoreRow as { name?: string } | null)?.name ?? '');
     const prompt = buildPrompt(code, name, anchors);
@@ -273,7 +297,7 @@ async function handle(req: Request): Promise<Response> {
       verdict: null, summary: null, report: null, sources: null,
       error: sanitizeError(String(e), apiKey), started_at: startedAt, finished_at: new Date().toISOString(),
     };
-    await writeRow(failed);
+    try { await writeRow(failed); } catch { /* 落库也失败则不阻塞结构化返回（I-2） */ }
     return json({ ok: false, error: failed.error, row: failed }, 502);
   }
 }

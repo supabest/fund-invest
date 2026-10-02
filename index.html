@@ -811,7 +811,14 @@ async function invokeResearch(opts){
 
 function startStatusPoll(code){
   stopStatusPoll();
+  const started = Date.now();
   researchPollTimer = setInterval(async ()=>{
+    if(Date.now() - started > 10 * 60_000){ // 终审 Minor：>10min 仍 running → 自动止损（与后端 RUNNING_STALE_MS 对齐），不无限轮询
+      stopStatusPoll();
+      try{ const m = document.getElementById('researchMsg'); if(m){ m.textContent = '研究超时（>10 分钟未完成），后台可能已被中断，请稍后重试'; m.style.color = 'var(--brick)'; } }catch(e){}
+      renderStockSection();
+      return;
+    }
     try{
       const d = await invokeResearch({action:'status', code});
       if(d && d.ok && d.row && d.row.status!=='running'){
@@ -2782,9 +2789,11 @@ document.getElementById('researchGoBtn').addEventListener('click', async ()=>{
       if(d.row.status==='running') startStatusPoll(code); // 撞上别人 inflight 的 running 行 → 轮询
     } else {
       const msg = (d && d.error) ? d.error : '数据获取失败';
+      fundamentals.set(String(code), { code, provider, status:'failed', verdict:null, error: msg, finished_at: new Date().toISOString() }); // 终审 Minor：失败同步进 Map，使持仓卡胶囊态与结果卡一致
       renderResearchResultCard({status:'failed', code, provider, error: msg});
     }
   }catch(e){
+    fundamentals.set(String(code), { code, provider, status:'failed', verdict:null, error:'数据获取失败', finished_at: new Date().toISOString() }); // 终审 Minor：失败同步进 Map
     renderResearchResultCard({status:'failed', code, provider, error:'数据获取失败'}); // 失败纪律：只报这五个字级别的信息，不带渠道细节猜测
   }finally{
     researchInflight = false;
