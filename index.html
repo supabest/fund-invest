@@ -99,6 +99,10 @@
   .field input, .field select{background:var(--panel-2); border:1px solid var(--line); color:var(--ivory);
     padding:8px 9px; border-radius:6px; font-size:13px; font-family:var(--sans); width:100%;}
   .field input:focus, .field select:focus{outline:none; border-color:var(--gold);}
+  .key-wrap{position:relative;}
+  .field .key-wrap input{padding-right:34px;}
+  .key-eye{position:absolute; right:6px; top:50%; transform:translateY(-50%); background:none; border:none;
+    cursor:pointer; font-size:15px; line-height:1; padding:2px 4px; color:var(--muted);}
   .checkline{display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--ivory); margin-top:2px;}
   .checkline input{width:auto;}
 
@@ -402,7 +406,10 @@
         </select>
       </div>
       <div class="field full"><label>API Key（随用随贴：默认仅存本标签页会话，关页即灭，不上传任何存储）</label>
-        <input type="password" id="researchKey" placeholder="sk-…" autocomplete="off">
+        <div class="key-wrap">
+          <input type="password" id="researchKey" placeholder="sk-…" autocomplete="off">
+          <button type="button" class="key-eye" id="researchKeyEye" title="显示/隐藏 Key（仅回显核对，不影响存储）" aria-label="显示或隐藏 API Key">👁</button>
+        </div>
         <div class="small-note" id="researchKeyNote"></div>
         <div class="small-note"><label style="font-weight:normal;"><input type="checkbox" id="researchRemember" style="vertical-align:-2px;"> 在本浏览器记住（localStorage，按服务商各存一份；仅存本机、不同步、不上传）<a href="#" id="researchForgetLink" style="margin-left:8px;">清除已记住的</a></label></div>
       </div>
@@ -2818,6 +2825,12 @@ document.getElementById('researchForgetLink').addEventListener('click', (e)=>{
   researchCredLocalClear('zhipu'); researchCredLocalClear('bailian');
   const cb = document.getElementById('researchRemember'); if(cb) cb.checked = false;
   refreshKeyNote();
+});
+document.getElementById('researchKeyEye').addEventListener('click', ()=>{
+  const inp = document.getElementById('researchKey');
+  const show = inp.type === 'password';
+  inp.type = show ? 'text' : 'password';
+  document.getElementById('researchKeyEye').textContent = show ? '🙈' : '👁';
 });
 document.getElementById('researchGoBtn').addEventListener('click', async ()=>{
   if(!sbUser){ document.getElementById('researchMsg').textContent='请先登录（云同步账号）后使用研究功能'; openLoginModal(); return; } // spec §4：verify_jwt:true ⇒ 须登录态
