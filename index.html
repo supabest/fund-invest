@@ -84,6 +84,7 @@
   .pill-half{background:rgba(180,150,90,0.14); color:#C7A15E;}
   .pill-pause{background:var(--brick-dim); color:var(--brick);}
   .signal-amount{font-size:12px; color:var(--muted);}
+  .signal-price{font-size:12px; color:var(--muted); padding:0 16px 12px 16px; white-space:nowrap; overflow-x:auto;}
   .signal-reason{font-size:11.5px; color:var(--muted); padding:0 16px 14px 16px; line-height:1.6;}
 
   .dual-strip{display:flex; align-items:center; gap:8px; padding:0 16px 6px 16px; flex-wrap:wrap;}
@@ -256,6 +257,7 @@
     .signal-strip{padding:0 20px 16px 20px;}
     .signal-pill{font-size:14px;}
     .signal-amount{font-size:14px;}
+    .signal-price{font-size:14px; padding:0 20px 14px 20px;}
     .signal-reason{font-size:14px; padding:0 20px 16px 20px;}
     .dual-strip{padding:0 20px 8px 20px;}
     .dual-tag{font-size:12.5px;}
@@ -2095,8 +2097,8 @@ function renderStockSection(){
         <span class="signal-pill ${pillCls}">买入参考·${tier}</span>
         ${scorePillHtml(s)}
         ${researchPillHtml(fundamentals.get(String(s.code)) || null)}
-        <span class="signal-amount">现价 ${s.currentPrice||'--'}${s.ma60?' · MA60 '+Number(s.ma60).toFixed(2):''}${s.ma120?' · MA120 '+Number(s.ma120).toFixed(2):''}</span>
       </div>
+      <div class="signal-price">现价 ${s.currentPrice||'--'}${s.ma60?' · MA60 '+Number(s.ma60).toFixed(2):''}${s.ma120?' · MA120 '+Number(s.ma120).toFixed(2):''}</div>
       ${dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0)}
       <div class="fund-body" id="sbody-${s.id}"></div>
     `;
