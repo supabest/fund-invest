@@ -694,6 +694,58 @@ function scoreDetailHtml(s){
   </div>`;
 }
 
+// ==== RESEARCH_PURE_BEGIN ====
+// 产业研究员纯逻辑（唯一实现体；测试经 scripts/research_render_logic.ts 门面抽取执行）
+// 规则权威: docs/superpowers/specs/2026-10-02-stock-research-design.md §4/§8
+const RESEARCH_VERDICT_CLS = { '升温':'rp-warm', '平稳':'rp-flat', '降温':'rp-cool', '恶化':'rp-bad' };
+const RESEARCH_CRED_KEY = 'dinvest_research_cred';
+const RESEARCH_PROVIDERS = { zhipu:{label:'智谱', model:'glm-5.3-flash'}, bailian:{label:'阿里百炼', model:'qwen3.8-flash'} };
+
+function researchCredGet(){
+  try{ const raw = sessionStorage.getItem(RESEARCH_CRED_KEY); if(!raw) return null;
+    const c = JSON.parse(raw);
+    return (c && typeof c.provider==='string' && typeof c.key==='string' && c.key) ? c : null;
+  }catch(e){ return null; }
+}
+function researchCredSet(cred){
+  try{ if(cred) sessionStorage.setItem(RESEARCH_CRED_KEY, JSON.stringify(cred)); else sessionStorage.removeItem(RESEARCH_CRED_KEY); }catch(e){}
+}
+function researchCredMasked(cred){
+  const p = RESEARCH_PROVIDERS[cred.provider] || {label:cred.provider};
+  return p.label + ' ····' + String(cred.key).slice(-4);
+}
+function researchPillHtml(row){
+  if(!row) return '';
+  if(row.status==='running') return '<span class="research-pill rp-run" title="研究进行中">研究中…</span>';
+  if(row.status==='failed') return '<span class="research-pill rp-fail" title="' + escapeHtml(String(row.error||'')) + '">研究失败</span>';
+  if(row.status==='done'){
+    const cls = RESEARCH_VERDICT_CLS[row.verdict] || 'rp-flat';
+    const t = row.finished_at ? new Date(row.finished_at).toLocaleString('zh-CN',{hour12:false}) : '—';
+    return '<span class="research-pill ' + cls + '" title="研究时间 ' + escapeHtml(t) + ' · 仅状态标记非建议">景气 ' + escapeHtml(String(row.verdict||'—')) + ' · ' + escapeHtml(String(row.summary||'')) + '</span>';
+  }
+  return '';
+}
+function researchRetryDisabled(row, nowMs){
+  if(!row) return false;
+  if(row.status==='running') return true;
+  if(row.status!=='done') return false;
+  const t = Date.parse(row.finished_at ?? '');            // falsy 纪律：null/坏串 → NaN → 不禁用
+  return Number.isFinite(t) && (nowMs - t) < 3600_000;    // spec §5：1 小时缓存窗
+}
+function researchReportHtml(row){
+  if(!row || row.status!=='done') return '';
+  const secs = Array.isArray(row.report) ? row.report.map(s =>
+    '<div class="rp-sec"><div class="rp-sec-title">' + escapeHtml(String(s.title||'')) + '</div><div class="rp-sec-body">' + escapeHtml(String(s.body||'')).replace(/\n/g,'<br>') + '</div></div>').join('') : '';
+  const srcs = Array.isArray(row.sources) && row.sources.length
+    ? '<div class="rp-src-title">来源</div>' + row.sources.map(x => '<div class="rp-src"><a href="' + escapeHtml(String(x.url||'#')) + '" target="_blank" rel="noopener">' + escapeHtml(String(x.title||x.url||'')) + '</a>' + (x.date ? ' · ' + escapeHtml(String(x.date)) : '') + '</div>').join('')
+    : '<div class="rp-src">本次研究未返回可披露来源</div>';
+  return '<div class="rp-report">'
+    + '<div class="rp-head">产业研究员 · ' + escapeHtml(String(row.verdict||'—')) + '（' + escapeHtml(String(row.provider||'')) + '/' + escapeHtml(String(row.model||'')) + ' · ' + escapeHtml(row.finished_at ? new Date(row.finished_at).toLocaleString('zh-CN',{hour12:false}) : '—') + '）</div>'
+    + '<div class="rp-summary">' + escapeHtml(String(row.summary||'')) + '</div>' + secs + srcs
+    + '<div class="rp-note">AI 联网搜索研究，结论不构成买卖建议 · 「重新研究」1 小时窗口内直接返回缓存</div></div>';
+}
+// ==== RESEARCH_PURE_END ====
+
 // ==== SECTOR_PURE_BEGIN ====
 // 以下均为无 IO 的纯函数/常量，是本卡片榜单/概要/退化判定/格式化的**唯一实现体**：
 // 页面直接调用，scripts/sector_render_logic.ts 按本标记抽取并做类型化导出，
