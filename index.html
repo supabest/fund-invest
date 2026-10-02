@@ -401,9 +401,10 @@
           <option value="bailian">阿里百炼 qwen3.8-flash</option>
         </select>
       </div>
-      <div class="field full"><label>API Key（随用随贴：仅存本标签页会话，关页即灭，不上传任何存储）</label>
+      <div class="field full"><label>API Key（随用随贴：默认仅存本标签页会话，关页即灭，不上传任何存储）</label>
         <input type="password" id="researchKey" placeholder="sk-…" autocomplete="off">
         <div class="small-note" id="researchKeyNote"></div>
+        <div class="small-note"><label style="font-weight:normal;"><input type="checkbox" id="researchRemember" style="vertical-align:-2px;"> 在本浏览器记住（localStorage，按服务商各存一份；仅存本机、不同步、不上传）<a href="#" id="researchForgetLink" style="margin-left:8px;">清除已记住的</a></label></div>
       </div>
     </div>
     <div class="btn-row"><button class="btn primary" id="researchGoBtn">生成研究</button><button class="btn ghost" id="researchCancelBtn">收起</button></div>
@@ -753,6 +754,29 @@ function researchCredSet(cred){
 function researchCredMasked(cred){
   const p = RESEARCH_PROVIDERS[cred.provider] || {label:cred.provider};
   return p.label + ' ····' + String(cred.key).slice(-4);
+}
+// 「记住 Key」（用户 2026-10-02 批准）：opt-in 存本机浏览器 localStorage，按服务商各存一份；
+// 零远端零固化——不进代码/不进 git/不发 Supabase，仅在生成研究时随请求体发给对应服务商（功能本质）。
+const RESEARCH_CRED_LOCAL_KEY = 'dinvest_research_cred_local';
+function researchCredLocalGet(provider){
+  try{ const raw = localStorage.getItem(RESEARCH_CRED_LOCAL_KEY); if(!raw) return null;
+    const m = JSON.parse(raw); // typeof string 校验兼防原型链继承键（constructor/toString 等）
+    const k = (m && typeof m[provider] === 'string') ? m[provider] : '';
+    return k || null;
+  }catch(e){ return null; }
+}
+function researchCredLocalSet(provider, key){
+  try{ const raw = localStorage.getItem(RESEARCH_CRED_LOCAL_KEY); let m = {};
+    if(raw){ const p = JSON.parse(raw); if(p && typeof p === 'object') m = p; }
+    if(key) m[provider] = key; else delete m[provider];
+    localStorage.setItem(RESEARCH_CRED_LOCAL_KEY, JSON.stringify(m));
+  }catch(e){}
+}
+function researchCredLocalClear(provider){ researchCredLocalSet(provider, ''); }
+function researchCredLocalMasked(provider){
+  const k = researchCredLocalGet(provider); if(!k) return null;
+  const p = RESEARCH_PROVIDERS[provider] || {label:provider};
+  return p.label + ' ····' + String(k).slice(-4);
 }
 function researchPillHtml(row){
   if(!row) return '';
@@ -2766,9 +2790,35 @@ function refreshKeyNote(){
   const p = document.getElementById('researchProvider').value;
   const cred = researchCredGet();
   const el = document.getElementById('researchKeyNote');
-  el.textContent = (cred && cred.provider===p) ? '已在本会话配置：' + researchCredMasked(cred) + '（留空即复用）'
+  const localMasked = researchCredLocalMasked(p);
+  const cb = document.getElementById('researchRemember');
+  if(cb) cb.checked = !!localMasked; // 已记住则回显勾选状态
+  const sessionNote = (cred && cred.provider===p) ? '已在本会话配置：' + researchCredMasked(cred) + '（留空即复用）'
     : cred ? '当前会话已存 ' + RESEARCH_PROVIDERS[cred.provider].label + ' 的 key；换服务商需重新粘贴对应 key' : '';
+  const localNote = localMasked ? '本浏览器已记住：' + localMasked + '（留空即复用）'
+    : '本浏览器未记住该服务商的 key';
+  el.textContent = sessionNote ? sessionNote + ' ｜ ' + localNote : localNote;
 }
+document.getElementById('researchProvider').addEventListener('change', refreshKeyNote);
+document.getElementById('researchRemember').addEventListener('change', (e)=>{
+  const p = document.getElementById('researchProvider').value;
+  if(e.target.checked){
+    const credS = researchCredGet();
+    const k = document.getElementById('researchKey').value.trim() || (credS && credS.provider===p ? credS.key : '');
+    // 勾选即记住：优先当前输入框，其次会话内已存的同服务商 key；都没有则弹回输入框要求粘贴
+    if(!k){ e.target.checked = false; document.getElementById('researchMsg').textContent='请先在上方粘贴 API Key，再勾选「记住」'; return; }
+    researchCredLocalSet(p, k);
+  } else {
+    researchCredLocalClear(p);
+  }
+  refreshKeyNote();
+});
+document.getElementById('researchForgetLink').addEventListener('click', (e)=>{
+  e.preventDefault();
+  researchCredLocalClear('zhipu'); researchCredLocalClear('bailian');
+  const cb = document.getElementById('researchRemember'); if(cb) cb.checked = false;
+  refreshKeyNote();
+});
 document.getElementById('researchGoBtn').addEventListener('click', async ()=>{
   if(!sbUser){ document.getElementById('researchMsg').textContent='请先登录（云同步账号）后使用研究功能'; openLoginModal(); return; } // spec §4：verify_jwt:true ⇒ 须登录态
   if(researchInflight) return;
@@ -2777,8 +2827,10 @@ document.getElementById('researchGoBtn').addEventListener('click', async ()=>{
   const provider = document.getElementById('researchProvider').value;
   const keyInput = document.getElementById('researchKey').value.trim();
   const cred = researchCredGet();
-  const apiKey = keyInput || (cred && cred.provider===provider ? cred.key : '');
-  if(!apiKey){ document.getElementById('researchMsg').textContent='请粘贴该服务商的 API Key'; return; }
+  const localKey = researchCredLocalGet(provider); // 记住 Key：本机 localStorage 兜底（输入框 > 本会话 > 本浏览器记住）
+  const apiKey = keyInput || (cred && cred.provider===provider ? cred.key : '') || localKey || '';
+  if(!apiKey){ document.getElementById('researchMsg').textContent='请粘贴该服务 商的 API Key'; return; }
+  if(keyInput && document.getElementById('researchRemember').checked) researchCredLocalSet(provider, keyInput); // 勾选记住时随输入即时更新
   if(keyInput) researchCredSet({provider, key: keyInput}); // 仅在用户本次输入时写 sessionStorage；复用会话凭证不回写
   document.getElementById('researchMsg').textContent='';
   researchInflight = true; renderResearchResultCard({status:'running', code, provider});

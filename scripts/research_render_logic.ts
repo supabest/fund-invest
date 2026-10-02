@@ -42,6 +42,7 @@ const ESCAPE_SHIM =
 const EXPORT_NAMES = [
   "RESEARCH_VERDICT_CLS", "researchPillHtml", "researchReportHtml",
   "researchCredGet", "researchCredSet", "researchCredMasked", "researchRetryDisabled",
+  "researchCredLocalGet", "researchCredLocalSet", "researchCredLocalClear", "researchCredLocalMasked",
 ];
 
 async function load(): Promise<Record<string, unknown>> {
@@ -88,4 +89,17 @@ export function researchCredMasked(cred: ResearchCred): string {
 }
 export function researchRetryDisabled(row: ResearchRow | null | undefined, nowMs: number): boolean {
   return fn("researchRetryDisabled")(row ?? null, nowMs) as boolean;
+}
+// 「记住 Key」（用户 2026-10-02 批准）：opt-in 本机 localStorage，按服务商隔离；零远端零固化
+export function researchCredLocalGet(provider: string): string | null {
+  return fn("researchCredLocalGet")(provider) as string | null;
+}
+export function researchCredLocalSet(provider: string, key: string): void {
+  fn("researchCredLocalSet")(provider, key);
+}
+export function researchCredLocalClear(provider: string): void {
+  fn("researchCredLocalClear")(provider);
+}
+export function researchCredLocalMasked(provider: string): string | null {
+  return fn("researchCredLocalMasked")(provider) as string | null;
 }
