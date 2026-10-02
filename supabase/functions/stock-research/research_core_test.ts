@@ -12,14 +12,23 @@ Deno.test("buildPrompt: 五类信号与六段结构在提示词中逐条在位",
   assertEquals(p.includes("结论必附来源"), true);
   assertEquals(p.includes("信息不足"), true);  // 允许模型自报信息不足（spec §10 风险行）
 });
-Deno.test("buildPrompt: 有财务锚点时注入营收/净利与主营结构", () => {
+Deno.test("buildPrompt: 锚点用 stock_score 真实列，评分行带诚实标签，主营结构取 extras.mix", () => {
   const p = buildPrompt("600338", "潍柴动力", {
-    scoreRow: { revenue_yoy: 12.3, profit_yoy: -4.5, roe: 9.1 },
-    mixRow: { segments: [{ name: "动力总成", ratio: 0.62 }] },
+    scoreRow: {
+      roe: 9.1, pe: 14.2, quality: 63.5, growth: 41.2, final: 55.0, ths_l1: "机械",
+      extras: { mix: { segments: [{ name: "动力总成", ratio: 0.62 }] } },
+    },
+    mixRow: null,
   });
-  assertEquals(p.includes("12.3"), true);
-  assertEquals(p.includes("-4.5"), true);
+  // ① 评分行诚实标签必须原文在位
+  assertEquals(p.includes("本库量化评分(0-100 百分位，非财务增长率，不得据此判景气方向)"), true);
+  // ② roe/pe 真实数值出现
+  assertEquals(p.includes("9.1"), true);
+  assertEquals(p.includes("14.2"), true);
+  // ③ 主营结构取自 extras.mix.segments
   assertEquals(p.includes("动力总成"), true);
+  // ④ 生产表不存在的列名不得出现
+  assertEquals(p.includes("revenue_yoy"), false);
 });
 Deno.test("buildPrompt: 锚点缺失必须注明「无」而非省略（spec §7）", () => {
   const p = buildPrompt("00700", "腾讯控股", { scoreRow: null, mixRow: null });

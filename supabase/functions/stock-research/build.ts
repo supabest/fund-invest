@@ -11,5 +11,7 @@ const rd = (f: string) => stripRefs(Deno.readTextFileSync(f))
   .replace(/^export\s+(interface|type|const|function|async\s+function)/gm, '$1');
 const src = '/// <reference lib="deno.ns" />\n' +
   rd('research_core.ts') + '\n' + rd('providers.ts') + '\n' + rd('index.ts');
+// M-7 fail-fast：残留相对 import 会令 Edge 运行时报模块找不到——写盘前断言，非零退出的构建失败优于上线坏包。
+if (/from\s+["']\.\/[a-z_]+\.ts["']/.test(src)) throw new Error('deploy.ts 残留相对 import');
 Deno.writeTextFileSync('deploy.ts', src);
 console.log('deploy.ts bytes:', src.length);

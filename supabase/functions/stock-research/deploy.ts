@@ -8,31 +8,43 @@ type Verdict = '升温' | '平稳' | '降温' | '恶化';
 const VERDICTS: readonly Verdict[] = ['升温', '平稳', '降温', '恶化'];
 
 interface Anchors {
-  scoreRow: Record<string, unknown> | null; // stock_score 最新批次行（extras 内含 mix）
-  mixRow: Record<string, unknown> | null;   // stock_business_mix 行
+  scoreRow: Record<string, unknown> | null; // stock_score 该 code 最新批次行（extras.mix 内含主营结构）
+  mixRow: Record<string, unknown> | null;   // 兼容签名保留：V1 readAnchors 恒置 null（主营结构实际取自 scoreRow.extras.mix）
 }
 
 // 六段标题固定序（前端渲染与解析校验共用同一数组）
 const SECTION_TITLES = ['需求', '供给', '价格与盈利', '竞争格局与扩产', '管理层与市场信号', '结论与温度'];
 
 function buildPrompt(code: string, name: string, anchors: Anchors): string {
-  const sc = anchors.scoreRow;
-  const mix = anchors.mixRow ?? (sc ? ((sc as { extras?: { mix?: unknown } }).extras?.mix ?? null) : null);
-  const finLines: string[] = [];
-  if (sc) {
-    for (const k of ['revenue_yoy', 'profit_yoy', 'roe', 'quality', 'growth', 'final']) {
-      const v = (sc as Record<string, unknown>)[k];
-      if (typeof v === 'number') finLines.push(`${k}=${v}`);
-    }
-  }
+  const sc = anchors.scoreRow as Record<string, unknown> | null;
+  // 主营结构：V1 实际取自 stock_score.extras.mix.segments（stock-score buildRevealExtras 写入）；
+  // anchors.mixRow 仅为兼容既有签名保留，readAnchors 恒置 null（见 index.ts），不双源读 business_mix。
+  const mix = anchors.mixRow ?? (sc?.extras ? ((sc.extras as { mix?: { segments?: unknown } } | null)?.mix ?? null) : null);
+  const pickNums = (keys: string[]): string[] => {
+    const out: string[] = [];
+    if (sc) for (const k of keys) { const v = sc[k]; if (typeof v === 'number') out.push(`${k}=${v}`); }
+    return out;
+  };
+  // 财务行：只挑 stock_score 真实存在的数值列（生产表无营收/净利同比列，已不取值）
+  const finFields = pickNums(['roe', 'pe', 'debt']);
+  // 评分行：quality/growth/value/momentum/final 是本库量化评分（0-100 百分位），非财务增长率
+  const scoreFields = pickNums(['quality', 'growth', 'value', 'momentum', 'final']);
   const mixLine = (() => {
     const segs = (mix as { segments?: { name: string; ratio: number }[] } | null)?.segments
       ?? (mix as { segments?: { name: string; ratio: number }[] } | null);
     if (!Array.isArray(segs) || !segs.length) return null;
     return segs.slice(0, 3).map((x) => `${x.name}(${Math.round((x.ratio ?? 0) * 100)}%)`).join('、');
   })();
-  const anchorBlock = finLines.length
-    ? `本库财务锚点（截至最新评分批次，非实时）：${finLines.join(' ')}${mixLine ? `；主营结构：${mixLine}` : ''}`
+  const ths = sc
+    ? [sc.ths_l1, sc.ths_l2].filter((x): x is string => typeof x === 'string' && x.trim() !== '').join(' / ')
+    : '';
+  const anchorLines: string[] = [];
+  if (finFields.length) anchorLines.push(`本库财务快照（非实时同比数据）：${finFields.join(' ')}`);
+  if (scoreFields.length) anchorLines.push(`本库量化评分(0-100 百分位，非财务增长率，不得据此判景气方向)：${scoreFields.join(' ')}`);
+  if (mixLine) anchorLines.push(`主营结构：${mixLine}`);
+  if (ths) anchorLines.push(`行业背景（同花顺分类）：${ths}`);
+  const anchorBlock = anchorLines.length
+    ? anchorLines.join('\n')
     : '无本库财务锚点（评分池外/港股），仅以联网搜索所得公开财务信息为据，并在报告中注明数据出处与期间。';
 
   return [
@@ -199,17 +211,14 @@ async function writeRow(row: Record<string, unknown>): Promise<void> {
   if (!r.ok) throw new Error(`upsert stock_fundamental ${r.status} ${await r.text()}`);
 }
 
-// 财务锚点：stock_score 最新批次行 + 其 extras.mix（读失败静默 null，spec §7「缺则注明无」）
+// 财务锚点：该 code 自己的最新批次行（含 extras.mix）；读失败静默 null，spec §7「缺则注明无」。
+// M-6：单查询按 code 过滤 + batch_date.desc 取首行，不再先拉全局 max(batch_date) 两步（避免跨批次漂移）。
 async function readAnchors(code: string): Promise<Anchors> {
   try {
-    const b = await fetch(`${rest()}/stock_score?select=batch_date&order=batch_date.desc&limit=1`, { headers: svcHeaders() });
-    if (!b.ok) return { scoreRow: null, mixRow: null };
-    const batch = ((await b.json()) as { batch_date: string }[])[0]?.batch_date;
-    if (!batch) return { scoreRow: null, mixRow: null };
-    const s = await fetch(`${rest()}/stock_score?select=*&batch_date=eq.${batch}&code=eq.${encodeURIComponent(code)}&limit=1`, { headers: svcHeaders() });
+    const s = await fetch(`${rest()}/stock_score?select=*&code=eq.${encodeURIComponent(code)}&order=batch_date.desc&limit=1`, { headers: svcHeaders() });
     if (!s.ok) return { scoreRow: null, mixRow: null };
     const scoreRow = ((await s.json()) as Record<string, unknown>[])[0] ?? null;
-    return { scoreRow, mixRow: null }; // mix 已在 score extras 内（stock-score buildRevealExtras 先例），不另读 business_mix 防双源漂移
+    return { scoreRow, mixRow: null }; // mix 已在该 code 最新批次行的 extras 内（stock-score buildRevealExtras 先例），不另读 business_mix 防双源漂移
   } catch { return { scoreRow: null, mixRow: null }; }
 }
 
@@ -227,10 +236,12 @@ async function handle(req: Request): Promise<Response> {
   if (body.action !== 'generate') return json({ ok: false, error: 'action 须为 generate|status' }, 400);
 
   const slug = String(body.provider ?? '') as ProviderSlug;
-  if (!PROVIDERS[slug]) return json({ ok: false, error: 'provider 须为 zhipu|bailian' }, 400);
+  // M-2：用 hasOwnProperty 防原型链旁路（否则 slug='constructor'/'toString' 等 inherited key 会使 `!PROVIDERS[slug]` 为假而绕过校验）
+  const spec = Object.prototype.hasOwnProperty.call(PROVIDERS, slug) ? PROVIDERS[slug] : null;
+  if (!spec) return json({ ok: false, error: 'provider 须为 zhipu|bailian' }, 400);
   const apiKey = String(body.api_key ?? '');
   if (apiKey.length < 8) return json({ ok: false, error: '缺少 API Key（本功能密钥随用随贴，不落任何存储）' }, 400);
-  const model = String(body.model ?? '').trim() || PROVIDERS[slug].defaultModel;
+  const model = String(body.model ?? '').trim() || spec.defaultModel;
 
   const now = Date.now();
   const existing = await readRow(code);

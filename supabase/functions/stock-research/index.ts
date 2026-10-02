@@ -37,17 +37,14 @@ async function writeRow(row: Record<string, unknown>): Promise<void> {
   if (!r.ok) throw new Error(`upsert stock_fundamental ${r.status} ${await r.text()}`);
 }
 
-// 财务锚点：stock_score 最新批次行 + 其 extras.mix（读失败静默 null，spec §7「缺则注明无」）
+// 财务锚点：该 code 自己的最新批次行（含 extras.mix）；读失败静默 null，spec §7「缺则注明无」。
+// M-6：单查询按 code 过滤 + batch_date.desc 取首行，不再先拉全局 max(batch_date) 两步（避免跨批次漂移）。
 async function readAnchors(code: string): Promise<Anchors> {
   try {
-    const b = await fetch(`${rest()}/stock_score?select=batch_date&order=batch_date.desc&limit=1`, { headers: svcHeaders() });
-    if (!b.ok) return { scoreRow: null, mixRow: null };
-    const batch = ((await b.json()) as { batch_date: string }[])[0]?.batch_date;
-    if (!batch) return { scoreRow: null, mixRow: null };
-    const s = await fetch(`${rest()}/stock_score?select=*&batch_date=eq.${batch}&code=eq.${encodeURIComponent(code)}&limit=1`, { headers: svcHeaders() });
+    const s = await fetch(`${rest()}/stock_score?select=*&code=eq.${encodeURIComponent(code)}&order=batch_date.desc&limit=1`, { headers: svcHeaders() });
     if (!s.ok) return { scoreRow: null, mixRow: null };
     const scoreRow = ((await s.json()) as Record<string, unknown>[])[0] ?? null;
-    return { scoreRow, mixRow: null }; // mix 已在 score extras 内（stock-score buildRevealExtras 先例），不另读 business_mix 防双源漂移
+    return { scoreRow, mixRow: null }; // mix 已在该 code 最新批次行的 extras 内（stock-score buildRevealExtras 先例），不另读 business_mix 防双源漂移
   } catch { return { scoreRow: null, mixRow: null }; }
 }
 
@@ -65,10 +62,12 @@ async function handle(req: Request): Promise<Response> {
   if (body.action !== 'generate') return json({ ok: false, error: 'action 须为 generate|status' }, 400);
 
   const slug = String(body.provider ?? '') as ProviderSlug;
-  if (!PROVIDERS[slug]) return json({ ok: false, error: 'provider 须为 zhipu|bailian' }, 400);
+  // M-2：用 hasOwnProperty 防原型链旁路（否则 slug='constructor'/'toString' 等 inherited key 会使 `!PROVIDERS[slug]` 为假而绕过校验）
+  const spec = Object.prototype.hasOwnProperty.call(PROVIDERS, slug) ? PROVIDERS[slug] : null;
+  if (!spec) return json({ ok: false, error: 'provider 须为 zhipu|bailian' }, 400);
   const apiKey = String(body.api_key ?? '');
   if (apiKey.length < 8) return json({ ok: false, error: '缺少 API Key（本功能密钥随用随贴，不落任何存储）' }, 400);
-  const model = String(body.model ?? '').trim() || PROVIDERS[slug].defaultModel;
+  const model = String(body.model ?? '').trim() || spec.defaultModel;
 
   const now = Date.now();
   const existing = await readRow(code);
