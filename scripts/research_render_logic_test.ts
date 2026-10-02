@@ -9,12 +9,12 @@ const NOW = Date.parse('2026-10-02T07:30:00Z');
 Deno.test("researchPillHtml: 无记录→空串（非研究股不放灰胶囊，spec §8）", () => {
   assertEquals(P.researchPillHtml(null), '');
 });
-Deno.test("researchPillHtml: 四态温度各配色 + running/failed 文案", () => {
+Deno.test("researchPillHtml: 四态温度各配色 + running 文案；failed 不再渲染常驻标记（用户 2026-10-03）", () => {
   assertEquals(P.researchPillHtml(done).includes('rp-cool'), true);
   assertEquals(P.researchPillHtml(done).includes('降温'), true);
   assertEquals(P.researchPillHtml({...done, verdict:'恶化'}).includes('rp-bad'), true);
   assertEquals(P.researchPillHtml({status:'running'}).includes('研究中'), true);
-  assertEquals(P.researchPillHtml({status:'failed', error:'数据获取失败（智谱：HTTP 401）'}).includes('研究失败'), true);
+  assertEquals(P.researchPillHtml({status:'failed', error:'数据获取失败（智谱：HTTP 401）'}), ''); // 卡片上不显「研究失败」胶囊
 });
 Deno.test("researchPillHtml: title 属性带研究时间；XSS 纪律——summary 经 escapeHtml", () => {
   const evil = {...done, summary:'<img src=x onerror=alert(1)>'};
