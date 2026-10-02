@@ -103,6 +103,7 @@ export function dedupeAction(row: { status: string; started_at: string; finished
 export function sanitizeError(raw: string, apiKey: string): string {
   let s = String(raw ?? '未知错误');
   if (apiKey && apiKey.length >= 6) s = s.split(apiKey).join('***');
-  if (s.length > 500) s = s.slice(0, 500) + '…';
+  // 截断分支须保证总长 ≤500：留 1 位给省略号，否则 500+1=501 违反契约
+  if (s.length > 500) s = s.slice(0, 499) + '…';
   return s;
 }

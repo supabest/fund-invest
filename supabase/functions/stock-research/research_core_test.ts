@@ -55,6 +55,25 @@ Deno.test("parseReport: 残缺/非法拒绝，多余字段容忍", () => {
   const extra = JSON.parse(GOOD); (extra as Record<string, unknown>).foo = 1;
   assertEquals(parseReport(JSON.stringify(extra)) !== null, true);          // 多余字段容忍
 });
+Deno.test("parseReport: sources 过滤非 https/非法 URL 并去重；summary 缺失拒绝", () => {
+  const mixed = JSON.stringify({
+    ...JSON.parse(GOOD),
+    sources: [
+      { title: "ok1", url: "https://example.com/a", date: "2026-08-29" },
+      { title: "ftp", url: "ftp://example.com/b", date: "2026-08-29" },        // 协议白名单外
+      { title: "noturl", url: "研报见附件", date: "2026-08-29" },               // 非 URL
+      { title: "dup", url: "https://example.com/a", date: "2026-08-30" },       // 重复 https
+      { title: "ok2", url: "http://example.com/c", date: "2026-08-31" },       // http 也允许
+    ],
+  });
+  const r = parseReport(mixed);
+  assertEquals(r !== null, true);
+  assertEquals(r!.sources.length, 2); // 合法 https/http 去重后：a（重复 a 被剔除）+ c
+  assertEquals(r!.sources.map((s) => s.url).join(","), "https://example.com/a,http://example.com/c");
+  const noSummary = JSON.parse(GOOD) as Record<string, unknown>;
+  delete noSummary.summary;
+  assertEquals(parseReport(JSON.stringify(noSummary)), null);                  // summary 缺失拒绝
+});
 
 // ---- 防重矩阵（spec §5 双保险） ----
 const NOW = Date.UTC(2026, 9, 2, 8, 0, 0);
@@ -76,6 +95,15 @@ Deno.test("sanitizeError: 任何位置抹除 api_key，长度上限截断", () =
   assertEquals(out.includes(KEY), false);
   assertEquals(out.includes("***"), true);
   assertEquals(out.length <= 500, true);
+});
+Deno.test("sanitizeError: >500 字符输入触发截断分支，总长仍 ≤500 且 key 不残留", () => {
+  const KEY = "sk-secret-abc123def456";
+  const raw = "x".repeat(600) + ` overflow tail: ${KEY} end`;
+  const out = sanitizeError(raw, KEY);
+  assertEquals(out.length <= 500, true, `截断后长度 ${out.length} 违反 ≤500 契约`);
+  assertEquals(out.length, 500);
+  assertEquals(out.includes(KEY), false);
+  assertEquals(out.endsWith("…"), true); // 省略号语义保留
 });
 Deno.test("CODE_RE: A股6位/港股5位", () => {
   assertEquals(CODE_RE.test("600338"), true);
