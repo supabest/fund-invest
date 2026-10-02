@@ -244,6 +244,7 @@ async function handle(req: Request): Promise<Response> {
   if (callerRole(req) !== 'authenticated') return json({ ok: false, error: '需登录（已认证会话）后使用研究功能' }, 401); // I-1：在任何 DB/provider 调用之前拦截
   let body: { action?: string; code?: string; provider?: string; model?: string; api_key?: string };
   try { body = await req.json(); } catch { return json({ ok: false, error: 'bad json' }, 400); }
+  if (!body || typeof body !== 'object') return json({ ok: false, error: 'bad json' }, 400); // 终审 Minor-A：null/字符串等非对象体不致 String(body.code) 抛裸 500
   const code = String(body.code ?? '').trim();
   if (!CODE_RE.test(code)) return json({ ok: false, error: '代码格式不符（A股6位/港股5位）' }, 400);
 
@@ -268,14 +269,25 @@ async function handle(req: Request): Promise<Response> {
 
   const now = Date.now();
   const startedAt = new Date(now).toISOString();
+
+  // 终审 I-2 + 复审 Important-1：三段式拆分——readRow 或 running 写失败时**绝不** stamp failed
+  // （failed 携 null 内容列，on_conflict=code 会抹掉共享表里已付费的 done 报告）；只有真正开跑（running 已落库）后的异常才允许落 failed。
+  let existing: Record<string, unknown> | null;
   try {
-    // I-2：readRow/dedupe/writeRow(running) 均纳入 try，异常走统一 failed 落库+结构化返回，不逃逸成裸 500
-    const existing = await readRow(code);
-    const act = dedupeAction(existing as { status: string; started_at: string; finished_at: string | null } | null, now);
-    if (act !== 'run' && existing) return json({ ok: true, row: existing, cached: act });
+    existing = await readRow(code);
+  } catch (e) {
+    return json({ ok: false, error: sanitizeError(String(e), apiKey) }, 502); // 读失败：不动库，保护已有报告
+  }
+  const act = dedupeAction(existing as { status: string; started_at: string; finished_at: string | null } | null, now);
+  if (act !== 'run' && existing) return json({ ok: true, row: existing, cached: act });
 
+  try {
     await writeRow({ code, provider: slug, model, status: 'running', verdict: null, summary: null, report: null, sources: null, error: null, started_at: startedAt, finished_at: null });
+  } catch (e) {
+    return json({ ok: false, error: sanitizeError(String(e), apiKey) }, 502); // running 写失败：旧行原样保留，不覆 failed
+  }
 
+  try {
     const anchors = await readAnchors(code);
     const name = String((anchors.scoreRow as { name?: string } | null)?.name ?? '');
     const prompt = buildPrompt(code, name, anchors);

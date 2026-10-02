@@ -110,14 +110,16 @@ Deno.test("I-2/密钥红线：provider 401（回显 key）→ 502 failed，error
   );
 });
 
-Deno.test("I-2 裸 500 防护：readRow 失败（REST 500）→ 结构化 {ok:false} 而非抛栈", () => {
+Deno.test("I-2 裸 500 防护：readRow 失败（REST 500）→ 结构化 502 且**不向库写任何行**（复审 Important-1：不得抹掉共享表已有报告）", () => {
   const orig = globalThis.fetch;
+  let conflictWrites = 0;
   globalThis.fetch = (async (input: string | URL | Request) => {
     const url = String(typeof input === 'string' ? input : (input as Request).url);
     if (url.includes('stock_fundamental') && !url.includes('on_conflict')) {
       return new Response("boom", { status: 500 }); // readRow 抛错
     }
-    return new Response(null, { status: 201 });
+    if (url.includes('on_conflict')) { conflictWrites++; return new Response(null, { status: 201 }); }
+    return new Response(null, { status: 200 });
   }) as typeof fetch;
   return post({ action: 'generate', code: '600338', provider: 'zhipu', api_key: 'sk-abcdefgh' }, AUTH)
     .then(async (r) => {
@@ -125,6 +127,35 @@ Deno.test("I-2 裸 500 防护：readRow 失败（REST 500）→ 结构化 {ok:fa
       const j = await r.json();
       assertEquals(j.ok, false);
       assertEquals(String(j.error).includes('数据获取失败'), true);
+      assertEquals(conflictWrites, 0); // 读失败在任何 upsert 之前返回 → 已有 done 报告不被 null 覆盖
     })
     .finally(() => { globalThis.fetch = orig; });
+});
+
+Deno.test("复审 Important-1：running 写失败 → 502 且不再补写 failed（旧行原样保留）", () => {
+  const orig = globalThis.fetch;
+  let conflictWrites = 0;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(typeof input === 'string' ? input : (input as Request).url);
+    if (url.includes('stock_fundamental') && !url.includes('on_conflict')) return jsonResp([]); // 无 existing → act=run
+    if (url.includes('on_conflict')) { conflictWrites++; return new Response("write boom", { status: 500 }); } // running 写失败
+    return new Response(null, { status: 200 });
+  }) as typeof fetch;
+  return post({ action: 'generate', code: '600338', provider: 'zhipu', api_key: 'sk-abcdefgh' }, AUTH)
+    .then(async (r) => {
+      assertEquals(r.status, 502);
+      assertEquals(conflictWrites, 1); // 仅尝试一次 running 写；catch 已返、不会二次 stamp failed
+    })
+    .finally(() => { globalThis.fetch = orig; });
+});
+
+Deno.test("复审 Minor-A：非对象请求体（null）→ 400 bad json而非抛 500", () => {
+  return withStub({}, async (calls) => {
+    const r = await handle(new Request("http://edge/stock-research", {
+      method: "POST", headers: { "content-type": "application/json", Authorization: AUTH }, body: "null",
+    }));
+    assertEquals(r.status, 400);
+    assertEquals((await r.json()).error, 'bad json');
+    assertEquals(calls.length, 0);
+  });
 });

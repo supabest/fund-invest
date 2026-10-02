@@ -801,7 +801,7 @@ async function loadFundamentals(){
 }
 
 async function invokeResearch(opts){
-  // verify_jwt:true 且本 App 为匿名登录：显式附当前会话 access_token 作 Bearer（网关同项目签发，有效即放行）
+  // verify_jwt:true + 函数体 role 自校（仅 authenticated）：显式附当前会话 access_token 作 Bearer（邮箱/密码登录签发，role=authenticated，过网关+角色门）
   let headers = {};
   try{ const { data } = await sb.auth.getSession(); const tk = data && data.session && data.session.access_token; if(tk) headers.Authorization = 'Bearer ' + tk; }catch(e){}
   const { error: e, data } = await sb.functions.invoke('stock-research', { body: opts, headers });
@@ -816,6 +816,7 @@ function startStatusPoll(code){
     if(Date.now() - started > 10 * 60_000){ // 终审 Minor：>10min 仍 running → 自动止损（与后端 RUNNING_STALE_MS 对齐），不无限轮询
       stopStatusPoll();
       try{ const m = document.getElementById('researchMsg'); if(m){ m.textContent = '研究超时（>10 分钟未完成），后台可能已被中断，请稍后重试'; m.style.color = 'var(--brick)'; } }catch(e){}
+      fundamentals.set(String(code), { code, status:'failed', verdict:null, error:'研究超时（>10 分钟）', finished_at: new Date().toISOString() }); // 复审 Minor-C：止损同步回写 Map，使胶囊态收敛不致永远「研究中…」
       renderStockSection();
       return;
     }
