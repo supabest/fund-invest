@@ -9,7 +9,7 @@
 const stripRefs = (s: string) => s.replace(/^\/\/\/ <reference .*$/gm, "");
 const rd = (f: string) =>
   stripRefs(Deno.readTextFileSync(f))
-    .replace(/^import\s[\s\S]*?from\s*["']\.\/[^"']+["'];?[ \t]*$/gm, "") // 跨文件 import（单行/多行/纯 type）
+    .replace(/^import\s[^;]*?from\s*["']\.\/[^"']+["'];?[ \t]*$/gm, "") // 跨文件 import（单行/多行/纯 type）；[^;] 防止外扩，不能吞到下一条 import
     .replace(/^import\s+["'][^"']+["'];?[ \t]*$/gm, "") // 副作用型 import（当前无，防御性）
     .replace(
       /^export\s+(interface|type|const|function|async\s+function)/gm,
