@@ -1227,7 +1227,7 @@ function sectorRowHtml(r, accCounts, pools){
   const pros = r.prosperity;
   const band = prosperityBand(pros);
   const prosHtml = ` · 景气 <em>${fmtProsperity(pros)}</em>${band ? `<span class="sector-pros-${band}">${band}</span>` : ''}`;
-  tip += '\n景气度=同花顺L2「' + escapeHtml(String(r.prosperity_src || '—')) + '」绝对基本面中位数跨行业百分位，仅展示、不参与行业分与排序。';
+  tip += '\n景气度=同花顺L2「' + String(r.prosperity_src || '—') + '」绝对基本面中位数跨行业百分位，仅展示、不参与行业分与排序。';
   const metrics = `乖离MA60 <em>${fmtRatioPct(m.dev60)}</em> · 20日 <em>${fmtRatioPct(m.m20)}</em> · 60日 <em>${fmtRatioPct(m.m60)}</em>`
     + ` · 52周分位 <em>${fmtPoints(m.pos52)}</em> · ΔM20 <em>${fmtPoints(m.dm20)}</em> · 量比 <em>${fmtVr(m.vr)}</em> · 行业分 <em>${fmtScoreVal(m.score)}</em>` + prosHtml
     + (m.accumulating ? ` · <span class="sector-acc">数据积累中(n=${m.barsN === null ? '—' : escapeHtml(String(m.barsN))})</span>` : '')

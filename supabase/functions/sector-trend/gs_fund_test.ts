@@ -7,7 +7,7 @@ import { parseFundTable, type GsFundTable } from "./gs_fund.ts";
 Deno.test("parseFundTable: 前缀匹配三列 + 同花顺路径拆 L1/L2 + 百分号/负值/空稳健", () => {
   const t: GsFundTable = {
     "股票代码": ["600519", "300750", "000001"],
-    "营业总收入(同比增长率)[20260930]": ["12.5", "-3.2", ""],
+    "营业总收入(同比增长率)[20260930]": ["12.5%", "-3.2", ""],
     "归属母公司股东的净利润-扣除非经常损益(同比增长率)[20260930]": ["8", "15.1", "-40"],
     "所属同花顺行业": ["食品饮料-白酒-白酒", "电力设备-电池-锂电池", "银行-国有大型银行-"],
   };
@@ -41,6 +41,7 @@ const fr = (revYoy: number | null, kcYoy: number | null, thsL2: string): FundRow
 Deno.test("fundMedian: 奇数取中、偶数取中间两值均值、空数组→NaN 由调用方兜", () => {
   assertEquals(fundMedian([3, 1, 2]), 2);
   assertEquals(fundMedian([4, 1, 2, 3]), 2.5);
+  assertEquals(Number.isNaN(fundMedian([])), true); // 标题声称的空调用契约，此前无断言承载
 });
 
 Deno.test("aggregateByThs: 中位数抗离群 + raw=0.5/0.5 合成 + 样本<5 不生成", () => {
@@ -57,8 +58,10 @@ Deno.test("aggregateByThs: 中位数抗离群 + raw=0.5/0.5 合成 + 样本<5 �
 Deno.test("aggregateByThs: rev/kc 一空一非空的记录仍计一个有效样本，双空记录剔除", () => {
   const rows = [fr(5, null, "芯片"), fr(6, null, "芯片"), fr(7, 7, "芯片"), fr(null, null, "芯片"), fr(8, 8, "芯片"), fr(9, 9, "芯片")];
   const m = aggregateByThs(rows);
-  assertEquals(m.get("芯片")!.n, 5); // 4 条里剔除 1 条双空 = 5（1 空 kc 计入）
-  assertEquals(m.get("芯片")!.raw, 0.5 * fundMedian([5, 6, 7, 8, 9]) + 0.5 * fundMedian([7, 8, 9]));
+  assertEquals(m.get("芯片")!.n, 5); // 6 条里剔除 1 条双空 = 5（1 空 kc 仍计入）
+  // 字面量而非复用 fundMedian：后者正是被测者，自引用会让「偶数取上中位」这类 off-by-one 双向共谋通过。
+  // rev 中位([5,6,7,8,9])=7、kc 中位([7,8,9])=8 → 0.5*7+0.5*8=7.5
+  assertEquals(m.get("芯片")!.raw, 7.5);
 });
 
 Deno.test("toProsperityScale: 跨行业百分位秩（最小≈低、最大≈高、单元素=50）", () => {
@@ -72,11 +75,11 @@ Deno.test("toProsperityScale: 跨行业百分位秩（最小≈低、最大≈�
 });
 
 // —— Task 3：同花顺 L2 ↔ canonical 归因映射 + buildProsperity 编排（spec 2026-10-03 §6）——
-import { expect } from "https://deno.land/std@0.224.0/expect/mod.ts";
 import { mapCanonicalToThs, attachCanonical, buildProsperity } from "./gs_fund.ts";
 
 Deno.test("mapCanonicalToThs: curated 优先于同名/子串", () => {
-  // CANON_TO_THS 至少含一条示例：券商→证券（以 Step1 实测为准）
+  // 本用例测的是「curated 优先于同名」这一优先级，不是生产映射：真实 102 个 canonical
+  // 里没有「券商」（用的是「证券」，由规则2 精确同名命中），故该条在生产中永不触发。
   assertEquals(mapCanonicalToThs("券商", new Set(["证券", "券商"])), "证券"); // curated 命中，即便同名也走 curated
 });
 Deno.test("mapCanonicalToThs: 精确同名", () => {
@@ -105,7 +108,6 @@ Deno.test("attachCanonical: 命中给 {prosperity,src}，未命中得 null 并�
 Deno.test("buildProsperity: 注入的 fetch 抛错 → 不 throw、byInd 全 null、warnings 有记录", async () => {
   const boom = async () => { throw new Error("GS 挂了"); };
   const res = await buildProsperity(boom, "KEY", ["券商"]);
-  expect; // 断言下方
   assertEquals(res.byInd.get("券商"), { prosperity: null, src: null });
   assertEquals(res.warnings.length >= 1, true);
   assertEquals(res.mapped, 0);

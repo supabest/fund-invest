@@ -41,6 +41,7 @@ const RESIDUAL_RES = [
   /\bfrom\s*["']\.\.?\//, // 任何 `from "./"` 行：单行 import、default import、多行收尾 `} from "./x";`
   /^\s*import\s+["']\.\.?\//, // 副作用型 `import "./x.ts";`（无 from）
   /\bimport\s*\(\s*["']\.\.?\//, // 动态 import / 类型位置 import("./x.ts").T（不经剥离正则）
+  /\bfrom\s*["'](https?:|jsr:|npm:|node:)/, // 远程/内置协议：单文件冷启动会联网拉模块，须显式批准
 ];
 function assertNoResidualImport(src: string) {
   const bad = src

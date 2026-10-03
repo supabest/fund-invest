@@ -55,7 +55,7 @@ const KLINE_PACING_MS = 300; // spec §3.2
 const UPSERT_CHUNK = 1000; // 与 stock-score/upsert 同粒度
 const KLINE_FLUSH_EVERY = 20; // 每 20 只代表 ETF 冲刷一次 sector_kline（防 wall-clock 截断丢整轮深拉成果）
 const BACKFILL_START = "2019-01-01"; // Task 3b T3b-1：历史翻页起点（spec §2.1/S2；评审 I-2，pos52/未来 label_stats 需多年历史）
-// 景气度展示子流程总预算，超时→全 null，绝不拖垮主链落库（gs_fund 最坏 3×90s+退避≈4.7min，
+// 景气度展示子流程总预算，超时→全 null，绝不拖垮主链落库（gs_fund 最坏 45s+2s+45s=92s，
 // 若宽表 endpoint 挂起而不抛，Edge wall-clock 截断会丢整晚落库——try/catch 覆盖不到的唯一失败模式）。
 const PROSPERITY_BUDGET_MS = 120_000;
 // 注：MIN_ROWS 快照守卫单一定义在 gs_etf.fetchSegments（编排层不重复声明，避免 bundle 重名）
@@ -663,12 +663,30 @@ export async function handle(
   try {
     if (mode === "ping") {
       const rows = await fetchRecentKline("sh512800", today, 5);
+      // spec §10：ping 兼探 GS 基本面宽表连通性/列名漂移。宽表列前缀内嵌报告期日期戳
+      // （REV_PREFIX/KC_PREFIX 冻结自线上探针），漂移只能靠比对返回的列名发现 ——
+      // 没有这个探测位，验证新端点契约的唯一办法就是跑整晚主链。
+      // 只回列名不回数据，失败消息过 safeGsMsg 脱敏；探测失败不改 ok（ping 语义仍是"函数活着"）。
+      const pingKey = Deno.env.get("GS_API_KEY") || "";
+      let fund: Record<string, unknown>;
+      try {
+        const t = pingKey
+          ? await fetchFundTable(pingKey)
+          : (() => { throw new Error("GS_API_KEY missing"); })();
+        fund = { ok: true, cols: Object.keys(t).slice(0, 8) };
+      } catch (e) {
+        fund = {
+          ok: false,
+          err: safeGsMsg(e instanceof Error ? e.message : String(e), pingKey),
+        };
+      }
       return Response.json({
         ok: true,
         mode,
         batch_date: today,
         bars: rows.length,
         last: rows[rows.length - 1],
+        fund_probe: fund,
       });
     }
     const key = Deno.env.get("GS_API_KEY") || "";
@@ -915,7 +933,9 @@ export async function handle(
         if (needStale && !prev) dropped.push(r.ind);
         const db = toDbRow(r, today, needStale);
         const p = prosperityByInd.get(r.ind);
-        db.prosperity = p?.prosperity ?? null;
+        // 精度口径对齐 engine round2（score/v/m/l/q 均两位小数）；否则 DB 落入 83.33333333333334
+        db.prosperity =
+          p?.prosperity == null ? null : Math.round(p.prosperity * 100) / 100;
         db.prosperity_src = p?.src ?? null;
         outRows.push(db);
         if (needStale && !prev) staleRows++; // 无昨日行可 copy ⇒ 当日行标 stale，绝不静默丢（C5）

@@ -632,8 +632,10 @@ const FUND_QUERY =
   "全部沪深A股的营业总收入同比增长率、扣非净利润同比增长率、所属同花顺行业";
 
 const FUND_BASE = "https://dgzt.guosen.com.cn/skills/agent/mcp/smart_stock_picking";
-const FUND_TIMEOUT_MS = 90_000;
-const FUND_ATTEMPTS = 3;
+// 预算算术：单次 45s + 退避 2s + 二次 45s = 92s < index.ts PROSPERITY_BUDGET_MS(120s)。
+// 旧的 90s×3 使任何需重试的情形必被 withBudget 丢弃 —— 花 3 倍配额、产出恒 null。
+const FUND_TIMEOUT_MS = 45_000;
+const FUND_ATTEMPTS = 2;
 // Step 1 线上探针实测列前缀（探针返回：营业总收入(同比增长率)[20260630] /
 // 归属母公司股东的净利润-扣除非经常损益(同比增长率)[20260630] / 所属同花顺行业）：
 const REV_PREFIX = "营业总收入(同比增长率)";
@@ -686,13 +688,21 @@ async function fetchFundTable(apiKey: string): Promise<GsFundTable> {
       const r = await fetch(`${FUND_BASE}?${qs}`, { signal: AbortSignal.timeout(FUND_TIMEOUT_MS) });
       if (!r.ok) throw new Error(`GS fund http ${r.status}`);
       const j = await r.json();
-      if (j?.result?.[0]?.code !== 0) throw new Error(`GS fund biz ${JSON.stringify(j?.result?.[0])}`);
+      // 业务码非 0 = 确定性失败（日限额 197006 / 鉴权失效等）⇒ 不重试，对齐 gs_etf.ts 既有纪律
+      if (j?.result?.[0]?.code !== 0) {
+        throw Object.assign(
+          new Error(`GS fund biz ${JSON.stringify(j?.result?.[0])}`),
+          { fatal: true },
+        );
+      }
       const table = j?.data?.[0]?.table as GsFundTable | undefined;
       if (!table?.[CODE_COL]) throw new Error("GS fund table missing 股票代码");
       return table;
     } catch (e) {
       // 网络 TypeError 的 message 可能内嵌含 apiKey 的 URL → 换成不含 URL 的通用信息
       lastErr = e instanceof TypeError ? new Error(`GS fund network error (attempt ${attempt + 1})`) : e;
+      // 确定性失败或末次尝试 ⇒ 直接跳出，不再空等退避（旧实现在抛错前多挂 6s）
+      if ((e as { fatal?: boolean }).fatal || attempt === FUND_ATTEMPTS - 1) break;
       await new Promise((res) => setTimeout(res, 2000 * (attempt + 1)));
     }
   }
@@ -819,7 +829,10 @@ async function buildProsperity(
     warnings.push(`景气度计算失败（不影响评分）: ${safeGsMsg(m, apiKey)}`);
     // scale 保持空 ⇒ 下面 attach 全 null
   }
-  const { byInd, unmapped } = attachCanonical(scale, canonicalInds);
+  const { byInd, unmapped: unmappedAll } = attachCanonical(scale, canonicalInds);
+  // scale 为空 = 取数/解析已失败（上一条 warning 已记录原因）。此时报「N 个行业未映射」
+  // 会把排障方向带偏到"映射表不全"，而真实原因是端点/配额 —— 故只在确有刻度时报告映射缺口。
+  const unmapped = scale.size === 0 ? [] : unmappedAll;
   let mapped = 0;
   for (const v of byInd.values()) if (v.prosperity !== null) mapped++;
   if (unmapped.length > 0) {
@@ -864,7 +877,7 @@ const KLINE_PACING_MS = 300; // spec §3.2
 const UPSERT_CHUNK = 1000; // 与 stock-score/upsert 同粒度
 const KLINE_FLUSH_EVERY = 20; // 每 20 只代表 ETF 冲刷一次 sector_kline（防 wall-clock 截断丢整轮深拉成果）
 const BACKFILL_START = "2019-01-01"; // Task 3b T3b-1：历史翻页起点（spec §2.1/S2；评审 I-2，pos52/未来 label_stats 需多年历史）
-// 景气度展示子流程总预算，超时→全 null，绝不拖垮主链落库（gs_fund 最坏 3×90s+退避≈4.7min，
+// 景气度展示子流程总预算，超时→全 null，绝不拖垮主链落库（gs_fund 最坏 45s+2s+45s=92s，
 // 若宽表 endpoint 挂起而不抛，Edge wall-clock 截断会丢整晚落库——try/catch 覆盖不到的唯一失败模式）。
 const PROSPERITY_BUDGET_MS = 120_000;
 // 注：MIN_ROWS 快照守卫单一定义在 gs_etf.fetchSegments（编排层不重复声明，避免 bundle 重名）
@@ -1472,12 +1485,30 @@ async function handle(
   try {
     if (mode === "ping") {
       const rows = await fetchRecentKline("sh512800", today, 5);
+      // spec §10：ping 兼探 GS 基本面宽表连通性/列名漂移。宽表列前缀内嵌报告期日期戳
+      // （REV_PREFIX/KC_PREFIX 冻结自线上探针），漂移只能靠比对返回的列名发现 ——
+      // 没有这个探测位，验证新端点契约的唯一办法就是跑整晚主链。
+      // 只回列名不回数据，失败消息过 safeGsMsg 脱敏；探测失败不改 ok（ping 语义仍是"函数活着"）。
+      const pingKey = Deno.env.get("GS_API_KEY") || "";
+      let fund: Record<string, unknown>;
+      try {
+        const t = pingKey
+          ? await fetchFundTable(pingKey)
+          : (() => { throw new Error("GS_API_KEY missing"); })();
+        fund = { ok: true, cols: Object.keys(t).slice(0, 8) };
+      } catch (e) {
+        fund = {
+          ok: false,
+          err: safeGsMsg(e instanceof Error ? e.message : String(e), pingKey),
+        };
+      }
       return Response.json({
         ok: true,
         mode,
         batch_date: today,
         bars: rows.length,
         last: rows[rows.length - 1],
+        fund_probe: fund,
       });
     }
     const key = Deno.env.get("GS_API_KEY") || "";
@@ -1724,7 +1755,9 @@ async function handle(
         if (needStale && !prev) dropped.push(r.ind);
         const db = toDbRow(r, today, needStale);
         const p = prosperityByInd.get(r.ind);
-        db.prosperity = p?.prosperity ?? null;
+        // 精度口径对齐 engine round2（score/v/m/l/q 均两位小数）；否则 DB 落入 83.33333333333334
+        db.prosperity =
+          p?.prosperity == null ? null : Math.round(p.prosperity * 100) / 100;
         db.prosperity_src = p?.src ?? null;
         outRows.push(db);
         if (needStale && !prev) staleRows++; // 无昨日行可 copy ⇒ 当日行标 stale，绝不静默丢（C5）
