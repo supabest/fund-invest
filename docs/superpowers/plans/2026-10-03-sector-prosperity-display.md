@@ -437,8 +437,9 @@ Deno.test("buildProsperity: 注入的 fetch 抛错 → 不 throw、byInd 全 nul
 Deno.test("buildProsperity: 正常链路聚合映射（注入合成宽表）", async () => {
   const fake = async () => ({
     "股票代码": Array.from({ length: 6 }, (_, i) => `c${i}`),
-    "营业总收入同比增长率[20260930]": [10, 20, 30, 40, 50, 60],
-    "扣非净利润同比增长率[20260930]": [10, 20, 30, 40, 50, 60],
+    // 列名必须匹配 Task1 探针坐实的真实前缀（parseFundTable 冻结契约）
+    "营业总收入(同比增长率)[20260930]": [10, 20, 30, 40, 50, 60],
+    "归属母公司股东的净利润-扣除非经常损益(同比增长率)[20260930]": [10, 20, 30, 40, 50, 60],
     "所属同花顺行业": Array(6).fill("非银金融-证券-证券"),
   });
   const res = await buildProsperity(fake, "KEY", ["券商"]);
