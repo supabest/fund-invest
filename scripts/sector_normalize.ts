@@ -15,11 +15,17 @@ const MERGE: Record<string, string> = {
   科创信息: "信息技术",
   创业板新能源: "新能源",
   科创新能源: "新能源",
-  // R1 用户裁定（2026-10-01）：仅此三组稳手合并，其余维持分列
+  // R1 用户裁定（2026-10-01）：稳手合并三组。（"其余维持分列"中的龙头族已由 2026-10-03 选B推翻，见下）
   有色金属: "有色",
   有色矿业: "有色",
   软件开发: "软件",
   锂电池: "电池",
+  // 2026-10-03 用户选 B 推翻 R1「龙头族维持分列」：龙头族统一并入基础行业，处理与既有"军工龙头"一致。
+  // 注：消费电子仍维持分列（R1 该部分未撤销）。
+  光伏龙头: "光伏",
+  半导体龙头: "半导体",
+  消费龙头: "消费",
+  科技龙头: "科技",
 };
 const FUND_PREFIXES = [
   "华泰柏瑞",
@@ -61,6 +67,13 @@ const FUND_PREFIXES = [
   "贝莱德",
   "芝商所",
 ];
+// 纯字母数字主题（剥 [A-Za-z0-9] 会落空 → 旧 `|| s` 兜底吐回含基金公司全名 = 产品名污染根因，
+// 2026-10-03 修）。显式归入语义行业，杜绝泄漏。规则权威 spec §2.2。
+const THEME_MERGE: Record<string, string> = {
+  "5G": "通信",
+  "TMT": "科技",
+  "TMT50": "科技",
+};
 export function extractInd(etfName: string): string {
   let s = etfName;
   for (const p of FUND_PREFIXES) {
@@ -69,7 +82,11 @@ export function extractInd(etfName: string): string {
       break;
     }
   }
-  return normalizeInd(s.split(/ETF/)[0].replace(/[A-Za-z0-9·\-—]/g, "")) || s;
+  const head = s.split(/ETF/)[0]; // 丢弃 ETF 及其后的尾部基金公司名
+  if (THEME_MERGE[head]) return THEME_MERGE[head];
+  const stripped = head.replace(/[A-Za-z0-9·\-—]/g, "");
+  // 兜底由 `|| s` 改为 `|| head`：剥空时顶多回不含基金公司的 head，绝不再泄漏"博时/招商"全名
+  return stripped ? normalizeInd(stripped) : head;
 }
 export function normalizeInd(raw: string): string {
   return MERGE[raw] ?? raw;
@@ -93,6 +110,7 @@ const STYLE_EXCLUDED = new Set([
   "一带一路",
   "成渝经济圈",
   "上海国企", // 纯区域/区域+所有权，无行业后缀
+  "央企结构调整", // 2026-10-03 判定：纯政策主题、无行业内容，与"央企"同类
 ]);
 export function isStyleExcluded(canonical: string): boolean {
   return STYLE_EXCLUDED.has(canonical);

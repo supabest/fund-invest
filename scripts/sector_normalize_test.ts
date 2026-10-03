@@ -46,8 +46,9 @@ Deno.test("normalizeInd: R1 有色/软件/电池族合并", () => {
 Deno.test("normalizeInd: R1 维持分列反向钉", () => {
   assertEquals(normalizeInd("科创芯片"), "科创芯片"); // 科创芯片/科创芯片设计维持分列
   assertEquals(normalizeInd("科创芯片设计"), "科创芯片设计");
-  assertEquals(normalizeInd("消费电子"), "消费电子"); // 消费电子/消费龙头与消费维持分列
-  assertEquals(normalizeInd("消费龙头"), "消费龙头");
+  assertEquals(normalizeInd("消费电子"), "消费电子"); // 消费电子维持分列
+  // 2026-10-03 用户选 B 推翻 R1「龙头族维持分列」：消费龙头并入消费（见下方专项用例）。
+  assertEquals(normalizeInd("消费龙头"), "消费");
   assertEquals(normalizeInd("医药"), "医药"); // 医疗族维持分列
   assertEquals(normalizeInd("医疗创新"), "医疗创新");
   assertEquals(normalizeInd("医疗器械"), "医疗器械");
@@ -66,4 +67,24 @@ Deno.test("isStyleExcluded: R2 纯风格剔除 vs 组合主题保留", () => {
   assertEquals(isStyleExcluded("央企能源"), false); // 风格前缀+行业后缀 → 保留
   assertEquals(isStyleExcluded("创业板算力"), false);
   assertEquals(isStyleExcluded("科创人工智能"), false);
+});
+// 2026-10-03 修复：纯字母数字主题曾被 extractInd 的 `|| s` 兜底吐回含基金公司全名（产品名污染）。
+Deno.test("extractInd: 字母数字主题归入语义行业且不再泄漏基金公司名", () => {
+  assertEquals(extractInd("5GETF博时"), "通信");
+  assertEquals(extractInd("TMTETF景顺"), "科技");
+  assertEquals(extractInd("TMT50ETF招商"), "科技");
+  // 未知字母主题：兜底至多回剥掉 ETF 及尾部基金公司的 head，绝不带出"博时/招商"等
+  assertEquals(extractInd("XRQETF华夏"), "XRQ");
+});
+// 2026-10-03 用户选 B 推翻 R1：龙头族统一并入基础行业（军工龙头为 R1 前既有规则，本次补齐其余四个）
+Deno.test("normalizeInd: 龙头族并入基础行业（2026-10-03 选B）", () => {
+  assertEquals(normalizeInd("光伏龙头"), "光伏");
+  assertEquals(normalizeInd("半导体龙头"), "半导体");
+  assertEquals(normalizeInd("消费龙头"), "消费");
+  assertEquals(normalizeInd("科技龙头"), "科技");
+  assertEquals(normalizeInd("军工龙头"), "军工"); // 既有规则不动
+});
+// 2026-10-03 判定：央企结构调整属纯政策主题、无行业内容，与"央企"同类剔除
+Deno.test("isStyleExcluded: 央企结构调整剔除", () => {
+  assertEquals(isStyleExcluded("央企结构调整"), true);
 });
