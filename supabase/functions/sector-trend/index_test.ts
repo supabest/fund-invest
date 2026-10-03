@@ -154,6 +154,8 @@ Deno.test("toDbRow: 24 引擎字段 → 25 列 DDL 形状；barsN → bars_n 原
     theme: "机器人",
     stale: false,
     bars_n: 133,
+    prosperity: null,
+    prosperity_src: null,
   });
   assertEquals(r.bars_n, 133);
   assertEquals("barsN" in r, false); // 落库一律 snake_case
@@ -216,7 +218,8 @@ Deno.test("shapeStaleRow: 换 batch_date + stale=true，其余（含 labels）�
   assertEquals(s.m60, -0.1);
   assertEquals(s.pos52, null);
   assertEquals(s.bars_n, 640); // stale copy 整行搬，bars_n 原样沿用昨日（不重算）
-  assertEquals(Object.keys(s).length, 25);
+  // Task4：prosperity/prosperity_src 随 prev 整行搬（列数 25→27）
+  assertEquals(Object.keys(s).length, 27);
 });
 
 Deno.test("shapeStaleRow: 不改传入对象（纯函数）", () => {
@@ -552,11 +555,19 @@ function runReq(): Request {
   });
 }
 
-function gsSpy(box: { n: number }): { fetchSegments: () => Promise<SegSnapshot> } {
+function gsSpy(box: { n: number }): {
+  fetchSegments: () => Promise<SegSnapshot>;
+  fetchFundTable: () => Promise<never>;
+} {
   return {
     fetchSegments: async () => {
       box.n++;
       return SNAP;
+    },
+    // Ruling E：主链用例默认不提供景气宽表 —— 抛错即证明 ③.5 不影响主链
+    // （buildProsperity 内部已兜住，绝不牵累 score/落库）。
+    fetchFundTable: async () => {
+      throw new Error("fund disabled in test");
     },
   };
 }
@@ -680,6 +691,119 @@ Deno.test("I-1 added>0 → 不 skip；I-2 写库载荷 bars_n 等于引擎入参
     assertEquals(row0.stale, false);
     // 新 bar 确实先落 sector_kline
     assertEquals(s.writes.some((w) => w.table === "sector_kline"), true);
+  } finally {
+    s.restore();
+    Deno.env.delete("SECTOR_TREND_TOKEN");
+    Deno.env.delete("GS_API_KEY");
+    Deno.env.delete("SUPABASE_URL");
+  }
+});
+
+// ============ Task 4 ③.5 景气度子流程隔离/命中（spec 2026-10-03 §4）============
+Deno.test("③.5 景气度隔离：fetchFundTable 抛错 → 主链照常、score 落库不变、prosperity=null", async () => {
+  Deno.env.set("SECTOR_TREND_TOKEN", TOKEN);
+  Deno.env.set("GS_API_KEY", GS_KEY);
+  Deno.env.set("SUPABASE_URL", REST_BASE);
+  const s = stubNetwork({
+    tail: [tailRow(YDAY)],
+    tencent: [barRow(YDAY), barRow(TODAY)], // 真实交易日 → 走到 ⑤ 落库
+    dailyLatest: [{ batch_date: YDAY }],
+  });
+  const spy = { n: 0 };
+  const deps = {
+    fetchSegments: async () => {
+      spy.n++;
+      return SNAP;
+    },
+    fetchFundTable: async () => {
+      throw new Error("GS fund boom");
+    },
+  };
+  try {
+    const j = await (await handle(runReq(), deps)).json() as Record<
+      string,
+      unknown
+    >;
+    assertEquals(spy.n, 1, "GS 截面仍被调用（景气失败不牵累主链）");
+    const daily = s.writes.find((w) => w.table === "sector_rotation_daily")!;
+    const row0 = daily.body[0] as Record<string, unknown>;
+    assertEquals(row0.prosperity, null);
+    assertEquals(row0.prosperity_src, null);
+    assertEquals(
+      typeof row0.score === "number" || row0.score === null,
+      true,
+      "score 语义不受景气影响",
+    );
+    assertEquals(
+      (j.warnings as string[]).some((w) => w.includes("景气度计算失败")),
+      true,
+    );
+  } finally {
+    s.restore();
+    Deno.env.delete("SECTOR_TREND_TOKEN");
+    Deno.env.delete("GS_API_KEY");
+    Deno.env.delete("SUPABASE_URL");
+  }
+});
+
+Deno.test("③.5 景气度命中：可映射行业落 prosperity(有限数值) + prosperity_src(非空串)", async () => {
+  Deno.env.set("SECTOR_TREND_TOKEN", TOKEN);
+  Deno.env.set("GS_API_KEY", GS_KEY);
+  Deno.env.set("SUPABASE_URL", REST_BASE);
+  const s = stubNetwork({
+    tail: [tailRow(YDAY)],
+    tencent: [barRow(YDAY), barRow(TODAY)],
+    dailyLatest: [{ batch_date: YDAY }],
+  });
+  // 测试宇宙唯一行业 = 「银行」（MAP_ROWS 512800，落 daily.body[0]）。
+  // Ruling D：用 Step1 线上实测真实前缀列名（parseFundTable 前缀匹配，日期后缀任意）；
+  // 同花顺路径 L1-L2-L3 取 L2=「银行」，与 canonical「银行」在 Task3 规则下【精确同名】命中
+  // （aggregateByThs 需 n≥5 有效样本 → 6 行全数值满足；toProsperityScale 单元素=50 → 有限数值）。
+  // 故本用例是确定性的：prosperity 必为有限数值、prosperity_src 必为「银行」，非真空断言。
+  const deps = {
+    fetchSegments: async () => SNAP,
+    fetchFundTable: async () => ({
+      "股票代码": Array.from({ length: 6 }, (_, i) => `c${i}`),
+      "营业总收入(同比增长率)[20260630]": [10, 20, 30, 40, 50, 60],
+      "归属母公司股东的净利润-扣除非经常损益(同比增长率)[20260630]": [
+        10,
+        20,
+        30,
+        40,
+        50,
+        60,
+      ],
+      "所属同花顺行业": Array(6).fill("银行-银行-银行"),
+    }),
+  };
+  try {
+    const j = await (await handle(runReq(), deps)).json() as Record<
+      string,
+      unknown
+    >;
+    const daily = s.writes.find((w) => w.table === "sector_rotation_daily")!;
+    const row0 = daily.body[0] as Record<string, unknown>;
+    assertEquals(row0.ind, "银行");
+    assertEquals(
+      typeof row0.prosperity === "number" &&
+        Number.isFinite(row0.prosperity as number),
+      true,
+      `prosperity 应为有限数值，实为 ${String(row0.prosperity)}`,
+    );
+    assertEquals(
+      typeof row0.prosperity_src === "string" &&
+        (row0.prosperity_src as string).length > 0,
+      true,
+      `prosperity_src 应为非空串，实为 ${String(row0.prosperity_src)}`,
+    );
+    assertEquals(row0.prosperity_src, "银行", "精确同名命中 → src=银行");
+    // 命中计数透出，且未污染 score
+    assertEquals(j.prosperity_mapped, 1, "唯一行业命中 → mapped=1");
+    assertEquals(
+      typeof row0.score === "number" || row0.score === null,
+      true,
+      "score 语义不受景气影响",
+    );
   } finally {
     s.restore();
     Deno.env.delete("SECTOR_TREND_TOKEN");

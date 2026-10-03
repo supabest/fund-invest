@@ -32,7 +32,17 @@ import {
   sleep,
   toSymbol,
 } from "./tencent.ts";
-import { type EtfSnapRow, type SegSnapshot, fetchSegments } from "./gs_etf.ts";
+import {
+  type EtfSnapRow,
+  type SegSnapshot,
+  fetchSegments,
+  safeGsMsg,
+} from "./gs_etf.ts";
+import {
+  buildProsperity,
+  fetchFundTable,
+  type ProsperityResult,
+} from "./gs_fund.ts";
 
 // —— 常量 ——
 export const BARS_FULL = 250; // spec §5 标签门槛 = C3 accumulating 分界
@@ -81,6 +91,8 @@ export interface DailyRow {
   theme: string | null;
   stale: boolean;
   bars_n: number; // 代表ETF当日可用 K 线根数（终审 I-2；engine SectorRow.barsN 原样落库）
+  prosperity: number | null; // 行业景气度展示（0..100 或 null）；纯展示，绝不进 score
+  prosperity_src: string | null; // 归因同花顺 L2 行业名或 null（未命中）
 }
 
 // spec §4.4 + brief Step 3 字典逐字；末尾 2 个键是 Task 1b 归并裁定（R1 有色金属→有色）后的补偿别名，
@@ -155,6 +167,8 @@ export function toDbRow(
     theme: r.theme,
     stale,
     bars_n: r.barsN, // 不 r4 取整（计数不是金额）、不兜 null（0 根也是事实）
+    prosperity: null, // 由编排层 ③.5 在落库前按 ind 附着（stale 行走 shapeStaleRow 继承昨日值）
+    prosperity_src: null,
   };
 }
 
@@ -596,9 +610,12 @@ async function readLatestBatch(): Promise<string | null> {
 // 只能靠「被注入的截面函数到底有没有被调用」来硬证明，不靠读注释散文。
 export interface NightlyDeps {
   fetchSegments: (apiKey: string) => Promise<SegSnapshot>;
+  fetchFundTable: (
+    apiKey: string,
+  ) => Promise<import("./gs_fund.ts").GsFundTable>;
 }
 
-const REAL_DEPS: NightlyDeps = { fetchSegments };
+const REAL_DEPS: NightlyDeps = { fetchSegments, fetchFundTable };
 
 // 编排主体 = 原 Deno.serve 回调逐字提出为具名函数（终审 I-1 要求可调用 + 可注入），逻辑一字未改。
 // 注册守卫仅针对单测场景（index_test.ts 先设 SECTOR_TREND_DISABLE_SERVE 再动态 import）；
@@ -784,6 +801,29 @@ export async function handle(
     }
     const qAlive = [...snap.values()].some((r) => r.hay !== null);
 
+    // ③.5 景气度（隔离子流程，spec 2026-10-03 §4）：任何异常只记 warnings，绝不中断主链。
+    //   buildProsperity 内部已对 fetchFundTable 兜底（失败 → 全 null + warning），外层 try/catch 为双保险；
+    //   gsError / qAlive 判定不依赖景气；传入的 canonical 名单 = 本轮将写库的全部行业（selInds）。
+    let prosperityByInd = new Map<
+      string,
+      { prosperity: number | null; src: string | null }
+    >();
+    try {
+      const pres: ProsperityResult = await buildProsperity(
+        deps.fetchFundTable,
+        key,
+        [...selInds],
+      );
+      prosperityByInd = pres.byInd;
+      warnParts.push(pres.warnings);
+    } catch (e) { // 理论不达（buildProsperity 已兜）；双保险，仍绝不抛出中断主链
+      warnParts.push([
+        `景气度子流程异常（忽略）: ${
+          safeGsMsg(e instanceof Error ? e.message : String(e), key)
+        }`,
+      ]);
+    }
+
     // ④ prevMp（C4）+ 昨日整批（C5）
     const prevRows = await readPrevBatch(today);
     const prevMp = new Map<string, number>();
@@ -832,7 +872,11 @@ export async function handle(
         staleRows++;
       } else {
         if (needStale && !prev) dropped.push(r.ind);
-        outRows.push(toDbRow(r, today, needStale));
+        const db = toDbRow(r, today, needStale);
+        const p = prosperityByInd.get(r.ind);
+        db.prosperity = p?.prosperity ?? null;
+        db.prosperity_src = p?.src ?? null;
+        outRows.push(db);
         if (needStale && !prev) staleRows++; // 无昨日行可 copy ⇒ 当日行标 stale，绝不静默丢（C5）
       }
     }
@@ -898,6 +942,9 @@ export async function handle(
         stale_rows: staleRows,
         gs_rows: snap.size,
         gs_offmap: offmapCodes.length,
+        prosperity_mapped: [...prosperityByInd.values()].filter((v) =>
+          v.prosperity !== null
+        ).length,
         prev_batch_date: prevRows[0]?.batch_date ?? null,
         error: gsError || undefined,
         warnings: aggregateWarnings(warnParts),
@@ -926,6 +973,9 @@ export async function handle(
       kline_failed: kn.failed.length,
       gs_rows: snap.size,
       gs_offmap: offmapCodes.length,
+      prosperity_mapped: [...prosperityByInd.values()].filter((v) =>
+        v.prosperity !== null
+      ).length,
       truncated,
       q_alive: qAlive,
       q_resurrected: isQResurrected(prevRows, qAlive),
