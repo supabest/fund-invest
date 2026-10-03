@@ -1426,7 +1426,7 @@ interface NightlyDeps {
   fetchSegments: (apiKey: string) => Promise<SegSnapshot>;
   fetchFundTable: (
     apiKey: string,
-  ) => Promise<import("./gs_fund.ts").GsFundTable>;
+  ) => Promise<GsFundTable>;
   // ③.5 超时预算覆盖（单测注入极小值验证护栏；缺省走 PROSPERITY_BUDGET_MS）
   prosperityBudgetMs?: number;
 }
