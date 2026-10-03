@@ -137,7 +137,8 @@ export function toProsperityScale(raws: Map<string, ThsRaw>): Map<string, number
 }
 
 // —— Task 3：同花顺 L2 ↔ canonical 归因映射 + 顶层编排（spec 2026-10-03 §6）——
-import { safeGsMsg } from "./gs_etf.ts"; // bundle 内既有导出，复用脉敏
+// safeGsMsg 为 bundle 内既有导出，复用其 key 脱敏能力（注释放独立行：build.ts 的 import 剥离正则要求 import 语句行尾无内容）
+import { safeGsMsg } from "./gs_etf.ts";
 
 // curated 主表：由 Task3 Step1 枚举真实数据填充（宁缺毋滥：只钉「名称不一致但同一行业」的宽基）。
 // 每个 value 必须是 ref-l2-full.txt 首列存在的同花顺 L2 名；主题/政策/宽基模糊者一律不钉（运行时→null）。
