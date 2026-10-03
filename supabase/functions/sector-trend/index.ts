@@ -2,6 +2,7 @@
 // sector-trend —— 行业ETF板块轮动 nightly 编排（brief Step 3；结构严格仿 stock-score/index.ts）
 // 规则权威: docs/superpowers/specs/2026-09-30-sector-rotation-design.md §3（数据源纪律）§6（nightly 流程）
 // 内核（指标/状态/标签/renorm）全部在 engine.ts（Task 2 冻结，本文件一字不改），此处只做数据接入与落库。
+// nightly 流程：① 宇宙 → ② 腾讯K线增量 → ②.5 非交易日守卫 → ③ GS 截面 → ③.5 景气度（展示隔离，不进 score）→ ④ prevMp/昨日批 → ⑤ 组装→引擎→upsert → ⑥ Q 复活探测
 //
 // 控制者裁决落点：
 //   C1 宇宙只读：nightly 仅处理 sector_etf_map 中 is_rep=true 的既有代表 ETF，不做行业归一，
@@ -17,7 +18,8 @@
 //   I-1 非交易日守卫（tradingDayGuard + handle 内 ②后③前）：全宇宙 kline_added===0 && kline_failed===0
 //       ⇒ 判非交易日 ⇒ 不 mint batch_date、不写任何库，保留上一真实批次为最新（提前返回顺带省整晚 GS 配额）。
 //   I-2 bars_n 落库：SectorRow.barsN 原样写入 sector_rotation_daily.bars_n（免歧义区分伪 0 与真实平盘 0）。
-//       engine.ts 一字不改；sector_rotation_daily 列数 24→25（scripts/migrate_sector_rotation.sql）。
+//       engine.ts 一字不改；sector_rotation_daily 列数 24→25（终审 I-2 增 bars_n，scripts/migrate_sector_rotation.sql），
+//       现 27 列（scripts/migrate_sector_prosperity.sql 增 prosperity/prosperity_src）。
 import {
   type Bar,
   computeSectorRows,
@@ -41,7 +43,6 @@ import {
 import {
   buildProsperity,
   fetchFundTable,
-  type ProsperityResult,
 } from "./gs_fund.ts";
 
 // —— 常量 ——
@@ -53,6 +54,9 @@ const KLINE_PACING_MS = 300; // spec §3.2
 const UPSERT_CHUNK = 1000; // 与 stock-score/upsert 同粒度
 const KLINE_FLUSH_EVERY = 20; // 每 20 只代表 ETF 冲刷一次 sector_kline（防 wall-clock 截断丢整轮深拉成果）
 const BACKFILL_START = "2019-01-01"; // Task 3b T3b-1：历史翻页起点（spec §2.1/S2；评审 I-2，pos52/未来 label_stats 需多年历史）
+// 景气度展示子流程总预算，超时→全 null，绝不拖垮主链落库（gs_fund 最坏 3×90s+退避≈4.7min，
+// 若宽表 endpoint 挂起而不抛，Edge wall-clock 截断会丢整晚落库——try/catch 覆盖不到的唯一失败模式）。
+const PROSPERITY_BUDGET_MS = 120_000;
 // 注：MIN_ROWS 快照守卫单一定义在 gs_etf.fetchSegments（编排层不重复声明，避免 bundle 重名）
 
 // —— 类型 ——
@@ -64,7 +68,7 @@ export interface MapRow {
   is_rep: boolean;
 }
 
-// sector_rotation_daily 的 25 列（scripts/migrate_sector_rotation.sql 实列名；bars_n 为终审 I-2 新增）
+// sector_rotation_daily 的 27 列（scripts/migrate_sector_prosperity.sql 增 prosperity/prosperity_src）—— 实列名，bars_n 为终审 I-2 新增
 export interface DailyRow {
   batch_date: string;
   ind: string;
@@ -135,7 +139,7 @@ const r4 = (
     ? null
     : Math.round(x * 10000) / 10000);
 
-// SectorRow → DB 行（24 引擎字段 → 25 列；barsN → bars_n，终审 I-2）
+// SectorRow → DB 行：24 引擎字段 → 27 列（scripts/migrate_sector_prosperity.sql 增 prosperity/prosperity_src）；barsN → bars_n，终审 I-2
 export function toDbRow(
   r: SectorRow,
   batchDate: string,
@@ -613,9 +617,31 @@ export interface NightlyDeps {
   fetchFundTable: (
     apiKey: string,
   ) => Promise<import("./gs_fund.ts").GsFundTable>;
+  // ③.5 超时预算覆盖（单测注入极小值验证护栏；缺省走 PROSPERITY_BUDGET_MS）
+  prosperityBudgetMs?: number;
 }
 
 const REAL_DEPS: NightlyDeps = { fetchSegments, fetchFundTable };
+
+// ③.5 超时护栏：给在途 promise 套一个总预算，超时则 resolve {ok:false}（Promise.race）。
+// 局部 timer helper（不 import gs_fund）；无论命中/超时都 clearTimeout，避免泄漏定时器 op。
+// 超时后在途 buildProsperity 被丢弃（其结果无用，绝不 await）。
+async function withBudget<T>(
+  p: Promise<T>,
+  budgetMs: number,
+): Promise<{ ok: true; value: T } | { ok: false }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      p.then((value) => ({ ok: true as const, value })),
+      new Promise<{ ok: false }>((resolve) => {
+        timer = setTimeout(() => resolve({ ok: false }), budgetMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 // 编排主体 = 原 Deno.serve 回调逐字提出为具名函数（终审 I-1 要求可调用 + 可注入），逻辑一字未改。
 // 注册守卫仅针对单测场景（index_test.ts 先设 SECTOR_TREND_DISABLE_SERVE 再动态 import）；
@@ -801,22 +827,36 @@ export async function handle(
     }
     const qAlive = [...snap.values()].some((r) => r.hay !== null);
 
-    // ③.5 景气度（隔离子流程，spec 2026-10-03 §4）：任何异常只记 warnings，绝不中断主链。
+    // ③.5 景气度（隔离子流程，spec 2026-10-03 §4）：任何异常/超时只记 warnings，继不中断主链。
     //   buildProsperity 内部已对 fetchFundTable 兜底（失败 → 全 null + warning），外层 try/catch 为双保险；
+    //   另加 withBudget 总预算护栏：宽表 endpoint 挂起而不抛时，主链至多等 prosperityBudgetMs → 全 null，照常落库。
     //   gsError / qAlive 判定不依赖景气；传入的 canonical 名单 = 本轮将写库的全部行业（selInds）。
     let prosperityByInd = new Map<
       string,
       { prosperity: number | null; src: string | null }
     >();
+    let prosperityMapped = 0;
+    const budgetMs = deps.prosperityBudgetMs ?? PROSPERITY_BUDGET_MS;
     try {
-      const pres: ProsperityResult = await buildProsperity(
+      const presP = buildProsperity(
         deps.fetchFundTable,
         key,
         [...selInds],
       );
-      prosperityByInd = pres.byInd;
-      warnParts.push(pres.warnings);
-    } catch (e) { // 理论不达（buildProsperity 已兜）；双保险，仍绝不抛出中断主链
+      presP.catch(() => {}); // 超时丢弃在途 promise 时吞掉其潜在 rejection，避免 unhandledrejection
+      const raced = await withBudget(presP, budgetMs);
+      if (!raced.ok) { // 超时：景气度视为不可用（空 map ⇒ 全行 null），主链照常落库
+        prosperityByInd = new Map();
+        prosperityMapped = 0;
+        warnParts.push([`景气度子流程超时（忽略）`]);
+      } else {
+        prosperityByInd = raced.value.byInd;
+        prosperityMapped = raced.value.mapped;
+        warnParts.push(raced.value.warnings);
+      }
+    } catch (e) { // 理论不达（buildProsperity 已兜）；双保险，仍继绝不抛出中断主链
+      prosperityByInd = new Map();
+      prosperityMapped = 0;
       warnParts.push([
         `景气度子流程异常（忽略）: ${
           safeGsMsg(e instanceof Error ? e.message : String(e), key)
@@ -942,9 +982,7 @@ export async function handle(
         stale_rows: staleRows,
         gs_rows: snap.size,
         gs_offmap: offmapCodes.length,
-        prosperity_mapped: [...prosperityByInd.values()].filter((v) =>
-          v.prosperity !== null
-        ).length,
+        prosperity_mapped: prosperityMapped,
         prev_batch_date: prevRows[0]?.batch_date ?? null,
         error: gsError || undefined,
         warnings: aggregateWarnings(warnParts),
@@ -973,9 +1011,7 @@ export async function handle(
       kline_failed: kn.failed.length,
       gs_rows: snap.size,
       gs_offmap: offmapCodes.length,
-      prosperity_mapped: [...prosperityByInd.values()].filter((v) =>
-        v.prosperity !== null
-      ).length,
+      prosperity_mapped: prosperityMapped,
       truncated,
       q_alive: qAlive,
       q_resurrected: isQResurrected(prevRows, qAlive),

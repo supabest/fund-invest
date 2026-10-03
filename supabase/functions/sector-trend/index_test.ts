@@ -457,6 +457,16 @@ const TOKEN = "test-token";
 const GS_KEY = "FAKE_KEY_FOR_TEST_ONLY";
 const REST_BASE = "https://fake.supabase.co";
 
+// 「景气永不进 score」可执行回归锁：测试宇宙唯一行业=银行（MAP_ROWS 512800 → daily.body[0]），
+// 在既有 fixture（SNAP: 512800 {amt:99,tem:3,r60:1.5,sharpe:60,hay:null}；bars=[tailRow(YDAY) close1.25,
+// barRow(TODAY) close1.25]；prevMp 无→null）下 score 为确定值，与景气成功/失败/超时三者完全无关。
+// 推导（engine.computeSectorRows + renorm WQ35/WV30/WM25/WL10）：
+//   单 ETF 池 → pctRank 唯一值=50 ⇒ r60Rank=sharpeRank=amtRank=50；
+//   v=V_MAP[tem=3]=60；m=renorm([[50,.6],[50,.4]])=50；l=amtRank=50；hay=null ⇒ qAlive=false ⇒ Q 腿剔除；
+//   score=renorm([[60,WV30],[50,WM25],[50,WL10]])=(1800+1250+500)/(30+25+10)=3550/65=54.61538…
+//   engine round2 → 54.62（toDbRow 原样透传 r.score）。已用真实 engine 跑通核对（score=54.62）。
+const EXPECTED_SCORE = 54.62;
+
 const barRow = (d: string) => [d, "1.20", "1.25", "1.26", "1.19", "1000"]; // [date,open,close,high,low,vol]
 const tailRow = (d: string) => ({
   trade_date: d,
@@ -729,11 +739,8 @@ Deno.test("③.5 景气度隔离：fetchFundTable 抛错 → 主链照常、scor
     const row0 = daily.body[0] as Record<string, unknown>;
     assertEquals(row0.prosperity, null);
     assertEquals(row0.prosperity_src, null);
-    assertEquals(
-      typeof row0.score === "number" || row0.score === null,
-      true,
-      "score 语义不受景气影响",
-    );
+    // 回归锁：景气 fetch 抛错 → score 逐值锁定，与命中/超时用例同值（证明景气永不进 score）
+    assertEquals(row0.score, EXPECTED_SCORE, "score 不受景气影响（逐值）");
     assertEquals(
       (j.warnings as string[]).some((w) => w.includes("景气度计算失败")),
       true,
@@ -799,10 +806,58 @@ Deno.test("③.5 景气度命中：可映射行业落 prosperity(有限数值) +
     assertEquals(row0.prosperity_src, "银行", "精确同名命中 → src=银行");
     // 命中计数透出，且未污染 score
     assertEquals(j.prosperity_mapped, 1, "唯一行业命中 → mapped=1");
+    // 回归锁：景气命中 → score 逐值锁定，与失败/超时用例同值（证明景气永不进 score）
+    assertEquals(row0.score, EXPECTED_SCORE, "score 不受景气影响（逐值）");
+  } finally {
+    s.restore();
+    Deno.env.delete("SECTOR_TREND_TOKEN");
+    Deno.env.delete("GS_API_KEY");
+    Deno.env.delete("SUPABASE_URL");
+  }
+});
+
+// ============ Task 4 FIX ROUND 1 硬化：③.5 超时护栏（availability）============
+Deno.test("③.5 超时护栏：fetchFundTable 永不 settle → handle 仍在预算内返回、照常落库、prosperity=null、score 不变、警告含'超时'", async () => {
+  Deno.env.set("SECTOR_TREND_TOKEN", TOKEN);
+  Deno.env.set("GS_API_KEY", GS_KEY);
+  Deno.env.set("SUPABASE_URL", REST_BASE);
+  const s = stubNetwork({
+    tail: [tailRow(YDAY)],
+    tencent: [barRow(YDAY), barRow(TODAY)], // 真实交易日 → 走到 ⑤ 落库
+    dailyLatest: [{ batch_date: YDAY }],
+  });
+  // 模拟 GS 宽表 endpoint 挂起而不抛（try/catch 唯一覆盖不到的失败模式）；
+  // 注入 30ms 极小预算（prosperityBudgetMs）→ 护栏数十毫秒内触发，绝不真等 120s。
+  const deps = {
+    fetchSegments: async () => SNAP,
+    fetchFundTable: () => new Promise<never>(() => {}),
+    prosperityBudgetMs: 30,
+  };
+  const t0 = Date.now();
+  try {
+    const j = await (await handle(runReq(), deps)).json() as Record<
+      string,
+      unknown
+    >;
+    const elapsed = Date.now() - t0;
     assertEquals(
-      typeof row0.score === "number" || row0.score === null,
+      elapsed < 5000,
       true,
-      "score 语义不受景气影响",
+      `必须在预算内返回，不得真等默认 120s（实测 elapsed=${elapsed}ms）`,
+    );
+    const daily = s.writes.find((w) =>
+      w.table === "sector_rotation_daily"
+    )!;
+    assertEquals(daily !== undefined, true, "超时不得影响主链落库");
+    const row0 = daily.body[0] as Record<string, unknown>;
+    assertEquals(row0.prosperity, null, "超时 → prosperity 全 null");
+    assertEquals(row0.prosperity_src, null);
+    assertEquals(row0.score, EXPECTED_SCORE, "超时 → score 与失败/命中逐值一致（不受景气影响）");
+    assertEquals(j.prosperity_mapped, 0, "超时 → mapped 归 0");
+    assertEquals(
+      (j.warnings as string[]).some((w) => w.includes("超时")),
+      true,
+      "警告须含'超时'",
     );
   } finally {
     s.restore();
