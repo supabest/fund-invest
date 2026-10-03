@@ -463,3 +463,19 @@ Deno.test("sectorFoldState: 严格 === true —— 字符串 '1'/'true'/'yes' �
   }
   assertEquals(P.sectorFoldState(true).bodyShown, false);
 });
+
+// ---------- Task 5：行业景气度展示（纯函数，仅展示、不参与排序） ----------
+Deno.test("fmtProsperity: null→'—'，数值保留一位小数、绝不把 null 渲染成 0", () => {
+  assertEquals(P.fmtProsperity(null), "—");
+  assertEquals(P.fmtProsperity(undefined), "—");
+  assertEquals(P.fmtProsperity(66.66), "66.7");
+  assertEquals(P.fmtProsperity(0), "0.0"); // 真实 0 分位仍是 0.0（与 null 区分）
+});
+Deno.test("prosperityBand: 高≥66 / 中33-66 / 低<33；null→null", () => {
+  assertEquals(P.prosperityBand(80), "高");
+  assertEquals(P.prosperityBand(66), "高");
+  assertEquals(P.prosperityBand(50), "中");
+  assertEquals(P.prosperityBand(33), "中");
+  assertEquals(P.prosperityBand(32.9), "低");
+  assertEquals(P.prosperityBand(null), null);
+});

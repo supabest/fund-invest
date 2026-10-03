@@ -29,6 +29,8 @@ export interface SectorRow {
   labels?: string[] | null;
   stale?: boolean | null;
   batch_date?: string | null;
+  prosperity?: number | null;
+  prosperity_src?: string | null;
   [k: string]: unknown;
 }
 
@@ -112,7 +114,7 @@ const EXPORT_NAMES = [
   "sectorRowM60", "sectorSplitRows", "sectorSplitDegenerate", "sectorRankLists",
   "sectorSummaryCounts", "sectorDisplayMetrics", "sectorWorstRow", "sectorThemeGroups",
   "sectorThemeSummaries", "sectorNum", "fmtRatioPct", "fmtPoints", "fmtScoreVal",
-  "fmtVr", "sectorLabelDots", "matchApproxPools",
+  "fmtVr", "fmtProsperity", "prosperityBand", "sectorLabelDots", "matchApproxPools",
   "sectorBuildAccCounts", "sectorIsStaleReq", "sectorCreateReqGuard", "sectorFoldState",
 ];
 
@@ -210,6 +212,8 @@ export function fmtScoreVal(v: unknown): string {
 export function fmtVr(v: unknown): string {
   return fn("fmtVr")(v);
 }
+export function fmtProsperity(v: unknown): string { return fn("fmtProsperity")(v); }
+export function prosperityBand(v: unknown): "高" | "中" | "低" | null { return fn("prosperityBand")(v); }
 export function sectorLabelDots(labels: unknown): string {
   return fn("sectorLabelDots")(labels);
 }

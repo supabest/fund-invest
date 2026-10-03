@@ -200,6 +200,9 @@
   .sector-metrics{font-size:11px; color:var(--muted); margin-top:4px; line-height:1.7;}
   .sector-metrics em, .sector-theme-vals em{font-style:normal; color:var(--ivory); font-variant-numeric:tabular-nums;}
   .sector-acc{color:var(--gold);}
+  /* Task 5：行业景气度（仅展示、不参与行业分与排序）轻量配色，复用既有 token，不新造体系 */
+  .sector-pros-高{color:var(--jade);} .sector-pros-中{color:var(--gold);} .sector-pros-低{color:var(--muted);}
+  .sector-pros-高,.sector-pros-中,.sector-pros-低{font-size:11px;margin-left:2px;}
   /* 退化行（代表ETF 不足 61 根，m60/m20/乖离不可算）：置榜末 + 标灰，与真实信号区分 */
   .sector-row.deg{opacity:.66;}
   .sector-row.deg .sector-ind{font-weight:500;}
@@ -1064,6 +1067,9 @@ function fmtVr(v){
   const n = sectorNum(v); if(n === null) return '—';
   return n.toFixed(2);
 }
+// Task 5：景气度纯函数（仅供行业卡展示，不参与任何排序/打榜/分数计算）；null 与真实 0 区分
+function fmtProsperity(v){ const n = sectorNum(v); return n === null ? '—' : n.toFixed(1); }
+function prosperityBand(v){ const n = sectorNum(v); if(n === null) return null; return n >= 66 ? '高' : (n >= 33 ? '中' : '低'); }
 function sectorLabelDots(labels){
   if(!Array.isArray(labels) || !labels.length) return '';
   return labels.filter(l=>l!==null && l!==undefined && String(l).length !== 0)
@@ -1217,8 +1223,13 @@ function sectorRowHtml(r, accCounts, pools){
     tip += '\n历史不足 ' + SECTOR_M60_MIN_BARS + ' 根 ⇒ 20/60日涨跌与乖离MA60 不可算（引擎以 0 兜底，前端不呈现伪平盘），本行不参与 60 日排序、置榜末；'
       + '且 n<' + SECTOR_MA_FULL_BARS + ' 时 ma120 为部分窗口，均线五态不可靠。';
   }
+  // Task 5：景气度并列展示（与行业分同级，仅展示、不参与排序/打榜/分数计算）
+  const pros = r.prosperity;
+  const band = prosperityBand(pros);
+  const prosHtml = ` · 景气 <em>${fmtProsperity(pros)}</em>${band ? `<span class="sector-pros-${band}">${band}</span>` : ''}`;
+  tip += '\n景气度=同花顺L2「' + escapeHtml(String(r.prosperity_src || '—')) + '」绝对基本面中位数跨行业百分位，仅展示、不参与行业分与排序。';
   const metrics = `乖离MA60 <em>${fmtRatioPct(m.dev60)}</em> · 20日 <em>${fmtRatioPct(m.m20)}</em> · 60日 <em>${fmtRatioPct(m.m60)}</em>`
-    + ` · 52周分位 <em>${fmtPoints(m.pos52)}</em> · ΔM20 <em>${fmtPoints(m.dm20)}</em> · 量比 <em>${fmtVr(m.vr)}</em> · 行业分 <em>${fmtScoreVal(m.score)}</em>`
+    + ` · 52周分位 <em>${fmtPoints(m.pos52)}</em> · ΔM20 <em>${fmtPoints(m.dm20)}</em> · 量比 <em>${fmtVr(m.vr)}</em> · 行业分 <em>${fmtScoreVal(m.score)}</em>` + prosHtml
     + (m.accumulating ? ` · <span class="sector-acc">数据积累中(n=${m.barsN === null ? '—' : escapeHtml(String(m.barsN))})</span>` : '')
     + (m.degenerate ? ' <span class="sector-deg-tag">均线不足，状态不可靠</span>' : '');
   const hint = sectorPoolHint(r.ind, pools);
