@@ -82,3 +82,56 @@ export async function fetchFundTable(apiKey: string): Promise<GsFundTable> {
   }
   throw lastErr;
 }
+
+// —— Task 2：L2 聚合（中位数）+ 跨行业百分位刻度（spec 2026-10-03 §5）——
+// 纯函数，不依赖网络；FundRow 由 Task 1 parseFundTable 产出。
+
+export function fundMedian(xs: number[]): number {
+  const a = [...xs].sort((p, q) => p - q);
+  const n = a.length;
+  if (n === 0) return NaN;
+  const mid = Math.floor(n / 2);
+  return n % 2 ? a[mid] : (a[mid - 1] + a[mid]) / 2;
+}
+
+export interface ThsRaw { raw: number; n: number }
+
+// 按 thsL2 分组；每组内 rev 有效值、kc 有效值各取中位数；raw=0.5·med(rev)+0.5·med(kc)。
+// 「有效样本」n = 该组中 rev 或 kc 至少其一非空的记录数；n<5 不生成（spec §5 样本下限）。
+export function aggregateByThs(rows: FundRow[]): Map<string, ThsRaw> {
+  const byThs = new Map<string, { rev: number[]; kc: number[]; n: number }>();
+  for (const r of rows) {
+    if (!r.thsL2) continue;
+    let g = byThs.get(r.thsL2);
+    if (!g) { g = { rev: [], kc: [], n: 0 }; byThs.set(r.thsL2, g); }
+    if (r.revYoy === null && r.kcYoy === null) continue; // 双空剔除
+    g.n++;
+    if (r.revYoy !== null) g.rev.push(r.revYoy);
+    if (r.kcYoy !== null) g.kc.push(r.kcYoy);
+  }
+  const out = new Map<string, ThsRaw>();
+  for (const [ths, g] of byThs) {
+    if (g.n < 5) continue;
+    const mr = g.rev.length ? fundMedian(g.rev) : NaN;
+    const mk = g.kc.length ? fundMedian(g.kc) : NaN;
+    if (Number.isNaN(mr) && Number.isNaN(mk)) continue;
+    const raw = 0.5 * (Number.isNaN(mr) ? mk : mr) + 0.5 * (Number.isNaN(mk) ? mr : mk);
+    out.set(ths, { raw, n: g.n });
+  }
+  return out;
+}
+
+// 跨行业百分位秩（口径同 engine.pctRank：(below+0.5*ties)/N*100，升序）
+export function toProsperityScale(raws: Map<string, ThsRaw>): Map<string, number> {
+  const keys = [...raws.keys()];
+  const vals = keys.map((k) => raws.get(k)!.raw);
+  const n = vals.length;
+  const out = new Map<string, number>();
+  keys.forEach((k, i) => {
+    const v = vals[i];
+    let below = 0, ties = 0;
+    for (const x of vals) { if (x < v) below++; else if (x === v) ties++; }
+    out.set(k, n === 0 ? 50 : (below + 0.5 * ties) / n * 100);
+  });
+  return out;
+}
