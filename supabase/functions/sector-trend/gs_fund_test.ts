@@ -70,3 +70,55 @@ Deno.test("toProsperityScale: 跨行业百分位秩（最小≈低、最大≈�
   assertEquals(scale.get("a"), ((0 + 0.5) / 3) * 100); // 最小：below=0,ties=1 → 16.67
   assertEquals(toProsperityScale(new Map([["z", { raw: 9, n: 6 }]])).get("z"), 50);
 });
+
+// —— Task 3：同花顺 L2 ↔ canonical 归因映射 + buildProsperity 编排（spec 2026-10-03 §6）——
+import { expect } from "https://deno.land/std@0.224.0/expect/mod.ts";
+import { mapCanonicalToThs, attachCanonical, buildProsperity } from "./gs_fund.ts";
+
+Deno.test("mapCanonicalToThs: curated 优先于同名/子串", () => {
+  // CANON_TO_THS 至少含一条示例：券商→证券（以 Step1 实测为准）
+  assertEquals(mapCanonicalToThs("券商", new Set(["证券", "券商"])), "证券"); // curated 命中，即便同名也走 curated
+});
+Deno.test("mapCanonicalToThs: 精确同名", () => {
+  assertEquals(mapCanonicalToThs("半导体", new Set(["半导体"])), "半导体");
+});
+Deno.test("mapCanonicalToThs: 唯一子串命中（canonical 是某 L2 子串，且唯一）", () => {
+  assertEquals(mapCanonicalToThs("医疗", new Set(["医疗器械", "化学制药"])), "医疗器械");
+});
+Deno.test("mapCanonicalToThs: 多义子串 → null（不猜）", () => {
+  assertEquals(mapCanonicalToThs("电子", new Set(["半导体", "电子制造", "光学光电子"])), null);
+});
+Deno.test("mapCanonicalToThs: 主题/无归属 → null", () => {
+  assertEquals(mapCanonicalToThs("科创芯片", new Set(["半导体"])), null);
+});
+
+Deno.test("attachCanonical: 命中给 {prosperity,src}，未命中得 null 并进 unmapped 清单", () => {
+  const scale = new Map<string, number>([["证券", 80], ["白酒", 40]]);
+  const { byInd, unmapped } = attachCanonical(scale, ["券商", "白酒", "科创芯片"]);
+  assertEquals(byInd.get("券商"), { prosperity: 80, src: "证券" });
+  assertEquals(byInd.get("白酒"), { prosperity: 40, src: "白酒" });
+  assertEquals(byInd.get("科创芯片"), { prosperity: null, src: null });
+  assertEquals(unmapped.includes("科创芯片"), true);
+  assertEquals(unmapped.includes("券商"), false);
+});
+
+Deno.test("buildProsperity: 注入的 fetch 抛错 → 不 throw、byInd 全 null、warnings 有记录", async () => {
+  const boom = async () => { throw new Error("GS 挂了"); };
+  const res = await buildProsperity(boom, "KEY", ["券商"]);
+  expect; // 断言下方
+  assertEquals(res.byInd.get("券商"), { prosperity: null, src: null });
+  assertEquals(res.warnings.length >= 1, true);
+  assertEquals(res.mapped, 0);
+});
+
+Deno.test("buildProsperity: 正常链路聚合映射（注入合成宽表）", async () => {
+  const fake = async () => ({
+    "股票代码": Array.from({ length: 6 }, (_, i) => `c${i}`),
+    "营业总收入(同比增长率)[20260930]": [10, 20, 30, 40, 50, 60],
+    "归属母公司股东的净利润-扣除非经常损益(同比增长率)[20260930]": [10, 20, 30, 40, 50, 60],
+    "所属同花顺行业": Array(6).fill("非银金融-证券-证券"),
+  });
+  const res = await buildProsperity(fake, "KEY", ["券商"]);
+  assertEquals(res.byInd.get("券商")!.src, "证券");
+  assertEquals(typeof res.byInd.get("券商")!.prosperity, "number");
+});

@@ -135,3 +135,78 @@ export function toProsperityScale(raws: Map<string, ThsRaw>): Map<string, number
   });
   return out;
 }
+
+// —— Task 3：同花顺 L2 ↔ canonical 归因映射 + 顶层编排（spec 2026-10-03 §6）——
+import { safeGsMsg } from "./gs_etf.ts"; // bundle 内既有导出，复用脉敏
+
+// curated 主表：由 Task3 Step1 枚举真实数据填充（宁缺毋滥：只钉「名称不一致但同一行业」的宽基）。
+// 每个 value 必须是 ref-l2-full.txt 首列存在的同花顺 L2 名；主题/政策/宽基模糊者一律不钉（运行时→null）。
+export const CANON_TO_THS: Record<string, string> = {
+  "券商": "证券", // 任务硬依赖；证券同义 L2 存在（ref-l2-full.txt L84）
+  "建材": "建筑材料", // 简称↔全称，同一行业；无子串关系→必须 curated
+};
+
+export function mapCanonicalToThs(canon: string, thsWithProsperity: Set<string>): string | null {
+  const c = canon.trim();
+  if (!c) return null;
+  const curated = CANON_TO_THS[c];
+  if (curated && thsWithProsperity.has(curated)) return curated;   // 1. curated 命中且该 L2 有景气
+  if (thsWithProsperity.has(c)) return c;                          // 2. 精确同名
+  const subs = [...thsWithProsperity].filter(
+    (l2) => (l2.includes(c) || c.includes(l2)) && c.length >= 2 && l2.length >= 2,
+  );
+  return subs.length === 1 ? subs[0] : null;                       // 3. 唯一子串；多义/0 → null
+}
+
+export function attachCanonical(
+  scale: Map<string, number>,
+  canonicalInds: string[],
+): { byInd: Map<string, { prosperity: number | null; src: string | null }>; unmapped: string[] } {
+  const thsSet = new Set(scale.keys());
+  const byInd = new Map<string, { prosperity: number | null; src: string | null }>();
+  const unmapped: string[] = [];
+  for (const ind of canonicalInds) {
+    const ths = mapCanonicalToThs(ind, thsSet);
+    if (ths === null) {
+      byInd.set(ind, { prosperity: null, src: null });
+      unmapped.push(ind);
+    } else {
+      byInd.set(ind, { prosperity: scale.get(ths) ?? null, src: ths });
+    }
+  }
+  return { byInd, unmapped };
+}
+
+export interface ProsperityResult {
+  byInd: Map<string, { prosperity: number | null; src: string | null }>;
+  mapped: number;
+  unmapped: string[];
+  warnings: string[];
+}
+
+export async function buildProsperity(
+  fetchTable: (apiKey: string) => Promise<GsFundTable>,
+  apiKey: string,
+  canonicalInds: string[],
+): Promise<ProsperityResult> {
+  const warnings: string[] = [];
+  let scale = new Map<string, number>();
+  try {
+    const table = await fetchTable(apiKey);
+    const rows = parseFundTable(table);
+    const raws = aggregateByThs(rows);
+    scale = toProsperityScale(raws);
+    if (scale.size === 0) warnings.push("景气度：宽表聚合后无可用同花顺 L2（样本/字段异常）");
+  } catch (e) {
+    const m = e instanceof Error ? e.message : String(e);
+    warnings.push(`景气度计算失败（不影响评分）: ${safeGsMsg(m, apiKey)}`);
+    // scale 保持空 ⇒ 下面 attach 全 null
+  }
+  const { byInd, unmapped } = attachCanonical(scale, canonicalInds);
+  let mapped = 0;
+  for (const v of byInd.values()) if (v.prosperity !== null) mapped++;
+  if (unmapped.length > 0) {
+    warnings.push(`景气度未映射到同花顺的 canonical 行业(${unmapped.length}): ${unmapped.slice(0, 20).join(",")}${unmapped.length > 20 ? ",…" : ""}`);
+  }
+  return { byInd, mapped, unmapped, warnings };
+}
