@@ -283,9 +283,11 @@ Deno.test("aggregateByThs: rev/kc 一空一非空的记录仍计一个有效样�
 
 Deno.test("toProsperityScale: 跨行业百分位秩（最小≈低、最大≈高、单元素=50）", () => {
   const scale = toProsperityScale(new Map([["a", { raw: 1, n: 6 }], ["b", { raw: 2, n: 6 }], ["c", { raw: 3, n: 6 }]]));
+  // 口径同 engine.pctRank：(below + 0.5*ties)/N*100，故三 distinct 值 → 16.67/50/83.33
   assertEquals(scale.get("a")! < scale.get("b")!, true);
   assertEquals(scale.get("b")! < scale.get("c")!, true);
-  assertEquals(scale.get("c"), (2 / 3) * 100);
+  assertEquals(scale.get("c"), ((2 + 0.5) / 3) * 100); // 最大：below=2,ties=1 → 83.33
+  assertEquals(scale.get("a"), ((0 + 0.5) / 3) * 100); // 最小：below=0,ties=1 → 16.67
   assertEquals(toProsperityScale(new Map([["z", { raw: 9, n: 6 }]])).get("z"), 50);
 });
 ```
@@ -628,7 +630,6 @@ Deno.test("③.5 景气度命中：可映射行业落 prosperity + prosperity_sr
     s.restore();
     Deno.env.delete("SECTOR_TREND_TOKEN");
     Deno.env.delete("GS_API_KEY");
-    Deno.env.set;
     Deno.env.delete("SUPABASE_URL");
   }
 });
