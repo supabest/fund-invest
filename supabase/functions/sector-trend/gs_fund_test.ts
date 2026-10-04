@@ -64,6 +64,20 @@ Deno.test("aggregateByThs: rev/kc 一空一非空的记录仍计一个有效样�
   assertEquals(m.get("芯片")!.raw, 7.5);
 });
 
+// THS_DENY 否决的是「唯一子串」这一档的特定配对，不是把该 canonical 一刀判死：
+// 下面三例钉住 ①被否决的配对不再漏出 ②否决不伤精确同名 ③否决后仍有别的合法候选时照常命中。
+Deno.test("mapCanonicalToThs: THS_DENY 否决方向性失真配对，但不伤精确同名与其它合法候选", () => {
+  // 仅有失真候选时 ⇒ null（此前会漏出 多元金融/能源金属/医药商业/消费电子）
+  assertEquals(mapCanonicalToThs("金融", new Set(["多元金融"])), null);
+  assertEquals(mapCanonicalToThs("能源", new Set(["能源金属"])), null);
+  assertEquals(mapCanonicalToThs("医药", new Set(["医药商业"])), null);
+  assertEquals(mapCanonicalToThs("消费", new Set(["消费电子"])), null);
+  // 规则1/2 优先于否决：精确同名不受影响
+  assertEquals(mapCanonicalToThs("金融", new Set(["金融", "多元金融"])), "金融");
+  // 否决只剔该 L2，同名下另有唯一合法候选仍应命中
+  assertEquals(mapCanonicalToThs("消费", new Set(["消费电子", "消费"])), "消费");
+});
+
 Deno.test("toProsperityScale: 跨行业百分位秩（最小≈低、最大≈高、单元素=50）", () => {
   const scale = toProsperityScale(new Map([["a", { raw: 1, n: 6 }], ["b", { raw: 2, n: 6 }], ["c", { raw: 3, n: 6 }]]));
   // 口径同 engine.pctRank：(below + 0.5*ties)/N*100，故三 distinct 值 → 16.67/50/83.33

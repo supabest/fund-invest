@@ -203,6 +203,7 @@
   /* Task 5：行业景气度（仅展示、不参与行业分与排序）轻量配色，复用既有 token，不新造体系 */
   .sector-pros-高{color:var(--jade);} .sector-pros-中{color:var(--gold);} .sector-pros-低{color:var(--muted);}
   .sector-pros-高,.sector-pros-中,.sector-pros-低{font-size:11px;margin-left:2px;}
+  .sector-pros-src{color:var(--muted);font-size:11px;margin-left:2px;}
   /* 退化行（代表ETF 不足 61 根，m60/m20/乖离不可算）：置榜末 + 标灰，与真实信号区分 */
   .sector-row.deg{opacity:.66;}
   .sector-row.deg .sector-ind{font-weight:500;}
@@ -1226,7 +1227,10 @@ function sectorRowHtml(r, accCounts, pools){
   // Task 5：景气度并列展示（与行业分同级，仅展示、不参与排序/打榜/分数计算）
   const pros = r.prosperity;
   const band = prosperityBand(pros);
-  const prosHtml = ` · 景气 <em>${fmtProsperity(pros)}</em>${band ? `<span class="sector-pros-${band}">${band}</span>` : ''}`;
+  const prosSrcHtml = r.prosperity_src
+    ? `<span class="sector-pros-src">·${escapeHtml(String(r.prosperity_src))}</span>`
+    : '';
+  const prosHtml = ` · 景气 <em>${fmtProsperity(pros)}</em>${band ? `<span class="sector-pros-${band}">${band}</span>` : ''}${prosSrcHtml}`;
   tip += '\n景气度=同花顺L2「' + String(r.prosperity_src || '—') + '」绝对基本面中位数跨行业百分位，仅展示、不参与行业分与排序。';
   const metrics = `乖离MA60 <em>${fmtRatioPct(m.dev60)}</em> · 20日 <em>${fmtRatioPct(m.m20)}</em> · 60日 <em>${fmtRatioPct(m.m60)}</em>`
     + ` · 52周分位 <em>${fmtPoints(m.pos52)}</em> · ΔM20 <em>${fmtPoints(m.dm20)}</em> · 量比 <em>${fmtVr(m.vr)}</em> · 行业分 <em>${fmtScoreVal(m.score)}</em>` + prosHtml
