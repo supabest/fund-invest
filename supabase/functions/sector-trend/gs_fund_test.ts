@@ -1,7 +1,7 @@
 // gs_fund_test.ts —— 景气度基本面宽表解析纯函数测试（spec 2026-10-03 §4/§5）。
 // 合成宽表的列名用 Step 1 线上探针实测前缀（值带正/负/空以测稳健解析；
 // 同花顺行业带 L1-L2-L3 路径）。断言锁的是「前缀命中即解析」的行为，不锁日期后缀。
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { parseFundTable, type GsFundTable } from "./gs_fund.ts";
 
 Deno.test("parseFundTable: 前缀匹配三列 + 同花顺路径拆 L1/L2 + 百分号/负值/空稳健", () => {
@@ -64,18 +64,23 @@ Deno.test("aggregateByThs: rev/kc 一空一非空的记录仍计一个有效样�
   assertEquals(m.get("芯片")!.raw, 7.5);
 });
 
-// THS_DENY 否决的是「唯一子串」这一档的特定配对，不是把该 canonical 一刀判死：
-// 下面三例钉住 ①被否决的配对不再漏出 ②否决不伤精确同名 ③否决后仍有别的合法候选时照常命中。
+// THS_DENY 否决的是「唯一子串」这一档的特定配对，不是把该 canonical 一刀判死。
+// ⚠ 规则 1/2 在 deny 判定之前就 return，所以「精确同名不受影响」那类用例对 deny 逻辑零判别力
+// （把实现改成「命中 deny 直接 return null」，它们照样全绿）——真正钉住设计的只有下面第 ③ 组。
 Deno.test("mapCanonicalToThs: THS_DENY 否决方向性失真配对，但不伤精确同名与其它合法候选", () => {
-  // 仅有失真候选时 ⇒ null（此前会漏出 多元金融/能源金属/医药商业/消费电子）
+  // ① 仅有失真候选 ⇒ null（此前会漏出 多元金融/能源金属/医药商业/消费电子）
   assertEquals(mapCanonicalToThs("金融", new Set(["多元金融"])), null);
   assertEquals(mapCanonicalToThs("能源", new Set(["能源金属"])), null);
   assertEquals(mapCanonicalToThs("医药", new Set(["医药商业"])), null);
   assertEquals(mapCanonicalToThs("消费", new Set(["消费电子"])), null);
-  // 规则1/2 优先于否决：精确同名不受影响
+  // ② 规则 2 精确同名先返回；本例只证明「否决不覆盖同名」，不承载 ③ 的语义
   assertEquals(mapCanonicalToThs("金融", new Set(["金融", "多元金融"])), "金融");
-  // 否决只剔该 L2，同名下另有唯一合法候选仍应命中
-  assertEquals(mapCanonicalToThs("消费", new Set(["消费电子", "消费"])), "消费");
+  // ③ 判别性用例：deny 项被剔出候选池后仍剩唯一合法候选 ⇒ 必须命中该候选（候选名是合成的，
+  //    真实 L2 里 金融/消费/能源 名下暂无第二个子串候选；测的是分支行为，不是名称是否存在）。
+  assertEquals(mapCanonicalToThs("消费", new Set(["消费电子", "消费品牌"])), "消费品牌");
+  assertEquals(mapCanonicalToThs("金融", new Set(["多元金融", "金融控股"])), "金融控股");
+  assertEquals(mapCanonicalToThs("能源", new Set(["能源金属", "能源化工"])), "能源化工");
+  // ④ 反向哨兵：若将来有人把「剔除」简化成「判死」，③ 会立刻变 null 而失败。
 });
 
 Deno.test("toProsperityScale: 跨行业百分位秩（最小≈低、最大≈高、单元素=50）", () => {
@@ -89,7 +94,7 @@ Deno.test("toProsperityScale: 跨行业百分位秩（最小≈低、最大≈�
 });
 
 // —— Task 3：同花顺 L2 ↔ canonical 归因映射 + buildProsperity 编排（spec 2026-10-03 §6）——
-import { mapCanonicalToThs, attachCanonical, buildProsperity } from "./gs_fund.ts";
+import { mapCanonicalToThs, attachCanonical, buildProsperity, fetchFundTable } from "./gs_fund.ts";
 
 Deno.test("mapCanonicalToThs: curated 优先于同名/子串", () => {
   // 本用例测的是「curated 优先于同名」这一优先级，不是生产映射：真实 102 个 canonical
@@ -125,6 +130,9 @@ Deno.test("buildProsperity: 注入的 fetch 抛错 → 不 throw、byInd 全 nul
   assertEquals(res.byInd.get("券商"), { prosperity: null, src: null });
   assertEquals(res.warnings.length >= 1, true);
   assertEquals(res.mapped, 0);
+  // M-5 回归锁：取数失败时不得报「N 个行业未映射」（会把排障方向带偏到映射表不全）。
+  // 删掉 gs_fund.ts 的 `scale.size === 0 ? [] : unmappedAll` 一行，本断言即失败。
+  assertEquals(res.unmapped, [], "取数失败 ⇒ unmapped 抑制为空");
 });
 
 Deno.test("buildProsperity: 正常链路聚合映射（注入合成宽表）", async () => {
@@ -137,4 +145,36 @@ Deno.test("buildProsperity: 正常链路聚合映射（注入合成宽表）", a
   const res = await buildProsperity(fake, "KEY", ["券商"]);
   assertEquals(res.byInd.get("券商")!.src, "证券");
   assertEquals(typeof res.byInd.get("券商")!.prosperity, "number");
+});
+
+// —— fetchFundTable 的重试纪律：这是终审 Imp-2（45s×2 预算算术）与 Minor-2（判死范围）唯一的可观测面。
+// 时长常量本身不在断言范围内（真等 45s 不可行），断的是「请求次数」——它才是两种失败形态的分水岭。
+function stubFetchOnce(body: unknown): { calls: () => number; restore: () => void } {
+  const real = globalThis.fetch;
+  let n = 0;
+  globalThis.fetch = ((..._a: unknown[]) => {
+    n++;
+    return Promise.resolve(Response.json(body));
+  }) as typeof fetch;
+  return { calls: () => n, restore: () => (globalThis.fetch = real) };
+}
+
+Deno.test("fetchFundTable: 业务码非 0（日限额/鉴权）= 确定性失败 ⇒ 只请求 1 次，不白烧配额", async () => {
+  const s = stubFetchOnce({ result: [{ code: 197006, msg: "超出日限额" }], data: [] });
+  try {
+    await assertRejects(() => fetchFundTable("K"), Error, "GS fund biz");
+    assertEquals(s.calls(), 1, "fatal 必须即刻跳出");
+  } finally {
+    s.restore();
+  }
+});
+
+Deno.test("fetchFundTable: result 字段整体缺失 = 响应形态漂移 ⇒ 保留重试，请求满 2 次后上抛", async () => {
+  const s = stubFetchOnce({});
+  try {
+    await assertRejects(() => fetchFundTable("K"), Error, "missing result[0]");
+    assertEquals(s.calls(), 2, "非确定性失败应跑满 FUND_ATTEMPTS");
+  } finally {
+    s.restore();
+  }
 });

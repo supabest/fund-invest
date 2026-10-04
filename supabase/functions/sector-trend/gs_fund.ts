@@ -72,13 +72,15 @@ export async function fetchFundTable(apiKey: string): Promise<GsFundTable> {
       const r = await fetch(`${FUND_BASE}?${qs}`, { signal: AbortSignal.timeout(FUND_TIMEOUT_MS) });
       if (!r.ok) throw new Error(`GS fund http ${r.status}`);
       const j = await r.json();
-      // 业务码非 0 = 确定性失败（日限额 197006 / 鉴权失效等）⇒ 不重试，对齐 gs_etf.ts 既有纪律
-      if (j?.result?.[0]?.code !== 0) {
-        throw Object.assign(
-          new Error(`GS fund biz ${JSON.stringify(j?.result?.[0])}`),
-          { fatal: true },
-        );
+      // 业务码非 0 = 确定性失败（日限额 197006 / 鉴权失效 / 参数错）⇒ 不重试。
+      // 这是本文件新引入的纪律，不是沿用 gs_etf.ts —— 它的 segFetch 对 parsed.fail 仍照常重试
+      // （gs_etf.ts:159-177），此处刻意不同：日限额当天不自愈，重试只是白烧配额。
+      // 判死只在「确实拿到业务码且非 0」时成立；result 整体缺失属响应形态漂移，保持可重试。
+      const biz = j?.result?.[0];
+      if (biz && biz.code !== 0) {
+        throw Object.assign(new Error(`GS fund biz ${JSON.stringify(biz)}`), { fatal: true });
       }
+      if (!biz) throw new Error("GS fund response missing result[0]");
       const table = j?.data?.[0]?.table as GsFundTable | undefined;
       if (!table?.[CODE_COL]) throw new Error("GS fund table missing 股票代码");
       return table;
