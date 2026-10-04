@@ -1076,15 +1076,15 @@ function sectorLabelDots(labels){
   return labels.filter(l=>l!==null && l!==undefined && String(l).length !== 0)
     .map(l=>`<span class="sector-label"><i class="sector-dot dot-${SECTOR_LABEL_DOT[String(l)]||'gray'}"></i>${escapeHtml(String(l))}</span>`).join('');
 }
-// R-T4-5：同花顺池名与规范行业名“互为子串”才提示；单字池名不参与（避免噪声）；只提示、不合成任何分数（spec §7.4）
+// R-T4-5 / 2026-10-04 L2 统一：板块名（canonical_ind）已归至同花顺 L2，与股票池 ths_l1/ths_l2 精确同名
+// ⇒ 下钻提示改为「同名即命中」，不再互为子串近似（子串近似正是本次要消除的 ETF 板块↔股票池翻译损耗）；只提示、不合成任何分数（spec §7.4）
 function matchApproxPools(ind, pools){
   const name = String(ind||'').trim();
   if(!name || !Array.isArray(pools)) return [];
   const hit = [];
   pools.forEach(p=>{
     const s = String(p||'').trim();
-    if(s.length < 2) return;
-    if((s.indexOf(name) >= 0 || name.indexOf(s) >= 0) && hit.indexOf(s) < 0) hit.push(s);
+    if(s === name && hit.indexOf(s) < 0) hit.push(s); // 精确同名；去重
   });
   return hit.sort();
 }
@@ -1209,7 +1209,7 @@ function sectorPoolHint(ind, pools){
   const l2 = matchApproxPools(ind, (pools && pools.l2) || []);
   if(!l1.length && !l2.length) return '';
   const parts = l1.map(x=>'L1:'+x).concat(l2.map(x=>'L2:'+x)).slice(0,4);
-  return '个股侧近似池: ' + escapeHtml(parts.join('、')) + '（分类口径不同，仅供参考）';
+  return '个股池同行业: ' + escapeHtml(parts.join('、')) + '（与股票池同 L2 口径）';
 }
 
 function sectorRowHtml(r, accCounts, pools){

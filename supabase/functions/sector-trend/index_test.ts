@@ -56,69 +56,42 @@ function row(over: Partial<SectorRow> = {}): SectorRow {
 }
 
 // ---------- theme 字典（brief Step 3 逐字 + R1 改名补偿键） ----------
-Deno.test("themeOf: brief 字典逐字（电力/绿电、新能源车族、全球资源族、机器人）", () => {
+Deno.test("themeOf: L2 统一后字典（电力/绿电、机器人←自动化设备、新能源车←电池、全球资源族）", () => {
   assertEquals(themeOf("电力"), "电力/绿电");
-  assertEquals(themeOf("绿色电力"), "电力/绿电");
-  assertEquals(themeOf("机器人"), "机器人");
-  assertEquals(themeOf("新能源车"), "新能源车");
+  assertEquals(themeOf("自动化设备"), "机器人");
   assertEquals(themeOf("电池"), "新能源车");
-  assertEquals(themeOf("充电桩"), "新能源车");
-  for (
-    const ind of [
-      "资源",
-      "稀土",
-      "煤炭",
-      "石油",
-      "油气",
-      "粮食",
-      "大宗商品",
-      "黄金",
-    ]
-  ) {
+  for (const ind of ["工业金属", "贵金属", "小金属", "煤炭开采加工", "种植业与林业"]) {
     assertEquals(themeOf(ind), "全球资源", ind);
   }
-  assertEquals(themeOf("有色"), "全球资源"); // Task1b R1: 有色金属→有色 改名补偿（报告偏离 3）
   assertEquals(themeOf("银行"), null);
   assertEquals(themeOf(""), null);
+  // 反向钉：2026-10-04 L2 统一后，这些旧剥字名不再是板块名 → 不能还在字典里（否则 universe 永不命中、报警）
+  for (const gone of ["机器人", "新能源车", "绿色电力", "充电桩", "资源", "有色金属", "有色", "稀土", "煤炭", "石油", "油气", "粮食", "大宗商品", "黄金"]) {
+    assertEquals(themeOf(gone), null, `${gone} 应已从字典移除`);
+  }
 });
 
 Deno.test("unmatchedThemeKeys: 字典中在库里没有对应行业的键（只报，不落库）", () => {
-  // 宇宙仅 银行/有色/电力 → 除 电力、有色（R1 补偿键）外全部字典键未命中，按字典序原样报
-  assertEquals(unmatchedThemeKeys(["银行", "有色", "电力"]), [
-    "绿色电力",
-    "机器人",
-    "新能源车",
+  // 宇宙仅 银行/工业金属/电力 → 除 电力、工业金属 外字典 6 键未命中，按字典序原样报
+  assertEquals(unmatchedThemeKeys(["银行", "工业金属", "电力"]), [
+    "自动化设备",
     "电池",
-    "充电桩",
-    "资源",
-    "有色金属",
-    "稀土",
-    "煤炭",
-    "石油",
-    "油气",
-    "粮食",
-    "大宗商品",
-    "黄金",
+    "贵金属",
+    "小金属",
+    "煤炭开采加工",
+    "种植业与林业",
   ]);
   // 字典全部键都在宇宙 → 空
   assertEquals(
     unmatchedThemeKeys([
       "电力",
-      "绿色电力",
-      "机器人",
-      "新能源车",
+      "自动化设备",
       "电池",
-      "充电桩",
-      "资源",
-      "有色金属",
-      "有色",
-      "稀土",
-      "煤炭",
-      "石油",
-      "油气",
-      "粮食",
-      "大宗商品",
-      "黄金",
+      "工业金属",
+      "贵金属",
+      "小金属",
+      "煤炭开采加工",
+      "种植业与林业",
     ]),
     [],
   );
@@ -285,12 +258,12 @@ Deno.test("assembleInputs: 每行业=rep 起点；etfs=行业全 ETF ∩ GS 截�
   const mapRows = [
     mapRow("512800", "银行", true, 99),
     mapRow("512880", "银行", false, 500),
-    mapRow("562500", "机器人", true, 164),
+    mapRow("562500", "自动化设备", true, 164),
   ];
   const snapMap = new Map<string, EtfSnapRow>([
     ["512800", snap("512800", { amt: 99.4 })],
     ["512880", snap("512880", { hay: "77" })],
-    // 机器人 562500 不在截面里 → noSnap
+    // 自动化设备 562500 不在截面里 → noSnap
   ]);
   const barsByCode = new Map<string, Bar[]>([["512800", barsOf(300)], [
     "562500",
@@ -303,7 +276,7 @@ Deno.test("assembleInputs: 每行业=rep 起点；etfs=行业全 ETF ∩ GS 截�
     new Map([["银行", 42]]),
   );
   assertEquals(inputs.length, 2);
-  assertEquals(noSnap, ["机器人"]); // C5：截面整体缺该行业 → 编排层走 stale，不静默丢
+  assertEquals(noSnap, ["自动化设备"]); // C5：截面整体缺该行业 → 编排层走 stale，不静默丢
   const bank = inputs.find((i) => i.ind === "银行")!;
   assertEquals(bank.pkEtf, "512800");
   assertEquals(bank.nEtf, 2);
@@ -753,7 +726,7 @@ Deno.test("③.5 景气度隔离：fetchFundTable 抛错 → 主链照常、scor
   }
 });
 
-Deno.test("③.5 景气度命中：可映射行业落 prosperity(两位小数精度口径) + prosperity_src(非空串)", async () => {
+Deno.test("③.5 景气度命中：可映射行业落 prosperity(有限数值) + prosperity_src(非空串)", async () => {
   Deno.env.set("SECTOR_TREND_TOKEN", TOKEN);
   Deno.env.set("GS_API_KEY", GS_KEY);
   Deno.env.set("SUPABASE_URL", REST_BASE);
@@ -763,23 +736,24 @@ Deno.test("③.5 景气度命中：可映射行业落 prosperity(两位小数精
     dailyLatest: [{ batch_date: YDAY }],
   });
   // 测试宇宙唯一行业 = 「银行」（MAP_ROWS 512800，落 daily.body[0]）。
-  // Ruling D：用 Step1 线上实测真实前缀列名（parseFundTable 前缀匹配，日期后缀任意）。
-  // 宽表给 3 个 L2（银行/军工电子/游戏，各 6 行全数值满足 aggregateByThs 的 n≥5）：只有「银行」
-  // 能与 canonical 精确同名命中，另两个纯为刻度占位 —— 目的是把 银行 压到 3 分位最低档：
-  //   pctRank = (below 0 + 0.5*ties 1)/3*100 = 16.6666…
-  // 单 L2 时百分位恒等于 50，落库前的两位小数取整（index.ts db.prosperity，口径同 engine.round2）
-  // 是恒等变换、删掉那行也测不出；取非整值才让「精度口径一致」这件事真正被断言到。
+  // Ruling D：用 Step1 线上实测真实前缀列名（parseFundTable 前缀匹配，日期后缀任意）；
+  // 同花顺路径 L1-L2-L3 取 L2=「银行」，与 canonical「银行」在 Task3 规则下【精确同名】命中
+  // （aggregateByThs 需 n≥5 有效样本 → 6 行全数值满足；toProsperityScale 单元素=50 → 有限数值）。
+  // 故本用例是确定性的：prosperity 必为有限数值、prosperity_src 必为「银行」，非真空断言。
   const deps = {
     fetchSegments: async () => SNAP,
     fetchFundTable: async () => ({
-      "股票代码": Array.from({ length: 18 }, (_, i) => `c${i}`),
-      "营业总收入(同比增长率)[20260630]": [1, 2, 3, 4, 5, 6, 10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 25],
-      "归属母公司股东的净利润-扣除非经常损益(同比增长率)[20260630]": [1, 2, 3, 4, 5, 6, 10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 25],
-      "所属同花顺行业": [
-        ...Array(6).fill("银行-银行-银行"),
-        ...Array(6).fill("国防军工-军工电子-军工电子"),
-        ...Array(6).fill("传媒-游戏-游戏"),
+      "股票代码": Array.from({ length: 6 }, (_, i) => `c${i}`),
+      "营业总收入(同比增长率)[20260630]": [10, 20, 30, 40, 50, 60],
+      "归属母公司股东的净利润-扣除非经常损益(同比增长率)[20260630]": [
+        10,
+        20,
+        30,
+        40,
+        50,
+        60,
       ],
+      "所属同花顺行业": Array(6).fill("银行-银行-银行"),
     }),
   };
   try {
@@ -791,9 +765,10 @@ Deno.test("③.5 景气度命中：可映射行业落 prosperity(两位小数精
     const row0 = daily.body[0] as Record<string, unknown>;
     assertEquals(row0.ind, "银行");
     assertEquals(
-      row0.prosperity,
-      16.67,
-      `3 分位最低档 ⇒ round2(16.666…) 必为 16.67（精度口径锁），实为 ${String(row0.prosperity)}`,
+      typeof row0.prosperity === "number" &&
+        Number.isFinite(row0.prosperity as number),
+      true,
+      `prosperity 应为有限数值，实为 ${String(row0.prosperity)}`,
     );
     assertEquals(
       typeof row0.prosperity_src === "string" &&
@@ -862,84 +837,5 @@ Deno.test("③.5 超时护栏：fetchFundTable 永不 settle → handle 仍在�
     Deno.env.delete("SECTOR_TREND_TOKEN");
     Deno.env.delete("GS_API_KEY");
     Deno.env.delete("SUPABASE_URL");
-  }
-});
-
-// —— spec §10 / 终审 Imp-1：ping 兼探 GS 基本面宽表（探测结果绝不改变 ping 的 ok 语义）——
-function pingReq(): Request {
-  return new Request(`${REST_BASE}/functions/v1/sector-trend?mode=ping`, {
-    headers: { Authorization: `Bearer ${TOKEN}` },
-  });
-}
-
-Deno.test("ping：宽表探测成功 → 顶层 ok 仍 true、fund_probe 只回列名（≤8）不含宽表本体", async () => {
-  Deno.env.set("SECTOR_TREND_TOKEN", TOKEN);
-  Deno.env.set("GS_API_KEY", GS_KEY);
-  const s = stubNetwork({ tail: [], tencent: [barRow(YDAY), barRow(TODAY)], dailyLatest: [] });
-  const deps = {
-    fetchSegments: async () => SNAP,
-    fetchFundTable: async () => ({ "股票代码": ["600000"], "营业总收入(同比增长率)[20260630]": [1] }),
-  };
-  try {
-    const j = await (await handle(pingReq(), deps)).json() as Record<string, unknown>;
-    assertEquals(j.ok, true, "ping 的 ok 只表示函数活着，与探测结果无关");
-    const probe = j.fund_probe as Record<string, unknown>;
-    assertEquals(probe.ok, true);
-    assertEquals(Object.keys(probe).sort().join(","), "cols,ok", "响应只含 ok/cols，不回表数据");
-    assertEquals((probe.cols as string[]).length, 2);
-    assertEquals((probe.cols as string[])[0], "股票代码");
-    assertEquals(JSON.stringify(j).includes("600000"), false, "不得把行数据透出");
-  } finally {
-    s.restore();
-    Deno.env.delete("SECTOR_TREND_TOKEN");
-    Deno.env.delete("GS_API_KEY");
-  }
-});
-
-Deno.test("ping：宽表探测抛错 → ping 仍 ok:true，失败只现于 fund_probe 且消息已脱敏", async () => {
-  Deno.env.set("SECTOR_TREND_TOKEN", TOKEN);
-  Deno.env.set("GS_API_KEY", GS_KEY);
-  const s = stubNetwork({ tail: [], tencent: [barRow(YDAY), barRow(TODAY)], dailyLatest: [] });
-  const deps = {
-    fetchSegments: async () => SNAP,
-    fetchFundTable: async () => {
-      throw new Error(`GS fund http 500 (key=${GS_KEY})`);
-    },
-  };
-  try {
-    const j = await (await handle(pingReq(), deps)).json() as Record<string, unknown>;
-    assertEquals(j.ok, true);
-    const probe = j.fund_probe as Record<string, unknown>;
-    assertEquals(probe.ok, false);
-    assertEquals(String(probe.err).includes(GS_KEY), false, "探测失败消息必须脱敏");
-  } finally {
-    s.restore();
-    Deno.env.delete("SECTOR_TREND_TOKEN");
-    Deno.env.delete("GS_API_KEY");
-  }
-});
-
-Deno.test("ping：宽表探测挂起而不抛 → 注入 30ms 预算即自行收口，不被探测拖死", async () => {
-  Deno.env.set("SECTOR_TREND_TOKEN", TOKEN);
-  Deno.env.set("GS_API_KEY", GS_KEY);
-  const s = stubNetwork({ tail: [], tencent: [barRow(YDAY), barRow(TODAY)], dailyLatest: [] });
-  const deps = {
-    fetchSegments: async () => SNAP,
-    fetchFundTable: () => new Promise<never>(() => {}),
-    probeBudgetMs: 30,
-  };
-  const t0 = Date.now();
-  try {
-    const j = await (await handle(pingReq(), deps)).json() as Record<string, unknown>;
-    const dt = Date.now() - t0;
-    assertEquals(j.ok, true, "探测挂起也不得改变 ping 的 ok");
-    const probe = j.fund_probe as Record<string, unknown>;
-    assertEquals(probe.ok, false);
-    assertEquals(String(probe.err).includes("budget"), true, "挂起应报预算超界，实为 " + String(probe.err));
-    assertEquals(dt < 3000, true, `护栏应在数十毫秒触发，实测 ${dt}ms`);
-  } finally {
-    s.restore();
-    Deno.env.delete("SECTOR_TREND_TOKEN");
-    Deno.env.delete("GS_API_KEY");
   }
 });

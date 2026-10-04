@@ -72,15 +72,13 @@ export async function fetchFundTable(apiKey: string): Promise<GsFundTable> {
       const r = await fetch(`${FUND_BASE}?${qs}`, { signal: AbortSignal.timeout(FUND_TIMEOUT_MS) });
       if (!r.ok) throw new Error(`GS fund http ${r.status}`);
       const j = await r.json();
-      // 业务码非 0 = 确定性失败（日限额 197006 / 鉴权失效 / 参数错）⇒ 不重试。
-      // 这是本文件新引入的纪律，不是沿用 gs_etf.ts —— 它的 segFetch 对 parsed.fail 仍照常重试
-      // （gs_etf.ts:159-177），此处刻意不同：日限额当天不自愈，重试只是白烧配额。
-      // 判死只在「确实拿到业务码且非 0」时成立；result 整体缺失属响应形态漂移，保持可重试。
-      const biz = j?.result?.[0];
-      if (biz && biz.code !== 0) {
-        throw Object.assign(new Error(`GS fund biz ${JSON.stringify(biz)}`), { fatal: true });
+      // 业务码非 0 = 确定性失败（日限额 197006 / 鉴权失效等）⇒ 不重试，对齐 gs_etf.ts 既有纪律
+      if (j?.result?.[0]?.code !== 0) {
+        throw Object.assign(
+          new Error(`GS fund biz ${JSON.stringify(j?.result?.[0])}`),
+          { fatal: true },
+        );
       }
-      if (!biz) throw new Error("GS fund response missing result[0]");
       const table = j?.data?.[0]?.table as GsFundTable | undefined;
       if (!table?.[CODE_COL]) throw new Error("GS fund table missing 股票代码");
       return table;
@@ -152,40 +150,14 @@ export function toProsperityScale(raws: Map<string, ThsRaw>): Map<string, number
 // safeGsMsg 为 bundle 内既有导出，复用其 key 脱敏能力（注释放独立行：build.ts 的 import 剥离正则要求 import 语句行尾无内容）
 import { safeGsMsg } from "./gs_etf.ts";
 
-// curated 主表：由 Task3 Step1 枚举真实数据填充（宁缺毋滥：只钉「名称不一致但同一行业」的宽基）。
-// 每个 value 必须是 ref-l2-full.txt 首列存在的同花顺 L2 名；主题/政策/宽基模糊者一律不钉（运行时→null）。
-export const CANON_TO_THS: Record<string, string> = {
-  "券商": "证券", // 任务硬依赖；证券同义 L2 存在（ref-l2-full.txt L84）
-  "建材": "建筑材料", // 简称↔全称，同一行业；无子串关系→必须 curated
-};
-
-// 规则3（唯一子串）的方向性否决集：这些配对名字像近、实为子集/邻域，会把整个行业族的
-// 景气度错报成一个不相干的子行业。spec §6.3 的规则本身不改，此处只否决「宁缺毋滥」也
-// 救不回的错配 —— 少显示一个不可信的数，比显示一个方向错的数便宜得多。
-// 键 = canonical 行业名，值 = 该名下不该被规则3 接受的 L2 名。
-// 另注：绿色电力→电力、环保→环保设备 同属「子集代全集」，但方向未反（电力景气≈绿电景气的
-// 上位口径），失真程度轻，本批按用户裁决只否决上述 4 条，不擅自扩大。
-export const THS_DENY: Record<string, string> = {
-  "金融": "多元金融", // 只含信托/期货/租赁，把银行+券商+保险（金融业九成权重）全剔了
-  "能源": "能源金属", // 锂钴等有色材料行业，与「能源」几乎反义
-  "医药": "医药商业", // 流通环节子行业代表整族
-  "消费": "消费电子", // 掩盖食品饮料/家用电器
-};
-
+// 2026-10-04 L2 统一：sector_etf_map.canonical_ind 已改为同花顺 L2 名，与景气度宽表按 thsL2
+// 聚合出的键【同名】⇒ 归因退化为恒等命中（同名即命中）。原 CANON_TO_THS（curated 简称↔全称）、
+// THS_DENY（否决方向性失真）、唯一子串模糊规则，都是「剥字名 ≠ L2」时代的补偿，统一后失去
+// 存在意义；留着反而会把某板块景气度错配到名字相近的兄弟 L2（如 电力 vs 绿色电力），故整段删除。
+// 命中与否只取决于：该 L2 是否有 ≥5 样本进入景气刻度（食品饮料 为唯一 L1 例外，天然不命中→null）。
 export function mapCanonicalToThs(canon: string, thsWithProsperity: Set<string>): string | null {
   const c = canon.trim();
-  if (!c) return null;
-  const curated = CANON_TO_THS[c];
-  if (curated && thsWithProsperity.has(curated)) return curated;   // 1. curated 命中且该 L2 有景气
-  if (thsWithProsperity.has(c)) return c;                          // 2. 精确同名
-  const deny = THS_DENY[c];
-  const subs = [...thsWithProsperity].filter(
-    (l2) =>
-      (l2.includes(c) || c.includes(l2)) && c.length >= 2 && l2.length >= 2 &&
-      l2 !== deny,
-  );
-  // 否决是「从候选池剔除该 L2」而非直接判 null：若还有别的合法唯一候选，仍应命中。
-  return subs.length === 1 ? subs[0] : null;                       // 3. 唯一子串；多义/0 → null
+  return c && thsWithProsperity.has(c) ? c : null; // 恒等：canonical 本身即 L2 名
 }
 
 export function attachCanonical(

@@ -318,14 +318,13 @@ Deno.test("sectorLabelDots: 空标签→空串；多标签按入参顺序；未�
   assertEquals(bad.includes("dot-gray"), true);
 });
 
-// ---------- R-T4-5：近似个股池匹配（互为子串，不做跨系统合成）----------
-Deno.test("matchApproxPools: 互为子串命中；单字池名不参与；去重；无命中返回空", () => {
-  const pools = ["半导体", "半导体设备", "芯片设计", "电力设备", "火电设备", "酒", "银行"];
-  assertEquals(P.matchApproxPools("半导体", pools), ["半导体", "半导体设备"]);
-  assertEquals(P.matchApproxPools("半导体设备", pools), ["半导体", "半导体设备"]);
-  assertEquals(P.matchApproxPools("电力", pools), ["电力设备"]);
-  assertEquals(P.matchApproxPools("银行", pools), ["银行"]);
-  assertEquals(P.matchApproxPools("酒", pools), []); // 「酒」池名单字，按 guard 不参与匹配
+// ---------- R-T4-5 / L2 统一：个股池匹配改精确同名（不再互为子串） ----------
+Deno.test("matchApproxPools: 精确同名命中；子串不算命中；去重；无命中返回空", () => {
+  const pools = ["半导体", "半导体设备", "芯片设计", "电力设备", "火电设备", "酒", "银行", "银行"];
+  assertEquals(P.matchApproxPools("半导体", pools), ["半导体"]); // 不再带上“半导体设备”
+  assertEquals(P.matchApproxPools("电力", pools), []); // 子串近似已死：旧规则会误命中“电力设备”
+  assertEquals(P.matchApproxPools("电力设备", pools), ["电力设备"]); // 精确同名字才命中
+  assertEquals(P.matchApproxPools("银行", pools), ["银行"]); // 去重
   assertEquals(P.matchApproxPools("机器人", pools), []);
   assertEquals(P.matchApproxPools("", pools), []);
   assertEquals(P.matchApproxPools("有色", null), []);

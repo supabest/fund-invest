@@ -6,6 +6,11 @@ import {
   isStyleExcluded,
   normalizeInd,
 } from "./sector_normalize.ts";
+import { IND_TO_L2, assertTargets, toL2 } from "./sector_l2_map.ts";
+
+// 构建期自检：IND_TO_L2 每个目标必须 ∈ L2_TARGETS（同花顺 L2，或唯一批准的 L1「食品饮料」）。
+// 手滑写错行业名（如把 L1「电子」当 L2 用）在此抛错终止，绝不让非法归属流进 seed。
+assertTargets();
 
 const BASE =
   "https://dgzt.guosen.com.cn/skills/gsfinancing/selected/ETF/filterSearch/1.0";
@@ -152,33 +157,46 @@ type MapRow = {
   isRep: boolean;
 };
 const byInd = new Map<string, MapRow[]>();
+// 宇宙重建纪律（沿用景气度 THS_DENY「宁缺毋滥」）：剥字名先过 R2 风格剔除，再查 IND_TO_L2 ——
+// 命中非 null → 并入该 L2；命中 null（无单一 L2 父级，用户 2026-10-04 裁定剔除）→ 不入池；
+// 表里根本没这条 → UNMAPPED 报警、不入池（须人工补映射，绝不静默塞进某个 L2）。
+const dropped: { ind: string; n: number }[] = []; // R2 纯区域/风格类
+const l2Dropped = new Map<string, number>(); // IND_TO_L2 显式剔除
+const unmapped = new Map<string, number>(); // 未收录的剥字名
 for (const row of union.values()) {
   const name = (row.ofname ?? "").trim();
   const code = String(row.ofcode).trim();
   const raw = extractInd(name);
-  const ind = normalizeInd(raw);
+  const norm = normalizeInd(raw);
+  if (isStyleExcluded(norm)) {
+    const cur = dropped.find((d) => d.ind === norm);
+    if (cur) cur.n++;
+    else dropped.push({ ind: norm, n: 1 });
+    continue;
+  }
+  if (!(norm in IND_TO_L2)) {
+    unmapped.set(norm, (unmapped.get(norm) ?? 0) + 1);
+    continue;
+  }
+  const l2 = toL2(norm);
+  if (l2 === null) {
+    l2Dropped.set(norm, (l2Dropped.get(norm) ?? 0) + 1);
+    continue;
+  }
   const item: MapRow = {
     code,
     name,
     raw,
-    ind,
+    ind: l2,
     amt: num(row.endamt),
     isRep: false,
   };
-  if (!byInd.has(ind)) byInd.set(ind, []);
-  byInd.get(ind)!.push(item);
+  if (!byInd.has(l2)) byInd.set(l2, []);
+  byInd.get(l2)!.push(item);
 }
 const all: MapRow[] = [];
 
-// ---- R2 剔除纯区域/风格类（归一之后、is_rep 评选之前）：被剔除的 ETF 完全不进 seed ----
-const dropped: { ind: string; n: number }[] = [];
-for (const ind of [...byInd.keys()]) {
-  if (isStyleExcluded(ind)) {
-    dropped.push({ ind, n: byInd.get(ind)!.length });
-    byInd.delete(ind);
-  }
-}
-
+// ---- 每 L2 取 amt 最大者为代表（并列按代码升序，可重现）----
 for (const [, items] of byInd) {
   items.sort((a, b) => b.amt - a.amt || a.code.localeCompare(b.code));
   items[0].isRep = true;
@@ -224,10 +242,10 @@ const values = all.map((m) =>
   }',${m.amt},${m.isRep},current_date)`
 ).join(",\n");
 const sql =
-  `-- scripts/seed_sector_map.sql —— 由 scripts/build_universe.ts 生成（GS 15 分段 + sector_normalize 归一）；勿手改，改合并规则请改 MERGE 后重跑
+  `-- scripts/seed_sector_map.sql —— 由 scripts/build_universe.ts 生成（GS 15 分段 + sector_normalize 归一 + sector_l2_map 归至同花顺 L2）；勿手改，改归属规则请改 IND_TO_L2 后重跑
 -- 生成日期: ${
     new Date().toISOString().slice(0, 10)
-  }  宇宙 ${all.length} 只 / 规范行业 ${byInd.size} 个 / 代表ETF ${
+  }  宇宙 ${all.length} 只 / L2 板块 ${byInd.size} 个 / 代表ETF ${
     all.filter((m) => m.isRep).length
   } 只
 insert into sector_etf_map (etf_code, etf_name, canonical_ind, amt, is_rep, updated_on) values
@@ -259,7 +277,23 @@ if (dropped.length) {
     } 只 ETF 不入池 -> ${dropped.map((d) => `${d.ind}(n=${d.n})`).join(" ")}`,
   );
 }
-console.log(`规范行业数: ${byInd.size}`);
+if (l2Dropped.size) {
+  console.log(
+    `L2 统一剔除（无单一父级，用户 2026-10-04 裁定）: ${l2Dropped.size} 个原板块 / ${
+      [...l2Dropped.values()].reduce((s, x) => s + x, 0)
+    } 只 ETF 不入池 -> ${[...l2Dropped.keys()].sort((a, b) => a.localeCompare(b, "zh")).join(" ")}`,
+  );
+}
+if (unmapped.size) {
+  console.log(
+    `UNMAPPED_L2 报警（宇宙冒出未收录剥字名，须补 IND_TO_L2）: ${unmapped.size} 个 / ${
+      [...unmapped.values()].reduce((s, x) => s + x, 0)
+    } 只不入池 -> ${
+      [...unmapped.keys()].sort((a, b) => a.localeCompare(b, "zh")).join(" ")
+    }`,
+  );
+}
+console.log(`L2 板块数: ${byInd.size}`);
 console.log(`代表ETF数: ${all.filter((m) => m.isRep).length}`);
 const top = [...byInd.entries()]
   .sort((a, b) =>

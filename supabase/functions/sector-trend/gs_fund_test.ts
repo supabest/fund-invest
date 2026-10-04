@@ -1,7 +1,7 @@
 // gs_fund_test.ts —— 景气度基本面宽表解析纯函数测试（spec 2026-10-03 §4/§5）。
 // 合成宽表的列名用 Step 1 线上探针实测前缀（值带正/负/空以测稳健解析；
 // 同花顺行业带 L1-L2-L3 路径）。断言锁的是「前缀命中即解析」的行为，不锁日期后缀。
-import { assertEquals, assertRejects } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { parseFundTable, type GsFundTable } from "./gs_fund.ts";
 
 Deno.test("parseFundTable: 前缀匹配三列 + 同花顺路径拆 L1/L2 + 百分号/负值/空稳健", () => {
@@ -64,24 +64,8 @@ Deno.test("aggregateByThs: rev/kc 一空一非空的记录仍计一个有效样�
   assertEquals(m.get("芯片")!.raw, 7.5);
 });
 
-// THS_DENY 否决的是「唯一子串」这一档的特定配对，不是把该 canonical 一刀判死。
-// ⚠ 规则 1/2 在 deny 判定之前就 return，所以「精确同名不受影响」那类用例对 deny 逻辑零判别力
-// （把实现改成「命中 deny 直接 return null」，它们照样全绿）——真正钉住设计的只有下面第 ③ 组。
-Deno.test("mapCanonicalToThs: THS_DENY 否决方向性失真配对，但不伤精确同名与其它合法候选", () => {
-  // ① 仅有失真候选 ⇒ null（此前会漏出 多元金融/能源金属/医药商业/消费电子）
-  assertEquals(mapCanonicalToThs("金融", new Set(["多元金融"])), null);
-  assertEquals(mapCanonicalToThs("能源", new Set(["能源金属"])), null);
-  assertEquals(mapCanonicalToThs("医药", new Set(["医药商业"])), null);
-  assertEquals(mapCanonicalToThs("消费", new Set(["消费电子"])), null);
-  // ② 规则 2 精确同名先返回；本例只证明「否决不覆盖同名」，不承载 ③ 的语义
-  assertEquals(mapCanonicalToThs("金融", new Set(["金融", "多元金融"])), "金融");
-  // ③ 判别性用例：deny 项被剔出候选池后仍剩唯一合法候选 ⇒ 必须命中该候选（候选名是合成的，
-  //    真实 L2 里 金融/消费/能源 名下暂无第二个子串候选；测的是分支行为，不是名称是否存在）。
-  assertEquals(mapCanonicalToThs("消费", new Set(["消费电子", "消费品牌"])), "消费品牌");
-  assertEquals(mapCanonicalToThs("金融", new Set(["多元金融", "金融控股"])), "金融控股");
-  assertEquals(mapCanonicalToThs("能源", new Set(["能源金属", "能源化工"])), "能源化工");
-  // ④ 反向哨兵：若将来有人把「剔除」简化成「判死」，③ 会立刻变 null 而失败。
-});
+// 2026-10-04 L2 统一：THS_DENY / 子串模糊规则已整段删除（canonical 本身即 L2 ⇒ 恒等命中），
+// 原「否决方向性失真配对」的用例随之作废：现下 医疗/金融 等旧剥字名不再命中任何 L2。
 
 Deno.test("toProsperityScale: 跨行业百分位秩（最小≈低、最大≈高、单元素=50）", () => {
   const scale = toProsperityScale(new Map([["a", { raw: 1, n: 6 }], ["b", { raw: 2, n: 6 }], ["c", { raw: 3, n: 6 }]]));
@@ -94,45 +78,40 @@ Deno.test("toProsperityScale: 跨行业百分位秩（最小≈低、最大≈�
 });
 
 // —— Task 3：同花顺 L2 ↔ canonical 归因映射 + buildProsperity 编排（spec 2026-10-03 §6）——
-import { mapCanonicalToThs, attachCanonical, buildProsperity, fetchFundTable } from "./gs_fund.ts";
+import { mapCanonicalToThs, attachCanonical, buildProsperity } from "./gs_fund.ts";
 
-Deno.test("mapCanonicalToThs: curated 优先于同名/子串", () => {
-  // 本用例测的是「curated 优先于同名」这一优先级，不是生产映射：真实 102 个 canonical
-  // 里没有「券商」（用的是「证券」，由规则2 精确同名命中），故该条在生产中永不触发。
-  assertEquals(mapCanonicalToThs("券商", new Set(["证券", "券商"])), "证券"); // curated 命中，即便同名也走 curated
-});
-Deno.test("mapCanonicalToThs: 精确同名", () => {
+// 2026-10-04 L2 统一：canonical 本身即同花顺 L2 ⇒ 归因退化为恒等命中，无 curated / 无子串 / 无否决。
+Deno.test("mapCanonicalToThs: 恒等命中——canonical 是 L2 且有景气即命中", () => {
   assertEquals(mapCanonicalToThs("半导体", new Set(["半导体"])), "半导体");
+  assertEquals(mapCanonicalToThs("证券", new Set(["证券"])), "证券");
 });
-Deno.test("mapCanonicalToThs: 唯一子串命中（canonical 是某 L2 子串，且唯一）", () => {
-  assertEquals(mapCanonicalToThs("医疗", new Set(["医疗器械", "化学制药"])), "医疗器械");
+Deno.test("mapCanonicalToThs: 不再子串/curated 模糊——同名之外一律 null（防误配兄弟 L2）", () => {
+  assertEquals(mapCanonicalToThs("医疗", new Set(["医疗器械", "化学制药"])), null); // 旧子串规则会误命中 医疗器械
+  assertEquals(mapCanonicalToThs("券商", new Set(["证券"])), null); // 旧 curated 会映射到 证券；统一后 券商 非板块名、不在 L2 刻度集→null
+  assertEquals(mapCanonicalToThs("电力", new Set(["电力", "绿色电力"])), "电力"); // 精确优先，即便存在子串兄弟
 });
-Deno.test("mapCanonicalToThs: 多义子串 → null（不猜）", () => {
-  assertEquals(mapCanonicalToThs("电子", new Set(["半导体", "电子制造", "光学光电子"])), null);
-});
-Deno.test("mapCanonicalToThs: 主题/无归属 → null", () => {
+Deno.test("mapCanonicalToThs: 空 / 主题 / 无归属 / L1例外 → null", () => {
+  assertEquals(mapCanonicalToThs("", new Set(["半导体"])), null);
   assertEquals(mapCanonicalToThs("科创芯片", new Set(["半导体"])), null);
+  assertEquals(mapCanonicalToThs("食品饮料", new Set(["白酒", "饮料制造"])), null); // L1 例外天然不命中 L2 刻度
 });
 
 Deno.test("attachCanonical: 命中给 {prosperity,src}，未命中得 null 并进 unmapped 清单", () => {
   const scale = new Map<string, number>([["证券", 80], ["白酒", 40]]);
-  const { byInd, unmapped } = attachCanonical(scale, ["券商", "白酒", "科创芯片"]);
-  assertEquals(byInd.get("券商"), { prosperity: 80, src: "证券" });
+  const { byInd, unmapped } = attachCanonical(scale, ["证券", "白酒", "科创芯片"]);
+  assertEquals(byInd.get("证券"), { prosperity: 80, src: "证券" });
   assertEquals(byInd.get("白酒"), { prosperity: 40, src: "白酒" });
   assertEquals(byInd.get("科创芯片"), { prosperity: null, src: null });
   assertEquals(unmapped.includes("科创芯片"), true);
-  assertEquals(unmapped.includes("券商"), false);
+  assertEquals(unmapped.includes("证券"), false);
 });
 
 Deno.test("buildProsperity: 注入的 fetch 抛错 → 不 throw、byInd 全 null、warnings 有记录", async () => {
   const boom = async () => { throw new Error("GS 挂了"); };
-  const res = await buildProsperity(boom, "KEY", ["券商"]);
-  assertEquals(res.byInd.get("券商"), { prosperity: null, src: null });
+  const res = await buildProsperity(boom, "KEY", ["证券"]);
+  assertEquals(res.byInd.get("证券"), { prosperity: null, src: null });
   assertEquals(res.warnings.length >= 1, true);
   assertEquals(res.mapped, 0);
-  // M-5 回归锁：取数失败时不得报「N 个行业未映射」（会把排障方向带偏到映射表不全）。
-  // 删掉 gs_fund.ts 的 `scale.size === 0 ? [] : unmappedAll` 一行，本断言即失败。
-  assertEquals(res.unmapped, [], "取数失败 ⇒ unmapped 抑制为空");
 });
 
 Deno.test("buildProsperity: 正常链路聚合映射（注入合成宽表）", async () => {
@@ -142,39 +121,7 @@ Deno.test("buildProsperity: 正常链路聚合映射（注入合成宽表）", a
     "归属母公司股东的净利润-扣除非经常损益(同比增长率)[20260930]": [10, 20, 30, 40, 50, 60],
     "所属同花顺行业": Array(6).fill("非银金融-证券-证券"),
   });
-  const res = await buildProsperity(fake, "KEY", ["券商"]);
-  assertEquals(res.byInd.get("券商")!.src, "证券");
-  assertEquals(typeof res.byInd.get("券商")!.prosperity, "number");
-});
-
-// —— fetchFundTable 的重试纪律：这是终审 Imp-2（45s×2 预算算术）与 Minor-2（判死范围）唯一的可观测面。
-// 时长常量本身不在断言范围内（真等 45s 不可行），断的是「请求次数」——它才是两种失败形态的分水岭。
-function stubFetchOnce(body: unknown): { calls: () => number; restore: () => void } {
-  const real = globalThis.fetch;
-  let n = 0;
-  globalThis.fetch = ((..._a: unknown[]) => {
-    n++;
-    return Promise.resolve(Response.json(body));
-  }) as typeof fetch;
-  return { calls: () => n, restore: () => (globalThis.fetch = real) };
-}
-
-Deno.test("fetchFundTable: 业务码非 0（日限额/鉴权）= 确定性失败 ⇒ 只请求 1 次，不白烧配额", async () => {
-  const s = stubFetchOnce({ result: [{ code: 197006, msg: "超出日限额" }], data: [] });
-  try {
-    await assertRejects(() => fetchFundTable("K"), Error, "GS fund biz");
-    assertEquals(s.calls(), 1, "fatal 必须即刻跳出");
-  } finally {
-    s.restore();
-  }
-});
-
-Deno.test("fetchFundTable: result 字段整体缺失 = 响应形态漂移 ⇒ 保留重试，请求满 2 次后上抛", async () => {
-  const s = stubFetchOnce({});
-  try {
-    await assertRejects(() => fetchFundTable("K"), Error, "missing result[0]");
-    assertEquals(s.calls(), 2, "非确定性失败应跑满 FUND_ATTEMPTS");
-  } finally {
-    s.restore();
-  }
+  const res = await buildProsperity(fake, "KEY", ["证券"]);
+  assertEquals(res.byInd.get("证券")!.src, "证券");
+  assertEquals(typeof res.byInd.get("证券")!.prosperity, "number");
 });

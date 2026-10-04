@@ -58,10 +58,6 @@ const BACKFILL_START = "2019-01-01"; // Task 3b T3b-1：历史翻页起点（spe
 // 景气度展示子流程总预算，超时→全 null，绝不拖垮主链落库（gs_fund 最坏 45s+2s+45s=92s，
 // 若宽表 endpoint 挂起而不抛，Edge wall-clock 截断会丢整晚落库——try/catch 覆盖不到的唯一失败模式）。
 const PROSPERITY_BUDGET_MS = 120_000;
-// ping 的宽表探测预算，与主链预算分开：fetchFundTable 最坏 92s，而 ping 是健康检查——被探测拖到
-// Edge wall-clock 之外时，失败模式会从「fund_probe.ok=false」恶化成「整个 ping 无响应」。
-// 另：每次 ping 消耗 1 次 GS 宽表日配额（探测位的价值是发现列名漂移，不是给巡检压测）。
-const PROBE_BUDGET_MS = 50_000;
 // 注：MIN_ROWS 快照守卫单一定义在 gs_etf.fetchSegments（编排层不重复声明，避免 bundle 重名）
 
 // —— 类型 ——
@@ -106,23 +102,20 @@ export interface DailyRow {
 
 // spec §4.4 + brief Step 3 字典逐字；末尾 2 个键是 Task 1b 归并裁定（R1 有色金属→有色）后的补偿别名，
 // 否则「全球资源」主题会整族落空（报告偏离 3）。
+// 2026-10-04 L2 统一：键改为统一后的同花顺 L2 板块名（用户 4 大主题锚点不变）。
+// 只列「本轮宇宙里确实存在」的 L2 作键 —— 旧键 绿色电力/充电桩/资源/有色金属/有色/稀土/煤炭/
+// 石油/油气/粮食/大宗商品/黄金/新能源车 已并入父级或直接剔除，若留作键会永久触发
+// unmatchedThemeKeys 报警（C1 纪律：只报警不落库）。能源金属/石油加工贸易/油气开采及服务 本轮
+// 同样不在 38 板块内，故不入「全球资源」族。
 const THEME_MAP: Record<string, string> = {
   "电力": "电力/绿电",
-  "绿色电力": "电力/绿电",
-  "机器人": "机器人",
-  "新能源车": "新能源车",
+  "自动化设备": "机器人",
   "电池": "新能源车",
-  "充电桩": "新能源车",
-  "资源": "全球资源",
-  "有色金属": "全球资源",
-  "有色": "全球资源", // R1 补偿别名
-  "稀土": "全球资源",
-  "煤炭": "全球资源",
-  "石油": "全球资源",
-  "油气": "全球资源",
-  "粮食": "全球资源",
-  "大宗商品": "全球资源",
-  "黄金": "全球资源",
+  "工业金属": "全球资源",
+  "贵金属": "全球资源",
+  "小金属": "全球资源",
+  "煤炭开采加工": "全球资源",
+  "种植业与林业": "全球资源",
 };
 
 // —— 以下纯函数可被 index_test.ts 直接单测（无 IO） ——
@@ -624,7 +617,6 @@ export interface NightlyDeps {
   ) => Promise<GsFundTable>;
   // ③.5 超时预算覆盖（单测注入极小值验证护栏；缺省走 PROSPERITY_BUDGET_MS）
   prosperityBudgetMs?: number;
-  probeBudgetMs?: number; // ping 宽表探测预算（测试注入极小值，验证探测挂起时 ping 自行收口）
 }
 
 const REAL_DEPS: NightlyDeps = { fetchSegments, fetchFundTable };
@@ -674,24 +666,16 @@ export async function handle(
       // 只回列名不回数据，失败消息过 safeGsMsg 脱敏；探测失败不改 ok（ping 语义仍是"函数活着"）。
       const pingKey = Deno.env.get("GS_API_KEY") || "";
       let fund: Record<string, unknown>;
-      if (!pingKey) {
-        fund = { ok: false, err: "GS_API_KEY missing" };
-      } else {
-        try {
-          // 走 deps 注入（单测可替换）+ withBudget（兜住最坏 92s，ping 不被自己的探测拖死）
-          const w = await withBudget(
-            deps.fetchFundTable(pingKey),
-            deps.probeBudgetMs ?? PROBE_BUDGET_MS,
-          );
-          fund = w.ok
-            ? { ok: true, cols: Object.keys(w.value).slice(0, 8) }
-            : { ok: false, err: "fund probe exceeded budget" };
-        } catch (e) {
-          fund = {
-            ok: false,
-            err: safeGsMsg(e instanceof Error ? e.message : String(e), pingKey),
-          };
-        }
+      try {
+        const t = pingKey
+          ? await fetchFundTable(pingKey)
+          : (() => { throw new Error("GS_API_KEY missing"); })();
+        fund = { ok: true, cols: Object.keys(t).slice(0, 8) };
+      } catch (e) {
+        fund = {
+          ok: false,
+          err: safeGsMsg(e instanceof Error ? e.message : String(e), pingKey),
+        };
       }
       return Response.json({
         ok: true,

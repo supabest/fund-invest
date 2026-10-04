@@ -688,15 +688,13 @@ async function fetchFundTable(apiKey: string): Promise<GsFundTable> {
       const r = await fetch(`${FUND_BASE}?${qs}`, { signal: AbortSignal.timeout(FUND_TIMEOUT_MS) });
       if (!r.ok) throw new Error(`GS fund http ${r.status}`);
       const j = await r.json();
-      // 业务码非 0 = 确定性失败（日限额 197006 / 鉴权失效 / 参数错）⇒ 不重试。
-      // 这是本文件新引入的纪律，不是沿用 gs_etf.ts —— 它的 segFetch 对 parsed.fail 仍照常重试
-      // （gs_etf.ts:159-177），此处刻意不同：日限额当天不自愈，重试只是白烧配额。
-      // 判死只在「确实拿到业务码且非 0」时成立；result 整体缺失属响应形态漂移，保持可重试。
-      const biz = j?.result?.[0];
-      if (biz && biz.code !== 0) {
-        throw Object.assign(new Error(`GS fund biz ${JSON.stringify(biz)}`), { fatal: true });
+      // 业务码非 0 = 确定性失败（日限额 197006 / 鉴权失效等）⇒ 不重试，对齐 gs_etf.ts 既有纪律
+      if (j?.result?.[0]?.code !== 0) {
+        throw Object.assign(
+          new Error(`GS fund biz ${JSON.stringify(j?.result?.[0])}`),
+          { fatal: true },
+        );
       }
-      if (!biz) throw new Error("GS fund response missing result[0]");
       const table = j?.data?.[0]?.table as GsFundTable | undefined;
       if (!table?.[CODE_COL]) throw new Error("GS fund table missing 股票代码");
       return table;
@@ -768,40 +766,14 @@ function toProsperityScale(raws: Map<string, ThsRaw>): Map<string, number> {
 // safeGsMsg 为 bundle 内既有导出，复用其 key 脱敏能力（注释放独立行：build.ts 的 import 剥离正则要求 import 语句行尾无内容）
 
 
-// curated 主表：由 Task3 Step1 枚举真实数据填充（宁缺毋滥：只钉「名称不一致但同一行业」的宽基）。
-// 每个 value 必须是 ref-l2-full.txt 首列存在的同花顺 L2 名；主题/政策/宽基模糊者一律不钉（运行时→null）。
-const CANON_TO_THS: Record<string, string> = {
-  "券商": "证券", // 任务硬依赖；证券同义 L2 存在（ref-l2-full.txt L84）
-  "建材": "建筑材料", // 简称↔全称，同一行业；无子串关系→必须 curated
-};
-
-// 规则3（唯一子串）的方向性否决集：这些配对名字像近、实为子集/邻域，会把整个行业族的
-// 景气度错报成一个不相干的子行业。spec §6.3 的规则本身不改，此处只否决「宁缺毋滥」也
-// 救不回的错配 —— 少显示一个不可信的数，比显示一个方向错的数便宜得多。
-// 键 = canonical 行业名，值 = 该名下不该被规则3 接受的 L2 名。
-// 另注：绿色电力→电力、环保→环保设备 同属「子集代全集」，但方向未反（电力景气≈绿电景气的
-// 上位口径），失真程度轻，本批按用户裁决只否决上述 4 条，不擅自扩大。
-const THS_DENY: Record<string, string> = {
-  "金融": "多元金融", // 只含信托/期货/租赁，把银行+券商+保险（金融业九成权重）全剔了
-  "能源": "能源金属", // 锂钴等有色材料行业，与「能源」几乎反义
-  "医药": "医药商业", // 流通环节子行业代表整族
-  "消费": "消费电子", // 掩盖食品饮料/家用电器
-};
-
+// 2026-10-04 L2 统一：sector_etf_map.canonical_ind 已改为同花顺 L2 名，与景气度宽表按 thsL2
+// 聚合出的键【同名】⇒ 归因退化为恒等命中（同名即命中）。原 CANON_TO_THS（curated 简称↔全称）、
+// THS_DENY（否决方向性失真）、唯一子串模糊规则，都是「剥字名 ≠ L2」时代的补偿，统一后失去
+// 存在意义；留着反而会把某板块景气度错配到名字相近的兄弟 L2（如 电力 vs 绿色电力），故整段删除。
+// 命中与否只取决于：该 L2 是否有 ≥5 样本进入景气刻度（食品饮料 为唯一 L1 例外，天然不命中→null）。
 function mapCanonicalToThs(canon: string, thsWithProsperity: Set<string>): string | null {
   const c = canon.trim();
-  if (!c) return null;
-  const curated = CANON_TO_THS[c];
-  if (curated && thsWithProsperity.has(curated)) return curated;   // 1. curated 命中且该 L2 有景气
-  if (thsWithProsperity.has(c)) return c;                          // 2. 精确同名
-  const deny = THS_DENY[c];
-  const subs = [...thsWithProsperity].filter(
-    (l2) =>
-      (l2.includes(c) || c.includes(l2)) && c.length >= 2 && l2.length >= 2 &&
-      l2 !== deny,
-  );
-  // 否决是「从候选池剔除该 L2」而非直接判 null：若还有别的合法唯一候选，仍应命中。
-  return subs.length === 1 ? subs[0] : null;                       // 3. 唯一子串；多义/0 → null
+  return c && thsWithProsperity.has(c) ? c : null; // 恒等：canonical 本身即 L2 名
 }
 
 function attachCanonical(
@@ -899,10 +871,6 @@ const BACKFILL_START = "2019-01-01"; // Task 3b T3b-1：历史翻页起点（spe
 // 景气度展示子流程总预算，超时→全 null，绝不拖垮主链落库（gs_fund 最坏 45s+2s+45s=92s，
 // 若宽表 endpoint 挂起而不抛，Edge wall-clock 截断会丢整晚落库——try/catch 覆盖不到的唯一失败模式）。
 const PROSPERITY_BUDGET_MS = 120_000;
-// ping 的宽表探测预算，与主链预算分开：fetchFundTable 最坏 92s，而 ping 是健康检查——被探测拖到
-// Edge wall-clock 之外时，失败模式会从「fund_probe.ok=false」恶化成「整个 ping 无响应」。
-// 另：每次 ping 消耗 1 次 GS 宽表日配额（探测位的价值是发现列名漂移，不是给巡检压测）。
-const PROBE_BUDGET_MS = 50_000;
 // 注：MIN_ROWS 快照守卫单一定义在 gs_etf.fetchSegments（编排层不重复声明，避免 bundle 重名）
 
 // —— 类型 ——
@@ -947,23 +915,20 @@ interface DailyRow {
 
 // spec §4.4 + brief Step 3 字典逐字；末尾 2 个键是 Task 1b 归并裁定（R1 有色金属→有色）后的补偿别名，
 // 否则「全球资源」主题会整族落空（报告偏离 3）。
+// 2026-10-04 L2 统一：键改为统一后的同花顺 L2 板块名（用户 4 大主题锚点不变）。
+// 只列「本轮宇宙里确实存在」的 L2 作键 —— 旧键 绿色电力/充电桩/资源/有色金属/有色/稀土/煤炭/
+// 石油/油气/粮食/大宗商品/黄金/新能源车 已并入父级或直接剔除，若留作键会永久触发
+// unmatchedThemeKeys 报警（C1 纪律：只报警不落库）。能源金属/石油加工贸易/油气开采及服务 本轮
+// 同样不在 38 板块内，故不入「全球资源」族。
 const THEME_MAP: Record<string, string> = {
   "电力": "电力/绿电",
-  "绿色电力": "电力/绿电",
-  "机器人": "机器人",
-  "新能源车": "新能源车",
+  "自动化设备": "机器人",
   "电池": "新能源车",
-  "充电桩": "新能源车",
-  "资源": "全球资源",
-  "有色金属": "全球资源",
-  "有色": "全球资源", // R1 补偿别名
-  "稀土": "全球资源",
-  "煤炭": "全球资源",
-  "石油": "全球资源",
-  "油气": "全球资源",
-  "粮食": "全球资源",
-  "大宗商品": "全球资源",
-  "黄金": "全球资源",
+  "工业金属": "全球资源",
+  "贵金属": "全球资源",
+  "小金属": "全球资源",
+  "煤炭开采加工": "全球资源",
+  "种植业与林业": "全球资源",
 };
 
 // —— 以下纯函数可被 index_test.ts 直接单测（无 IO） ——
@@ -1465,7 +1430,6 @@ interface NightlyDeps {
   ) => Promise<GsFundTable>;
   // ③.5 超时预算覆盖（单测注入极小值验证护栏；缺省走 PROSPERITY_BUDGET_MS）
   prosperityBudgetMs?: number;
-  probeBudgetMs?: number; // ping 宽表探测预算（测试注入极小值，验证探测挂起时 ping 自行收口）
 }
 
 const REAL_DEPS: NightlyDeps = { fetchSegments, fetchFundTable };
@@ -1515,24 +1479,16 @@ async function handle(
       // 只回列名不回数据，失败消息过 safeGsMsg 脱敏；探测失败不改 ok（ping 语义仍是"函数活着"）。
       const pingKey = Deno.env.get("GS_API_KEY") || "";
       let fund: Record<string, unknown>;
-      if (!pingKey) {
-        fund = { ok: false, err: "GS_API_KEY missing" };
-      } else {
-        try {
-          // 走 deps 注入（单测可替换）+ withBudget（兜住最坏 92s，ping 不被自己的探测拖死）
-          const w = await withBudget(
-            deps.fetchFundTable(pingKey),
-            deps.probeBudgetMs ?? PROBE_BUDGET_MS,
-          );
-          fund = w.ok
-            ? { ok: true, cols: Object.keys(w.value).slice(0, 8) }
-            : { ok: false, err: "fund probe exceeded budget" };
-        } catch (e) {
-          fund = {
-            ok: false,
-            err: safeGsMsg(e instanceof Error ? e.message : String(e), pingKey),
-          };
-        }
+      try {
+        const t = pingKey
+          ? await fetchFundTable(pingKey)
+          : (() => { throw new Error("GS_API_KEY missing"); })();
+        fund = { ok: true, cols: Object.keys(t).slice(0, 8) };
+      } catch (e) {
+        fund = {
+          ok: false,
+          err: safeGsMsg(e instanceof Error ? e.message : String(e), pingKey),
+        };
       }
       return Response.json({
         ok: true,
