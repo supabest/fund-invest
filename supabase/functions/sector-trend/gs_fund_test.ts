@@ -35,8 +35,8 @@ Deno.test("parseFundTable: 无 股票代码 列 → 空数组（不炸）", () =
 // —— Task 2：L2 中位数聚合 + 跨行业百分位刻度（spec 2026-10-03 §5）——
 import { fundMedian, aggregateByThs, toProsperityScale, type FundRow } from "./gs_fund.ts";
 
-const fr = (revYoy: number | null, kcYoy: number | null, thsL2: string): FundRow =>
-  ({ code: "x", revYoy, kcYoy, thsL1: "L1", thsL2 });
+const fr = (revYoy: number | null, kcYoy: number | null, thsL2: string, thsL1 = "L1"): FundRow =>
+  ({ code: "x", revYoy, kcYoy, thsL1, thsL2 });
 
 Deno.test("fundMedian: 奇数取中、偶数取中间两值均值、空数组→NaN 由调用方兜", () => {
   assertEquals(fundMedian([3, 1, 2]), 2);
@@ -62,6 +62,21 @@ Deno.test("aggregateByThs: rev/kc 一空一非空的记录仍计一个有效样�
   // 字面量而非复用 fundMedian：后者正是被测者，自引用会让「偶数取上中位」这类 off-by-one 双向共谋通过。
   // rev 中位([5,6,7,8,9])=7、kc 中位([7,8,9])=8 → 0.5*7+0.5*8=7.5
   assertEquals(m.get("芯片")!.raw, 7.5);
+});
+
+Deno.test("aggregateByThs: 食品饮料 L1 合成行业 = 其子 L2 样本并集，同中位数口径，键与板块同名", () => {
+  const rows: FundRow[] = [
+    ...[1, 2, 3, 4, 5].map((v) => fr(v, v, "白酒", "食品饮料")),
+    ...[10, 20, 30, 40, 50].map((v) => fr(v, v, "饮料制造", "食品饮料")),
+    ...[100, 200, 300, 400, 500].map((v) => fr(v, v, "食品加工制造", "食品饮料")),
+  ];
+  const m = aggregateByThs(rows);
+  assertEquals(m.has("食品饮料"), true);      // 合成键与板块名同名
+  assertEquals(m.get("食品饮料")!.n, 15);       // 三个子 L2 共 15 只并集
+  // 合并 rev=kc=[1..5,10..50,100..500]（15 个），中位=30 → raw=0.5*30+0.5*30=30
+  assertEquals(m.get("食品饮料")!.raw, 30);
+  // 子 L2 仍各自独立成键，未被合成组覆盖（并行计数）
+  assertEquals(m.get("白酒")!.raw, 3);
 });
 
 // 2026-10-04 L2 统一：THS_DENY / 子串模糊规则已整段删除（canonical 本身即 L2 ⇒ 恒等命中），
@@ -90,10 +105,11 @@ Deno.test("mapCanonicalToThs: 不再子串/curated 模糊——同名之外一�
   assertEquals(mapCanonicalToThs("券商", new Set(["证券"])), null); // 旧 curated 会映射到 证券；统一后 券商 非板块名、不在 L2 刻度集→null
   assertEquals(mapCanonicalToThs("电力", new Set(["电力", "绿色电力"])), "电力"); // 精确优先，即便存在子串兄弟
 });
-Deno.test("mapCanonicalToThs: 空 / 主题 / 无归属 / L1例外 → null", () => {
+Deno.test("mapCanonicalToThs: 空 / 主题 / 无归属 → null；食品饮料 有合成键时命中", () => {
   assertEquals(mapCanonicalToThs("", new Set(["半导体"])), null);
   assertEquals(mapCanonicalToThs("科创芯片", new Set(["半导体"])), null);
-  assertEquals(mapCanonicalToThs("食品饮料", new Set(["白酒", "饮料制造"])), null); // L1 例外天然不命中 L2 刻度
+  assertEquals(mapCanonicalToThs("食品饮料", new Set(["白酒", "饮料制造"])), null); // 刻度集里无食品合成键→仍 null（恒等契约不变）
+  assertEquals(mapCanonicalToThs("食品饮料", new Set(["食品饮料"])), "食品饮料"); // aggregateByThs 补出合成键后恒等命中
 });
 
 Deno.test("attachCanonical: 命中给 {prosperity,src}，未命中得 null 并进 unmapped 清单", () => {
@@ -124,4 +140,22 @@ Deno.test("buildProsperity: 正常链路聚合映射（注入合成宽表）", a
   const res = await buildProsperity(fake, "KEY", ["证券"]);
   assertEquals(res.byInd.get("证券")!.src, "证券");
   assertEquals(typeof res.byInd.get("证券")!.prosperity, "number");
+});
+
+Deno.test("buildProsperity: 食品饮料 板块经 L1 合成行业命中 → prosperity 为数字且不入 unmapped", async () => {
+  const fake = async () => ({
+    "股票代码": Array.from({ length: 15 }, (_, i) => `c${i}`),
+    "营业总收入(同比增长率)[20260930]": [1, 2, 3, 4, 5, 10, 20, 30, 40, 50, 100, 200, 300, 400, 500],
+    "归属母公司股东的净利润-扣除非经常损益(同比增长率)[20260930]": [1, 2, 3, 4, 5, 10, 20, 30, 40, 50, 100, 200, 300, 400, 500],
+    "所属同花顺行业": [
+      ...Array(5).fill("食品饮料-白酒-白酒"),
+      ...Array(5).fill("食品饮料-饮料制造-饮料乳品"),
+      ...Array(5).fill("食品饮料-食品加工制造-零食"),
+    ],
+  });
+  const res = await buildProsperity(fake, "KEY", ["食品饮料"]);
+  assertEquals(res.byInd.get("食品饮料")!.src, "食品饮料");
+  assertEquals(typeof res.byInd.get("食品饮料")!.prosperity, "number");
+  assertEquals(res.unmapped.includes("食品饮料"), false);
+  assertEquals(res.mapped, 1);
 });

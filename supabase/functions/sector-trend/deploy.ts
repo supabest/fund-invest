@@ -722,10 +722,18 @@ function fundMedian(xs: number[]): number {
 
 interface ThsRaw { raw: number; n: number }
 
+// 食品饮料 L1 特判键（2026-10-05）：ETF 榜唯一 L1 板块名，与 sector_l2_map.ts 的 FOOD_L1 同字面。
+// 股票侧无 ths_l2='食品饮料'（它是 L1），恒等映射本会落空 → 该板块景气度恒 null、每轮进 unmapped。
+// 这里额外把 ths_l1='食品饮料' 的全部样本（其 L2 子行业 白酒/饮料制造/食品加工制造 的并集）按
+// 与 L2 完全相同的口径合成一个键=FOOD_L1 的「合成行业」，使 scale 含同名键 → mapCanonicalToThs 恒等命中。
+const FOOD_L1 = "食品饮料";
+
 // 按 thsL2 分组；每组内 rev 有效值、kc 有效值各取中位数；raw=0.5·med(rev)+0.5·med(kc)。
 // 「有效样本」n = 该组中 rev 或 kc 至少其一非空的记录数；n<5 不生成（spec §5 样本下限）。
+// 另按 thsL1 聚合出 FOOD_L1 合成行业（见上）。二者共用同一中位数口径，仅聚合粒度不同。
 function aggregateByThs(rows: FundRow[]): Map<string, ThsRaw> {
   const byThs = new Map<string, { rev: number[]; kc: number[]; n: number }>();
+  const food: { rev: number[]; kc: number[]; n: number } = { rev: [], kc: [], n: 0 }; // 食品饮料 L1 合成组（跨其三个 L2 子行业）
   for (const r of rows) {
     if (!r.thsL2) continue;
     let g = byThs.get(r.thsL2);
@@ -734,15 +742,28 @@ function aggregateByThs(rows: FundRow[]): Map<string, ThsRaw> {
     g.n++;
     if (r.revYoy !== null) g.rev.push(r.revYoy);
     if (r.kcYoy !== null) g.kc.push(r.kcYoy);
+    if (r.thsL1 === FOOD_L1) { // 同一有效样本并入合成组（与子行业各自计数并行，互不覆盖）
+      food.n++;
+      if (r.revYoy !== null) food.rev.push(r.revYoy);
+      if (r.kcYoy !== null) food.kc.push(r.kcYoy);
+    }
   }
   const out = new Map<string, ThsRaw>();
-  for (const [ths, g] of byThs) {
-    if (g.n < 5) continue;
+  const rawOf = (g: { rev: number[]; kc: number[] }): number | null => {
     const mr = g.rev.length ? fundMedian(g.rev) : NaN;
     const mk = g.kc.length ? fundMedian(g.kc) : NaN;
-    if (Number.isNaN(mr) && Number.isNaN(mk)) continue;
-    const raw = 0.5 * (Number.isNaN(mr) ? mk : mr) + 0.5 * (Number.isNaN(mk) ? mr : mk);
+    if (Number.isNaN(mr) && Number.isNaN(mk)) return null;
+    return 0.5 * (Number.isNaN(mr) ? mk : mr) + 0.5 * (Number.isNaN(mk) ? mr : mk);
+  };
+  for (const [ths, g] of byThs) {
+    if (g.n < 5) continue;
+    const raw = rawOf(g);
+    if (raw === null) continue;
     out.set(ths, { raw, n: g.n });
+  }
+  if (food.n >= 5) { // 合成组用同一 n>=5 门槛与口径；键=FOOD_L1 与板块名同名 → 恒等命中
+    const raw = rawOf(food);
+    if (raw !== null) out.set(FOOD_L1, { raw, n: food.n });
   }
   return out;
 }
@@ -770,7 +791,8 @@ function toProsperityScale(raws: Map<string, ThsRaw>): Map<string, number> {
 // 聚合出的键【同名】⇒ 归因退化为恒等命中（同名即命中）。原 CANON_TO_THS（curated 简称↔全称）、
 // THS_DENY（否决方向性失真）、唯一子串模糊规则，都是「剥字名 ≠ L2」时代的补偿，统一后失去
 // 存在意义；留着反而会把某板块景气度错配到名字相近的兄弟 L2（如 电力 vs 绿色电力），故整段删除。
-// 命中与否只取决于：该 L2 是否有 ≥5 样本进入景气刻度（食品饮料 为唯一 L1 例外，天然不命中→null）。
+// 命中与否只取决于：该 L2 是否有 ≥5 样本进入景气刻度。唯一 L1 板块「食品饮料」由 aggregateByThs 的
+// 合成行业(按 thsL1 并其子 L2)提供同名键而命中，不再天然落空（2026-10-05 特判）。
 function mapCanonicalToThs(canon: string, thsWithProsperity: Set<string>): string | null {
   const c = canon.trim();
   return c && thsWithProsperity.has(c) ? c : null; // 恒等：canonical 本身即 L2 名
