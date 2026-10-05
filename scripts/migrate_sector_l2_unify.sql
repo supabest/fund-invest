@@ -1,5 +1,5 @@
 -- scripts/migrate_sector_l2_unify.sql —— 板块轮动行业口径统一至同花顺二级行业（L2）
--- 源真相: scripts/sector_l2_map.ts IND_TO_L2（102 条：71 保留 → 38 个 L2 板块，31 组剔除）。勿手改本文件映射，改归属请改 IND_TO_L2 后用 tmp 生成器重出。
+-- 源真相: scripts/sector_l2_map.ts IND_TO_L2（102 条：71 保留 → 38 个 L2 板块，31 组剔除）。本文件为其一次性展开，改归属以 IND_TO_L2 为准（删/改名/重算代表三段需同步）。
 -- 执行方式: Management API /database/query（同 migrate_sector_prosperity.sql）；事务，可幂等重复执行。
 -- 影响面: 仅 sector_etf_map（宇宙表）。历史批次 sector_rotation_daily 一字不改（计划 §5 处理 A：09-30 旧名批次不改不删，10-09 新批次自然取代）。
 begin;
@@ -50,6 +50,7 @@ insert into l2_unify_map (old_ind, new_l2) values
   ('科创芯片设计', '半导体'),
   ('人工智能', '半导体'),
   ('数字经济', '半导体'),
+  ('信创', '半导体'),
   ('绿色电力', '电力'),
   ('工业有色', '工业金属'),
   ('光伏', '光伏设备'),
@@ -75,7 +76,6 @@ insert into l2_unify_map (old_ind, new_l2) values
   ('大数据', '软件开发'),
   ('金融科技', '软件开发'),
   ('软件', '软件开发'),
-  ('信创', '软件开发'),
   ('云计算', '软件开发'),
   ('生物科技', '生物制品'),
   ('疫苗', '生物制品'),
