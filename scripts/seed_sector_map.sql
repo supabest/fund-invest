@@ -1,5 +1,5 @@
 -- scripts/seed_sector_map.sql —— 由 scripts/build_universe.ts 生成（GS 15 分段 + sector_normalize 归一 + sector_l2_map 归至同花顺 L2）；勿手改，改归属规则请改 IND_TO_L2 后重跑
--- 生成日期: 2026-10-04  宇宙 340 只 / L2 板块 38 个 / 代表ETF 38 只
+-- 生成日期: 2026-10-05  宇宙 340 只 / L2 板块 38 个 / 代表ETF 38 只
 insert into sector_etf_map (etf_code, etf_name, canonical_ind, amt, is_rep, updated_on) values
   ('159996','家电ETF国泰','白色家电',6.37,true,current_date),
   ('560880','家电ETF广发','白色家电',2.8,false,current_date),
@@ -56,7 +56,6 @@ insert into sector_etf_map (etf_code, etf_name, canonical_ind, amt, is_rep, upda
   ('589110','科创人工智能ETF国泰','半导体',4.65,false,current_date),
   ('589410','科创人工智能ETF嘉实','半导体',4.47,false,current_date),
   ('159560','芯片ETF景顺','半导体',4.21,false,current_date),
-  ('562570','信创ETF华夏','半导体',4.03,false,current_date),
   ('562820','集成电路ETF嘉实','半导体',3.78,false,current_date),
   ('588420','科创创业人工智能ETF摩根','半导体',3.72,false,current_date),
   ('588920','科创芯片ETF鹏华','半导体',3.34,false,current_date),
@@ -69,7 +68,6 @@ insert into sector_etf_map (etf_code, etf_name, canonical_ind, amt, is_rep, upda
   ('159389','数字经济ETF嘉实','半导体',2.29,false,current_date),
   ('159248','人工智能ETF万家','半导体',2.21,false,current_date),
   ('588470','科创创业人工智能ETF华安','半导体',2.11,false,current_date),
-  ('159540','信创ETF易方达','半导体',2.06,false,current_date),
   ('159139','科创创业人工智能ETF华泰柏瑞','半导体',2.05,false,current_date),
   ('589230','科创人工智能ETF南方','半导体',2.01,false,current_date),
   ('159755','电池ETF广发','电池',64.22,true,current_date),
@@ -202,6 +200,7 @@ insert into sector_etf_map (etf_code, etf_name, canonical_ind, amt, is_rep, upda
   ('159107','创业板软件ETF富国','软件开发',5.21,false,current_date),
   ('159256','创业板软件ETF华夏','软件开发',4.47,false,current_date),
   ('159299','金融科技ETF易方达','软件开发',4.42,false,current_date),
+  ('562570','信创ETF华夏','软件开发',4.03,false,current_date),
   ('516000','大数据ETF华夏','软件开发',3.83,false,current_date),
   ('159890','云计算ETF招商','软件开发',3.65,false,current_date),
   ('515720','金融科技ETF富国','软件开发',3.43,false,current_date),
@@ -213,6 +212,7 @@ insert into sector_etf_map (etf_code, etf_name, canonical_ind, amt, is_rep, upda
   ('561010','软件ETF华安','软件开发',2.41,false,current_date),
   ('158012','云计算ETF南方','软件开发',2.35,false,current_date),
   ('517390','云计算ETF天弘','软件开发',2.3,false,current_date),
+  ('159540','信创ETF易方达','软件开发',2.06,false,current_date),
   ('159103','金融科技ETF汇添富','软件开发',2.05,false,current_date),
   ('159837','生物科技ETF易方达','生物制品',15.03,true,current_date),
   ('562860','疫苗ETF嘉实','生物制品',2.26,false,current_date),
