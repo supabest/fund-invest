@@ -478,3 +478,60 @@ Deno.test("prosperityBand: 高≥66 / 中33-66 / 低<33；null→null", () => {
   assertEquals(P.prosperityBand(32.9), "低");
   assertEquals(P.prosperityBand(null), null);
 });
+
+// ---------- 2026-10-07：股票页「板块轮动概览」条取数（复用基金页同一 sectorState 行/口径，不新造数据源）----------
+Deno.test("sectorStockOverview: 概要三数与双榜同源，topUp 取60日最强5(降序)、topDown 取最弱3(升序)", () => {
+  const ov = P.sectorStockOverview(PROD_ROWS, counts(ACC), 5, 3);
+  assertEquals(ov.up, 12); // 与 sectorSummaryCounts / lists.up.length 同源，杜绝两处数字打架
+  assertEquals(ov.entangled, 24);
+  assertEquals(ov.down, 74);
+  assertEquals(ov.total, 110);
+  assertEquals(ov.accumulating, 6);
+  assertEquals(ov.batch, "2026-10-01");
+  assertEquals(ov.stale, false);
+  assertEquals(ov.topUp.map((r) => r.ind), ["医疗", "银行", "煤炭", "房地产", "油气"]);
+  assertEquals(ov.topUp.map((r) => r.m60), [0.1405, 0.1238, 0.1135, 0.1102, 0.0987]);
+  assertEquals(ov.topDown.map((r) => r.ind), ["工业母机", "半导体龙头", "科创新材料"]);
+  assertEquals(ov.topDown.map((r) => r.m60), [-0.2872, -0.2845, -0.2806]);
+  assertEquals(ov.topUp[0].state, "强多头");
+  assertEquals(ov.topDown[0].state, "空头排列");
+  assertEquals(ov.topUp[0].prosperity, null); // 本批夹具无 prosperity → null（与真实 0 区分留给 fmt）
+});
+
+Deno.test("sectorStockOverview: topUp/topDown 不硬凑——榜不足请求数时如实截断，无调整行则 topDown 空", () => {
+  const rows = [
+    row({ ind: "甲", pk_etf: "a", state: "多头", m60: 0.02, pos52: 50 }),
+    row({ ind: "乙", pk_etf: "b", state: "强多头", m60: 0.05, pos52: 50 }),
+  ];
+  const ov = P.sectorStockOverview(rows, new Map(), 5, 3);
+  assertEquals(ov.topUp.map((r) => r.ind), ["乙", "甲"]); // 60 日降序
+  assertEquals(ov.topDown.length, 0);
+  assertEquals(ov.up, 2);
+});
+
+Deno.test("sectorStockOverview: 空/null/undefined 行安全降级——计数全 0、榜单空、batch null，绝不抛", () => {
+  for (const rows of [[], null, undefined]) {
+    const ov = P.sectorStockOverview(rows, counts(ACC), 5, 3);
+    assertEquals(ov.total, 0);
+    assertEquals(ov.up, 0);
+    assertEquals(ov.entangled, 0);
+    assertEquals(ov.down, 0);
+    assertEquals(ov.topUp.length, 0);
+    assertEquals(ov.topDown.length, 0);
+    assertEquals(ov.batch, null);
+    assertEquals(ov.stale, false);
+  }
+});
+
+Deno.test("sectorStockOverview: 退化行 m60→null（engine 兜底伪 0 不外泄，Task2 评审 M5）", () => {
+  const rows = [row({ ind: "退化多头", pk_etf: "158049", state: "多头", m60: 0, pos52: null })];
+  const ov = P.sectorStockOverview(rows, counts({ "158049": 6 }), 5, 3);
+  assertEquals(ov.topUp.length, 1);
+  assertEquals(ov.topUp[0].m60, null, "退化行不得以 0 冒充平盘");
+});
+
+Deno.test("sectorStockOverview: 陈旧批次透传 stale=true", () => {
+  const rows = [row({ ind: "陈旧行业", pk_etf: "s1", state: "多头", m60: 0.03, pos52: 50, stale: true })];
+  const ov = P.sectorStockOverview(rows, new Map(), 5, 3);
+  assertEquals(ov.stale, true);
+});

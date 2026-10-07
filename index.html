@@ -204,6 +204,17 @@
   .sector-pros-高{color:var(--jade);} .sector-pros-中{color:var(--gold);} .sector-pros-低{color:var(--muted);}
   .sector-pros-高,.sector-pros-中,.sector-pros-低{font-size:11px;margin-left:2px;}
   .sector-pros-src{color:var(--muted);font-size:11px;margin-left:2px;}
+  /* 股票页「板块轮动概览」条（2026-10-07）：复用 sector 卡片既有 token，精简三行只读上下文，不新造配色体系 */
+  .sector-ov-head{display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-family:var(--serif); font-size:14px; color:var(--ivory); font-weight:600; padding:14px 16px 4px;}
+  .sector-ov-head .batch{font-family:var(--sans); font-weight:400; font-size:11.5px; color:var(--muted);}
+  .sector-ov-jump{margin-left:auto; font-size:11.5px; color:var(--gold); background:none; border:1px solid var(--line-strong); border-radius:6px; padding:2px 9px; cursor:pointer; font-family:var(--sans);}
+  .sector-ov-sum{font-size:12px; color:var(--muted); padding:6px 16px 10px; line-height:1.7;}
+  .sector-ov-sum b{color:var(--ivory); font-weight:600;}
+  .sector-ov-row{display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:0 16px 8px; font-size:12px;}
+  .sector-ov-lbl{font-size:11px; padding:2px 8px; border-radius:20px; white-space:nowrap;}
+  .sector-ov-item{display:inline-flex; align-items:center; gap:5px; font-size:12px; padding:2px 9px; border-radius:6px; background:var(--panel-2);}
+  .sector-ov-item em{font-style:normal; color:var(--ivory); font-variant-numeric:tabular-nums;}
+  .sector-ov-item.st-up>span:first-child{color:var(--jade);} .sector-ov-item.st-down>span:first-child{color:var(--brick);}
   /* 退化行（代表ETF 不足 61 根，m60/m20/乖离不可算）：置榜末 + 标灰，与真实信号区分 */
   .sector-row.deg{opacity:.66;}
   .sector-row.deg .sector-ind{font-weight:500;}
@@ -1121,6 +1132,32 @@ function sectorFoldState(collapsed){
   return collapsed === true
     ? { label: '展开 ▾', bodyShown: false }
     : { label: '收起 ▴', bodyShown: true };
+}
+// 股票页「板块轮动概览」条取数（2026-10-07）：直接复用基金页同一 sectorState 行数据，走与
+// sectorCardHtml **完全同源**的排序/计数（sectorRankLists + sectorSummaryCounts），只摘精简三行所需——
+// 概要三数 + 60 日最强 upN 个 + 60 日最弱 downN 个。纯只读、不新造数据源、不改任何排序，杜绝两处数字打架。
+// m60 经 sectorRowM60 取值：退化行（engine 兜底 0）返回 null，绝不以伪 0 冒充平盘（Task2 评审 M5）。
+// rows 为 null/空时安全降级：计数全 0、榜单空、batch null，绝不抛（供股票页无批次时不渲染该条）。
+function sectorStockOverview(rows, accCounts, upN, downN){
+  const list = Array.isArray(rows) ? rows : [];
+  const lists = sectorRankLists(list, accCounts);
+  const counts = sectorSummaryCounts(list, accCounts);
+  const cap = (n)=> (typeof n === 'number' && isFinite(n) && n >= 0) ? n : 0;
+  const pick = (arr, k)=> arr.slice(0, k).map(r=>({
+    ind: r.ind,
+    state: r.state,
+    m60: sectorRowM60(r, accCounts),
+    prosperity: sectorNum(r.prosperity),
+  }));
+  return {
+    total: counts.total,
+    up: counts.up, entangled: counts.entangled, down: counts.down,
+    accumulating: counts.accumulating,
+    batch: (list[0] && list[0].batch_date) ? list[0].batch_date : null,
+    stale: list.some(r=>r.stale),
+    topUp: pick(lists.up, cap(upN)),
+    topDown: pick(lists.down, cap(downN)),
+  };
 }
 // ==== SECTOR_PURE_END ====
 
@@ -2068,6 +2105,28 @@ function renderFundList(){
   });
 }
 
+// 股票页「板块轮动概览」条（2026-10-07）：直接复用基金页 loadSectorRotation 已加载的 sectorState（零新增网络请求）。
+// 取数走纯函数 sectorStockOverview（与基金页双榜同一 sectorRankLists/sectorSummaryCounts 口径，不另造排序）；
+// sectorState 为空（未登录/无批次/尚未加载）则整条不渲染，与 #sectorCardRoot 空态一致，绝不显示误导性占位。
+// 「查看完整板块轮动」= 切回基金页签（复用现成 tab-btn .click()），不把大卡重复一份到本页。
+function sectorStockStripHtml(){
+  if(!sectorState || !sectorState.rows || !sectorState.rows.length) return '';
+  const accCounts = sectorState.accCounts || new Map();
+  const ov = sectorStockOverview(sectorState.rows, accCounts, 5, 3);
+  const item = (r)=>{
+    const band = prosperityBand(r.prosperity);
+    return `<span class="sector-ov-item ${sectorStateClass(r.state)}" title="${escapeHtml(String(r.state||'—'))}"><span>${escapeHtml(String(r.ind))}</span><em>${fmtRatioPct(r.m60)}</em>${band?`<i class="sector-pros-${band}">${band}</i>`:''}</span>`;
+  };
+  const line = (lbl, cls, arr, emptyMsg)=>`<div class="sector-ov-row"><span class="sector-ov-lbl ${cls}">${lbl}</span>${arr.length?arr.map(item).join(''):`<span class="sector-muted">${emptyMsg}</span>`}</div>`;
+  const staleTag = ov.stale ? '<span class="sector-stale">数据陈旧(昨日批次)</span>' : '';
+  return `<div class="fund-card">
+    <div class="sector-ov-head">板块轮动概览 <span class="batch">批次 ${escapeHtml(String(ov.batch||'—'))}</span>${staleTag}<button type="button" class="sector-ov-jump" id="sectorOvJumpBtn">查看完整板块轮动 →</button></div>
+    <div class="sector-ov-sum">向上 <b>${ov.up}</b> · 纠缠 <b>${ov.entangled}</b> · 调整 <b>${ov.down}</b> · 共 ${ov.total} 板块${ov.accumulating?` · 数据积累中 <b>${ov.accumulating}</b>`:''}</div>
+    ${line('转多','st-up',ov.topUp,'本批次无向上行业')}
+    ${line('退潮','st-down',ov.topDown,'本批次无调整行业')}
+  </div>`;
+}
+
 function renderStockSection(){
   const list = document.getElementById('stockList');
   document.getElementById('stockCountHint').textContent = (stocks.length ? '共 ' + stocks.length + ' 只 · ' : '') + '数据每日自动更新';
@@ -2086,8 +2145,12 @@ function renderStockSection(){
     }
   }
   list.innerHTML = '';
-  // Top10 区块固定为股票列表第一张卡片；无批次时 renderScoreTop10 内部降级为占位文案
+  // 板块轮动概览条：股票列表最上一张卡（自上而下——先看行业方向，再看个股初筛）；无 sectorState 时返回空串不占位
+  list.insertAdjacentHTML('beforeend', sectorStockStripHtml());
+  // Top10 区块紧随其后；无批次时 renderScoreTop10 内部降级为占位文案
   list.insertAdjacentHTML('beforeend', renderScoreTop10());
+  const sectorOvJump = document.getElementById('sectorOvJumpBtn');
+  if(sectorOvJump) sectorOvJump.addEventListener('click', ()=>{ const b = document.querySelector('.tab-btn[data-tab="funds"]'); if(b) b.click(); });
   if(stocks.length===0){
     list.insertAdjacentHTML('beforeend', '<div class="empty">还没有添加股票<br>A股填6位代码，港股填5位代码，行情每日自动更新</div>');
     return;

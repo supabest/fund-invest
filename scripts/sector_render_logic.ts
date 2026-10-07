@@ -96,6 +96,25 @@ export interface SectorFoldState {
   bodyShown: boolean;
 }
 
+/** 股票页「板块轮动概览」条：单项（ind/state + 60 日涨跌 m60（退化行 null）+ 景气度（null 与 0 区分）） */
+export interface SectorOverviewItem {
+  ind: string;
+  state?: string | null;
+  m60: number | null;
+  prosperity: number | null;
+}
+export interface SectorStockOverview {
+  total: number;
+  up: number;
+  entangled: number;
+  down: number;
+  accumulating: number;
+  batch: string | null;
+  stale: boolean;
+  topUp: SectorOverviewItem[];
+  topDown: SectorOverviewItem[];
+}
+
 /** 注入的单行 count 取数（页面传 sector_kline head count，测试传假实现） */
 // deno-lint-ignore no-explicit-any
 export type AccCountFetcher = (pk: any) => any;
@@ -116,6 +135,7 @@ const EXPORT_NAMES = [
   "sectorThemeSummaries", "sectorNum", "fmtRatioPct", "fmtPoints", "fmtScoreVal",
   "fmtVr", "fmtProsperity", "prosperityBand", "sectorLabelDots", "matchApproxPools",
   "sectorBuildAccCounts", "sectorIsStaleReq", "sectorCreateReqGuard", "sectorFoldState",
+  "sectorStockOverview",
 ];
 
 async function load(): Promise<Record<string, unknown>> {
@@ -238,4 +258,14 @@ export function sectorCreateReqGuard(): SectorReqGuard {
 // 不存在第二份「折叠时显示什么」的副本；实现体唯一住在 index.html SECTOR_PURE 块。
 export function sectorFoldState(collapsed: unknown): SectorFoldState {
   return fn("sectorFoldState")(collapsed) as SectorFoldState;
+}
+// 2026-10-07：股票页「板块轮动概览」条取数——复用基金页同一 sectorState 行与同源排序/计数。
+// 实现体唯一住在 index.html SECTOR_PURE 块，本模块只抽出不复制。
+export function sectorStockOverview(
+  rows: SectorRow[] | null | undefined,
+  accCounts?: BarsCounts,
+  upN = 5,
+  downN = 3,
+): SectorStockOverview {
+  return fn("sectorStockOverview")(rows ?? [], accCounts ?? null, upN, downN) as SectorStockOverview;
 }
