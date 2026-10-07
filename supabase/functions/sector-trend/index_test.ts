@@ -46,6 +46,8 @@ function row(over: Partial<SectorRow> = {}): SectorRow {
     state: "强多头",
     labels: ["过热警示"],
     barsN: 640,
+    underwaterDays: 40,
+    drawdownPct: -0.12,
     score: 55.5,
     v: 60,
     m: 50,
@@ -127,6 +129,8 @@ Deno.test("toDbRow: 24 引擎字段 → 25 列 DDL 形状；barsN → bars_n 原
     theme: "机器人",
     stale: false,
     bars_n: 133,
+    underwater_days: 40,
+    drawdown_pct: -0.12,
     prosperity: null,
     prosperity_src: null,
   });
@@ -191,8 +195,8 @@ Deno.test("shapeStaleRow: 换 batch_date + stale=true，其余（含 labels）�
   assertEquals(s.m60, -0.1);
   assertEquals(s.pos52, null);
   assertEquals(s.bars_n, 640); // stale copy 整行搬，bars_n 原样沿用昨日（不重算）
-  // Task4：prosperity/prosperity_src 随 prev 整行搬（列数 25→27）
-  assertEquals(Object.keys(s).length, 27);
+  // Task4：prosperity/prosperity_src 随 prev 整行搬；2026-10-07 再加 underwater_days/drawdown_pct（列数 27→29）
+  assertEquals(Object.keys(s).length, 29);
 });
 
 Deno.test("shapeStaleRow: 不改传入对象（纯函数）", () => {

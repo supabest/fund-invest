@@ -69,7 +69,7 @@ export interface MapRow {
   is_rep: boolean;
 }
 
-// sector_rotation_daily 的 27 列（scripts/migrate_sector_prosperity.sql 增 prosperity/prosperity_src）—— 实列名，bars_n 为终审 I-2 新增
+// sector_rotation_daily 的 29 列（migrate_sector_prosperity.sql 增 prosperity/prosperity_src；migrate_sector_underwater.sql 增 underwater_days/drawdown_pct）—— 实列名，bars_n 为终审 I-2 新增
 export interface DailyRow {
   batch_date: string;
   ind: string;
@@ -96,6 +96,8 @@ export interface DailyRow {
   theme: string | null;
   stale: boolean;
   bars_n: number; // 代表ETF当日可用 K 线根数（终审 I-2；engine SectorRow.barsN 原样落库）
+  underwater_days: number | null; // 回撤时长上下文（2026-10-07）：距最近 250 日高点交易日数；0=创新高、null=窗口未成形
+  drawdown_pct: number | null; // 距该高点回撤（比率，负值）；null=窗口未成形
   prosperity: number | null; // 行业景气度展示（0..100 或 null）；纯展示，绝不进 score
   prosperity_src: string | null; // 归因同花顺 L2 行业名或 null（未命中）
 }
@@ -137,7 +139,7 @@ const r4 = (
     ? null
     : Math.round(x * 10000) / 10000);
 
-// SectorRow → DB 行：24 引擎字段 → 27 列（scripts/migrate_sector_prosperity.sql 增 prosperity/prosperity_src）；barsN → bars_n，终审 I-2
+// SectorRow → DB 行：24 引擎字段 → 29 列（prosperity/prosperity_src + underwater_days/drawdown_pct）；barsN → bars_n，终审 I-2
 export function toDbRow(
   r: SectorRow,
   batchDate: string,
@@ -169,6 +171,8 @@ export function toDbRow(
     theme: r.theme,
     stale,
     bars_n: r.barsN, // 不 r4 取整（计数不是金额）、不兜 null（0 根也是事实）
+    underwater_days: r.underwaterDays, // 计数不 r4；0=创新高（事实）、null=窗口未成形，均原样落
+    drawdown_pct: r4(r.drawdownPct), // 比率经 r4 收敛；null 透传
     prosperity: null, // 由编排层 ③.5 在落库前按 ind 附着（stale 行走 shapeStaleRow 继承昨日值）
     prosperity_src: null,
   };

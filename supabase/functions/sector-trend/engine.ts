@@ -17,6 +17,7 @@ export interface SectorRow {
   close: number; ma20: number; ma60: number; ma120: number;
   m20: number; m60: number; pos52: number | null; dev60: number;
   vr: number | null; mp: number | null; dm20: number | null;
+  underwaterDays: number | null; drawdownPct: number | null;
   state: '强多头' | '多头' | '纠缠' | '走弱' | '空头排列';
   labels: string[]; barsN: number;
   score: number | null; v: number | null; m: number | null; l: number | null; q: number | null;
@@ -74,6 +75,21 @@ function volRatio(vols: number[]): number | null {
   if (vols.length < 120) return null;
   const a20 = sma(vols, 20), a120 = sma(vols, 120);
   return a120 === 0 ? null : a20 / a120;
+}
+
+// 回撤时长上下文（2026-10-07）：距最近一次 250 日窗口高点的交易日数 + 距该高点回撤%。
+// 仅上下文展示（与景气度同级），绝不进 score/排序。窗口对齐 pos52 的 250 根；
+// 样本 <250 ⇒ 窗口高点未成形 ⇒ days/dd 均 null（同 pos52 留空口径，绝不用部分窗口冒充）。
+// 相同高点取最后一次（lastIndexOf）⇒ 度量的是「自最近一次触及高点以来」的水下时长。
+function underwater(closes: number[], w = 250): { days: number | null; dd: number | null } {
+  if (closes.length < w) return { days: null, dd: null };
+  const win = closes.slice(-w);
+  const c = win[win.length - 1];
+  const peak = Math.max(...win);
+  if (!(peak > 0)) return { days: null, dd: null };
+  if (c >= peak) return { days: 0, dd: 0 }; // 正处窗口新高
+  const lastPeak = win.lastIndexOf(peak);
+  return { days: (win.length - 1) - lastPeak, dd: c / peak - 1 };
 }
 
 function classifyState(ma20: number, ma60: number, ma120: number, close: number): State {
@@ -156,6 +172,7 @@ export function computeSectorRows(inputs: SectorInput[]): SectorRow[] {
     const m20 = m20raw ?? 0; // 类型 close/m20/dev60 为 number：样本不足以 0 兜底（历史不足另行处理）
     const p52 = pos52(closes);
     const vr = volRatio(vols);
+    const uw = underwater(closes);
     const dev60 = ma60 === 0 ? 0 : close / ma60 - 1;
     const mp = mpOf[idx];
     const dm20 = (isNum(mp) && isNum(inp.prevMp)) ? mp - inp.prevMp : null;
@@ -191,6 +208,7 @@ export function computeSectorRows(inputs: SectorInput[]): SectorRow[] {
       close, ma20, ma60, ma120,
       m20, m60: m60 ?? 0, pos52: p52, dev60,
       vr, mp, dm20,
+      underwaterDays: uw.days, drawdownPct: uw.dd,
       state, labels, barsN,
       score: score === null ? null : round2(score),
       v: vAvg === null ? null : round2(vAvg),

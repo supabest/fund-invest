@@ -18,6 +18,7 @@ interface SectorRow {
   close: number; ma20: number; ma60: number; ma120: number;
   m20: number; m60: number; pos52: number | null; dev60: number;
   vr: number | null; mp: number | null; dm20: number | null;
+  underwaterDays: number | null; drawdownPct: number | null;
   state: '强多头' | '多头' | '纠缠' | '走弱' | '空头排列';
   labels: string[]; barsN: number;
   score: number | null; v: number | null; m: number | null; l: number | null; q: number | null;
@@ -75,6 +76,21 @@ function volRatio(vols: number[]): number | null {
   if (vols.length < 120) return null;
   const a20 = sma(vols, 20), a120 = sma(vols, 120);
   return a120 === 0 ? null : a20 / a120;
+}
+
+// 回撤时长上下文（2026-10-07）：距最近一次 250 日窗口高点的交易日数 + 距该高点回撤%。
+// 仅上下文展示（与景气度同级），绝不进 score/排序。窗口对齐 pos52 的 250 根；
+// 样本 <250 ⇒ 窗口高点未成形 ⇒ days/dd 均 null（同 pos52 留空口径，绝不用部分窗口冒充）。
+// 相同高点取最后一次（lastIndexOf）⇒ 度量的是「自最近一次触及高点以来」的水下时长。
+function underwater(closes: number[], w = 250): { days: number | null; dd: number | null } {
+  if (closes.length < w) return { days: null, dd: null };
+  const win = closes.slice(-w);
+  const c = win[win.length - 1];
+  const peak = Math.max(...win);
+  if (!(peak > 0)) return { days: null, dd: null };
+  if (c >= peak) return { days: 0, dd: 0 }; // 正处窗口新高
+  const lastPeak = win.lastIndexOf(peak);
+  return { days: (win.length - 1) - lastPeak, dd: c / peak - 1 };
 }
 
 function classifyState(ma20: number, ma60: number, ma120: number, close: number): State {
@@ -157,6 +173,7 @@ function computeSectorRows(inputs: SectorInput[]): SectorRow[] {
     const m20 = m20raw ?? 0; // 类型 close/m20/dev60 为 number：样本不足以 0 兜底（历史不足另行处理）
     const p52 = pos52(closes);
     const vr = volRatio(vols);
+    const uw = underwater(closes);
     const dev60 = ma60 === 0 ? 0 : close / ma60 - 1;
     const mp = mpOf[idx];
     const dm20 = (isNum(mp) && isNum(inp.prevMp)) ? mp - inp.prevMp : null;
@@ -192,6 +209,7 @@ function computeSectorRows(inputs: SectorInput[]): SectorRow[] {
       close, ma20, ma60, ma120,
       m20, m60: m60 ?? 0, pos52: p52, dev60,
       vr, mp, dm20,
+      underwaterDays: uw.days, drawdownPct: uw.dd,
       state, labels, barsN,
       score: score === null ? null : round2(score),
       v: vAvg === null ? null : round2(vAvg),
@@ -904,7 +922,7 @@ interface MapRow {
   is_rep: boolean;
 }
 
-// sector_rotation_daily 的 27 列（scripts/migrate_sector_prosperity.sql 增 prosperity/prosperity_src）—— 实列名，bars_n 为终审 I-2 新增
+// sector_rotation_daily 的 29 列（migrate_sector_prosperity.sql 增 prosperity/prosperity_src；migrate_sector_underwater.sql 增 underwater_days/drawdown_pct）—— 实列名，bars_n 为终审 I-2 新增
 interface DailyRow {
   batch_date: string;
   ind: string;
@@ -931,6 +949,8 @@ interface DailyRow {
   theme: string | null;
   stale: boolean;
   bars_n: number; // 代表ETF当日可用 K 线根数（终审 I-2；engine SectorRow.barsN 原样落库）
+  underwater_days: number | null; // 回撤时长上下文（2026-10-07）：距最近 250 日高点交易日数；0=创新高、null=窗口未成形
+  drawdown_pct: number | null; // 距该高点回撤（比率，负值）；null=窗口未成形
   prosperity: number | null; // 行业景气度展示（0..100 或 null）；纯展示，绝不进 score
   prosperity_src: string | null; // 归因同花顺 L2 行业名或 null（未命中）
 }
@@ -972,7 +992,7 @@ const r4 = (
     ? null
     : Math.round(x * 10000) / 10000);
 
-// SectorRow → DB 行：24 引擎字段 → 27 列（scripts/migrate_sector_prosperity.sql 增 prosperity/prosperity_src）；barsN → bars_n，终审 I-2
+// SectorRow → DB 行：24 引擎字段 → 29 列（prosperity/prosperity_src + underwater_days/drawdown_pct）；barsN → bars_n，终审 I-2
 function toDbRow(
   r: SectorRow,
   batchDate: string,
@@ -1004,6 +1024,8 @@ function toDbRow(
     theme: r.theme,
     stale,
     bars_n: r.barsN, // 不 r4 取整（计数不是金额）、不兜 null（0 根也是事实）
+    underwater_days: r.underwaterDays, // 计数不 r4；0=创新高（事实）、null=窗口未成形，均原样落
+    drawdown_pct: r4(r.drawdownPct), // 比率经 r4 收敛；null 透传
     prosperity: null, // 由编排层 ③.5 在落库前按 ind 附着（stale 行走 shapeStaleRow 继承昨日值）
     prosperity_src: null,
   };

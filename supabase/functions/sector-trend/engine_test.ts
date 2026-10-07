@@ -288,3 +288,26 @@ Deno.test('用例11 mp 截面: 高 m60 行业 mp 更大', () => {
   assertClose(A.mp!, 75, 'A mp=(1+0.5)/2*100');
   assertClose(B.mp!, 25, 'B mp=(0+0.5)/2*100');
 });
+
+// ---------- 用例12：回撤时长上下文 underwaterDays / drawdownPct（仅展示，不进 score） ----------
+Deno.test('用例12 水下时长: 高点后回落 5 根 → days=5、dd=close/peak-1', () => {
+  // 250 根：前 245 根报 100（高点在 idx 244），后 5 根逐跌 90/80/70/60/50
+  const closes = [...Array(245).fill(100), 90, 80, 70, 60, 50];
+  const r = only(input(bars(closes)));
+  assertEquals(r.underwaterDays, 5);
+  assertClose(r.drawdownPct, -0.5, 'dd=50/100-1');
+});
+
+Deno.test('用例12b 创新高: 末根即窗口最高 → days=0、dd=0', () => {
+  const closes = seq(250, (i) => 10 + i); // 单调升，末根 259 为最大值
+  const r = only(input(bars(closes)));
+  assertEquals(r.underwaterDays, 0);
+  assertEquals(r.drawdownPct, 0);
+});
+
+Deno.test('用例12c 样本<250: 窗口高点未成形 → days/dd 均 null（不用部分窗口冒充）', () => {
+  const closes = Array(100).fill(50);
+  const r = only(input(bars(closes)));
+  assertEquals(r.underwaterDays, null);
+  assertEquals(r.drawdownPct, null);
+});
