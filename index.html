@@ -204,6 +204,14 @@
   .sector-pros-高{color:var(--jade);} .sector-pros-中{color:var(--gold);} .sector-pros-低{color:var(--muted);}
   .sector-pros-高,.sector-pros-中,.sector-pros-低{font-size:11px;margin-left:2px;}
   .sector-pros-src{color:var(--muted);font-size:11px;margin-left:2px;}
+  /* 因子完整度徽标：三腿齐=绿(ok)、有缺=琥珀(warn)；复用既有 token，不新造体系 */
+  .sector-legs{font-size:10.5px;padding:1px 7px;border-radius:20px;margin-left:3px;background:var(--panel-2);font-family:var(--sans);}
+  .sector-legs.ok{color:var(--jade);}
+  .sector-legs.warn{color:var(--gold);}
+  /* 回撤时长 chip：创新高=绿、水下=砖红（复用既有 token） */
+  .sector-uw{font-size:10.5px;padding:1px 7px;border-radius:20px;margin-left:3px;background:var(--panel-2);font-family:var(--sans);}
+  .sector-uw.uw-high{color:var(--jade);}
+  .sector-uw.uw-under{color:var(--brick);}
   /* 股票页「板块轮动概览」条（2026-10-07）：复用 sector 卡片既有 token，精简三行只读上下文，不新造配色体系 */
   .sector-ov-head{display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-family:var(--serif); font-size:14px; color:var(--ivory); font-weight:600; padding:14px 16px 4px;}
   .sector-ov-head .batch{font-family:var(--sans); font-weight:400; font-size:11.5px; color:var(--muted);}
@@ -1159,6 +1167,27 @@ function sectorStockOverview(rows, accCounts, upN, downN){
     topDown: pick(lists.down, cap(downN)),
   };
 }
+// 因子完整度（2026-10-07）：把「行业分实际按 V/M/L 哪几条腿归一算的、缺哪条」显性化，
+// 使缺料算出的分与满腿算出的分一眼可辨（透明/公平）。仅读 r.v/r.m/r.l 判 null，
+// 不改任何评分口径（renorm 逻辑原样，这里只是把已发生的事显示出来）。Q 恒缺，沿用既有
+// 「Q 无数据时 V/M/L renorm」脚注，不进徽标以免每行刷屏。0 为有效值，null/undefined/非有限才算缺。
+function sectorLegCompleteness(r){
+  const legs = [['V', r && r.v], ['M', r && r.m], ['L', r && r.l]];
+  const present = legs.filter((p)=> sectorNum(p[1]) !== null).map((p)=> p[0]);
+  const missing = legs.filter((p)=> sectorNum(p[1]) === null).map((p)=> p[0]);
+  const full = missing.length === 0;
+  const label = present.length === 0 ? '无因子腿'
+    : (full ? 'VML 全' : ('缺' + missing.join('') + '·' + present.join('') + '归一'));
+  return { present, missing, full, computedOn: present.join('/'), label };
+}
+// 回撤时长 chip 视图（2026-10-07）：days 为 null/undefined ⇒ 不显示（窗口未成形，同 pos52 留空口径，
+// 绝不用部分窗口冒充）；days=0 ⇒ “创新高”；否则 “水下 N日 · −X%”（dd 缺失时百分比位显—）。仅上下文，不进评分/排序。
+function sectorUnderwaterView(days, dd){
+  const d = sectorNum(days);
+  if(d === null) return { shown: false, text: '', cls: '' };
+  if(d === 0) return { shown: true, text: '创新高', cls: 'uw-high' };
+  return { shown: true, text: '水下 ' + d + '日 · ' + fmtRatioPct(dd), cls: 'uw-under' };
+}
 // ==== SECTOR_PURE_END ====
 
 const SECTOR_DOWN_PREVIEW = 20; // 调整榜默认预览条数（本批次 74 条，移动端不至于冗长）
@@ -1253,7 +1282,11 @@ function sectorRowHtml(r, accCounts, pools){
   const m = sectorDisplayMetrics(r, accCounts);
   const factors = '行业四因子（规模加权）：估值 ' + fmtScoreVal(r.v) + ' · 动量 ' + fmtScoreVal(r.m)
     + ' · 规模 ' + fmtScoreVal(r.l) + ' · 景气 ' + fmtScoreVal(r.q) + '（Q 无数据时 V/M/L renorm 46/38/15）';
+  const legs = sectorLegCompleteness(r);
+  const uw = sectorUnderwaterView(r.underwater_days, r.drawdown_pct);
   let tip = factors;
+  tip += '\n行业分实际参与腿：' + (legs.full ? 'V/M/L 全参与' : (legs.computedOn ? (legs.computedOn + '（缺失 ' + legs.missing.join('/') + '，按 ' + legs.present.length + ' 腿 renorm 归一）') : '无有效因子腿'));
+  if(uw.shown) tip += '\n回撤时长（仅上下文，不进评分/排序）：' + uw.text + '——距最近 250 日窗口高点的交易日数与回撤。';
   if(m.accumulating){
     tip += '\n代表ETF 历史 ' + (m.barsN === null ? '未知' : m.barsN + ' 根') + '（<250）⇒ 52周分位与 ΔM20 留空，pos52/dm20 相关标签留空（spec §5 历史不足处理）。';
   }
@@ -1270,7 +1303,9 @@ function sectorRowHtml(r, accCounts, pools){
   const prosHtml = ` · 景气 <em>${fmtProsperity(pros)}</em>${band ? `<span class="sector-pros-${band}">${band}</span>` : ''}${prosSrcHtml}`;
   tip += '\n景气度=同花顺L2「' + String(r.prosperity_src || '—') + '」绝对基本面中位数跨行业百分位，仅展示、不参与行业分与排序。';
   const metrics = `乖离MA60 <em>${fmtRatioPct(m.dev60)}</em> · 20日 <em>${fmtRatioPct(m.m20)}</em> · 60日 <em>${fmtRatioPct(m.m60)}</em>`
-    + ` · 52周分位 <em>${fmtPoints(m.pos52)}</em> · ΔM20 <em>${fmtPoints(m.dm20)}</em> · 量比 <em>${fmtVr(m.vr)}</em> · 行业分 <em>${fmtScoreVal(m.score)}</em>` + prosHtml
+    + ` · 52周分位 <em>${fmtPoints(m.pos52)}</em> · ΔM20 <em>${fmtPoints(m.dm20)}</em> · 量比 <em>${fmtVr(m.vr)}</em> · 行业分 <em>${fmtScoreVal(m.score)}</em>`
+    + ` <span class="sector-legs ${legs.full ? 'ok' : 'warn'}">${escapeHtml(legs.label)}</span>`
+    + (uw.shown ? ` <span class="sector-uw ${uw.cls}">${escapeHtml(uw.text)}</span>` : '') + prosHtml
     + (m.accumulating ? ` · <span class="sector-acc">数据积累中(n=${m.barsN === null ? '—' : escapeHtml(String(m.barsN))})</span>` : '')
     + (m.degenerate ? ' <span class="sector-deg-tag">均线不足，状态不可靠</span>' : '');
   const hint = sectorPoolHint(r.ind, pools);

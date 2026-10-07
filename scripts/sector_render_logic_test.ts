@@ -535,3 +535,84 @@ Deno.test("sectorStockOverview: 陈旧批次透传 stale=true", () => {
   const ov = P.sectorStockOverview(rows, new Map(), 5, 3);
   assertEquals(ov.stale, true);
 });
+
+// ---------- 2026-10-07：因子完整度徽标（V/M/L 哪几条实际参与、缺哪条；仅展示，不改评分） ----------
+Deno.test("sectorLegCompleteness: 三腿齐 → full、computedOn=V/M/L、label 'VML 全'", () => {
+  const c = P.sectorLegCompleteness(row({ v: 60, m: 40, l: 55 }));
+  assertEquals(c.present, ["V", "M", "L"]);
+  assertEquals(c.missing, []);
+  assertEquals(c.full, true);
+  assertEquals(c.computedOn, "V/M/L");
+  assertEquals(c.label, "VML 全");
+});
+
+Deno.test("sectorLegCompleteness: 缺 L → present V/M、missing L、label '缺L·VM归一'（Q 恒缺不计入）", () => {
+  const c = P.sectorLegCompleteness(row({ v: 60, m: 40, l: null, q: null }));
+  assertEquals(c.present, ["V", "M"]);
+  assertEquals(c.missing, ["L"]);
+  assertEquals(c.full, false);
+  assertEquals(c.computedOn, "V/M");
+  assertEquals(c.label, "缺L·VM归一");
+});
+
+Deno.test("sectorLegCompleteness: 缺两条 → 只按单腿归一，label 明示缺失与参与", () => {
+  const c = P.sectorLegCompleteness(row({ v: 60, m: null, l: null }));
+  assertEquals(c.present, ["V"]);
+  assertEquals(c.missing, ["M", "L"]);
+  assertEquals(c.computedOn, "V");
+  assertEquals(c.label, "缺ML·V归一");
+});
+
+Deno.test("sectorLegCompleteness: 全缺 → present 空、computedOn 空、label '无因子腿'", () => {
+  const c = P.sectorLegCompleteness(row({ v: null, m: null, l: null }));
+  assertEquals(c.present, []);
+  assertEquals(c.missing, ["V", "M", "L"]);
+  assertEquals(c.full, false);
+  assertEquals(c.computedOn, "");
+  assertEquals(c.label, "无因子腿");
+});
+
+Deno.test("sectorLegCompleteness: 0 是有效值不算缺；null/undefined/非有限才算缺", () => {
+  assertEquals(P.sectorLegCompleteness(row({ v: 0, m: 0, l: 0 })).missing, [], "0 不得当缺失");
+  const c = P.sectorLegCompleteness(row({ v: 0, m: undefined, l: NaN }));
+  assertEquals(c.present, ["V"]);
+  assertEquals(c.missing, ["M", "L"]);
+});
+
+Deno.test("sectorLegCompleteness: 行 null/undefined 安全降级为全缺，绝不抛", () => {
+  for (const r of [null, undefined]) {
+    const c = P.sectorLegCompleteness(r);
+    assertEquals(c.present, []);
+    assertEquals(c.missing, ["V", "M", "L"]);
+    assertEquals(c.label, "无因子腿");
+  }
+});
+
+// ---------- 2026-10-07：回撤时长 chip 视图（仅上下文，null 不显示、0=创新高、否则“水下 N 日 · −X%”） ----------
+Deno.test("sectorUnderwaterView: days null/undefined → 不显示（窗口未成形，绝不用部分窗口冒充）", () => {
+  for (const d of [null, undefined]) {
+    const v = P.sectorUnderwaterView(d, -0.2);
+    assertEquals(v.shown, false);
+    assertEquals(v.text, "");
+  }
+});
+
+Deno.test("sectorUnderwaterView: days=0 → '创新高'、cls uw-high", () => {
+  const v = P.sectorUnderwaterView(0, 0);
+  assertEquals(v.shown, true);
+  assertEquals(v.text, "创新高");
+  assertEquals(v.cls, "uw-high");
+});
+
+Deno.test("sectorUnderwaterView: days>0 → '水下 N日 · −X%'、cls uw-under", () => {
+  const v = P.sectorUnderwaterView(5, -0.5);
+  assertEquals(v.shown, true);
+  assertEquals(v.text, "水下 5日 · -50.00%");
+  assertEquals(v.cls, "uw-under");
+});
+
+Deno.test("sectorUnderwaterView: days 有但 dd 为 null → 百分比位显 '—'（不冒充）", () => {
+  const v = P.sectorUnderwaterView(3, null);
+  assertEquals(v.shown, true);
+  assertEquals(v.text, "水下 3日 · —");
+});

@@ -115,6 +115,22 @@ export interface SectorStockOverview {
   topDown: SectorOverviewItem[];
 }
 
+/** 因子完整度（V/M/L 哪几条实际参与归一、缺哪条；Q 恒缺不计入。仅展示，不改评分） */
+export interface SectorLegCompleteness {
+  present: string[];
+  missing: string[];
+  full: boolean;
+  computedOn: string;
+  label: string;
+}
+
+/** 回撤时长 chip 视图（shown=false 则不渲染；仅上下文，不进评分/排序） */
+export interface SectorUnderwaterView {
+  shown: boolean;
+  text: string;
+  cls: string;
+}
+
 /** 注入的单行 count 取数（页面传 sector_kline head count，测试传假实现） */
 // deno-lint-ignore no-explicit-any
 export type AccCountFetcher = (pk: any) => any;
@@ -135,7 +151,7 @@ const EXPORT_NAMES = [
   "sectorThemeSummaries", "sectorNum", "fmtRatioPct", "fmtPoints", "fmtScoreVal",
   "fmtVr", "fmtProsperity", "prosperityBand", "sectorLabelDots", "matchApproxPools",
   "sectorBuildAccCounts", "sectorIsStaleReq", "sectorCreateReqGuard", "sectorFoldState",
-  "sectorStockOverview",
+  "sectorStockOverview", "sectorLegCompleteness", "sectorUnderwaterView",
 ];
 
 async function load(): Promise<Record<string, unknown>> {
@@ -268,4 +284,17 @@ export function sectorStockOverview(
   downN = 3,
 ): SectorStockOverview {
   return fn("sectorStockOverview")(rows ?? [], accCounts ?? null, upN, downN) as SectorStockOverview;
+}
+// 2026-10-07：因子完整度——显性化行业分实际按 V/M/L 哪几条腿归一。实现体唯一住在 index.html SECTOR_PURE 块。
+export function sectorLegCompleteness(
+  row: SectorRow | null | undefined,
+): SectorLegCompleteness {
+  return fn("sectorLegCompleteness")(row) as SectorLegCompleteness;
+}
+// 2026-10-07：回撤时长 chip 视图。实现体唯一住在 index.html SECTOR_PURE 块。
+export function sectorUnderwaterView(
+  days: number | null | undefined,
+  dd: number | null | undefined,
+): SectorUnderwaterView {
+  return fn("sectorUnderwaterView")(days, dd) as SectorUnderwaterView;
 }
