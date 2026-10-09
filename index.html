@@ -119,7 +119,13 @@
   .btn.danger{border-color:var(--brick); color:var(--brick);}
   .btn.ghost{color:var(--muted);}
 
-  .profit-alert{margin-top:10px; padding:10px 12px; background:var(--gold-dim); border-radius:7px; font-size:12px; color:var(--gold); line-height:1.6;}
+  /* 止盈/抄底醒目横幅（2026-10-09）：卖出砖红、买入翠玉，复用既有 token 不新造色 */
+  .trade-banner{margin:0 16px 10px 16px; padding:11px 14px; border-radius:8px; font-size:13px; font-weight:600; line-height:1.6; border:1.5px solid;}
+  .trade-banner.sell{background:rgba(191,68,60,.14); border-color:var(--brick); color:var(--brick);}
+  .trade-banner.buy{background:rgba(63,150,113,.14); border-color:var(--jade); color:var(--jade);}
+  .trade-badge{align-self:center; margin-right:8px; font-size:11px; font-weight:600; padding:2px 8px; border-radius:99px; border:1px solid; white-space:nowrap;}
+  .trade-badge.sell{border-color:var(--brick); color:var(--brick);}
+  .trade-badge.buy{border-color:var(--jade); color:var(--jade);}
 
   .add-fund-btn{width:100%; padding:14px; border-radius:10px; border:1px dashed var(--line-strong); background:transparent; color:var(--muted); font-size:13px; cursor:pointer; font-family:var(--sans); margin-top:6px;}
 
@@ -294,7 +300,8 @@
     .divider-label{font-size:13px;}
     .resume-box{font-size:14px;}
     .btn{font-size:15px;}
-    .profit-alert{font-size:14px;}
+    .trade-banner{font-size:14.5px;}
+    .trade-badge{font-size:12px;}
     .add-fund-btn{font-size:15px;}
     .empty{font-size:15px;}
     .small-note{font-size:13px;}
@@ -1971,16 +1978,42 @@ function evalFundSignal(f){
   return baseSignal(f);
 }
 
-function profitTakingAlert(f){
-  const ret = computeReturn(f);
+// 止盈命中判定（通用）：基金传 computeReturn(f)，股票卡自带 ret 传同口径值
+function profitAlertFromRet(ret, item){
   if(ret===null || ret<=0) return null;
-  const tiers = f.profitTiers && f.profitTiers.length ? f.profitTiers : DEFAULT_TIERS;
+  const tiers = item.profitTiers && item.profitTiers.length ? item.profitTiers : DEFAULT_TIERS;
   let hit = null;
   for(const t of tiers){ if(ret >= t.ret) hit = t; }
   if(!hit) return null;
-  const takenKey = 'taken_'+hit.ret;
-  if(f.profitTaken && f.profitTaken.includes(hit.ret)) return null;
+  if(item.profitTaken && item.profitTaken.includes(hit.ret)) return null;
   return {tier:hit, ret};
+}
+function profitTakingAlert(f){
+  return profitAlertFromRet(computeReturn(f), f);
+}
+// 基金抄底：成本口径目标跌幅安全垫，所有基金都评估（不限暂停中）；文案区分暂停/正常
+function dipAlertFund(f){
+  const tdd = f.resumeRule && f.resumeRule.targetDrawdown;
+  if(tdd===null || tdd===undefined || tdd==='') return null;
+  const ret = computeReturn(f);
+  if(ret===null) return null;
+  const target = -Math.abs(parseFloat(tdd));
+  if(ret > target + 1e-9) return null;  // 1e-9 容差：恰好踩线时浮点误差（-9.999999…）不能漏亮
+  return {ret, target, paused: !!f.manualPause};
+}
+// 股票抄底：直接吃双信号回撤阶梯——≥+30% 大档（即 dd≥20%）且未被高估仲裁否决才亮；阈值与阶梯表联动
+function dipAlertStock(s){
+  const price = parseFloat(s.currentPrice)||0;
+  const dd = drawdownFrom(parseFloat(s.high52w)||0, price);
+  if(dd===null) return null;
+  const add = ddAddPct(dd);
+  if(add < 30) return null;
+  const pct = (s.valuationPercentile==='' || s.valuationPercentile===undefined || s.valuationPercentile===null) ? null : parseFloat(s.valuationPercentile);
+  if(pct!==null && !isNaN(pct) && pct>=80) return null;
+  return {dd, add};
+}
+function sellBannerHtml(a){
+  return `<div class="trade-banner sell">⚠️ 达到止盈档：${a.ret>=0?'+':''}${a.ret.toFixed(1)}% ≥ +${a.tier.ret}% 档 → 建议卖出 ${a.tier.sell}% 份额</div>`;
 }
 
 function pillClass(level){
@@ -2116,6 +2149,7 @@ function renderFundList(){
     card.className = 'fund-card';
 
     const alert = profitTakingAlert(f);
+    const dip = dipAlertFund(f);
 
     card.innerHTML = `
       <div class="fund-head" data-id="${f.id}">
@@ -2124,6 +2158,7 @@ function renderFundList(){
           <div class="fund-meta">${escapeHtml(f.theme||'未分类')}${f.isQDII?' · QDII':''} · 市值 ${fmtMoney(f.marketValue||0)}${nextTier?' · 下一止盈档 +'+nextTier.ret+'%（卖'+nextTier.sell+'%）':''}</div>
         </div>
         <div class="fund-return ${ret>=0?'ret-pos':'ret-neg'}">${fmtPct(ret,1)}</div>
+        ${alert?'<span class="trade-badge sell">🔴 止盈</span>':''}${dip?'<span class="trade-badge buy">🟢 抄底</span>':''}
         <div class="chevron" id="chev-${f.id}">▸</div>
       </div>
       <div class="signal-strip">
@@ -2132,7 +2167,8 @@ function renderFundList(){
       </div>
       <div class="signal-reason">${sig.reasons.join('；')}</div>
       ${dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0)}
-      ${alert ? `<div class="profit-alert" style="margin:0 16px 14px 16px;">📌 已达到止盈档位：收益率 ${alert.ret.toFixed(1)}% ≥ ${alert.tier.ret}%，建议止盈 ${alert.tier.sell}% 份额</div>` : ''}
+      ${alert ? sellBannerHtml(alert) : ''}
+      ${dip ? `<div class="trade-banner buy">🟢 达到目标跌幅：当前 ${dip.ret.toFixed(1)}% 已跌破 ${dip.target}% 安全垫 → ${dip.paused?'均线若已企稳，建议恢复定投':'跌出安全垫价值区，建议加仓/多投'}</div>` : ''}
       <div class="fund-body" id="body-${f.id}"></div>
     `;
     list.appendChild(card);
@@ -2196,6 +2232,8 @@ function renderStockSection(){
     const tier = stockTierLabel(dev);
     const ret = (parseFloat(s.cost)>0 && s.currentPrice>0) ? (s.currentPrice-parseFloat(s.cost))/parseFloat(s.cost)*100 : null;
     const nextTier = nextProfitTier(s);    const pillCls = dev===null ? 'pill-normal' : (dev<=-5 ? 'pill-strong' : (dev>=3 ? 'pill-half' : 'pill-normal'));
+    const sAlert = profitAlertFromRet(ret, s);
+    const sDip = dipAlertStock(s);
     const card = document.createElement('div');
     card.className = 'fund-card';
     card.innerHTML = `
@@ -2205,6 +2243,7 @@ function renderStockSection(){
           <div class="fund-meta">${exchangeLabel(s.code)} · ${s.shares||0} 股 · 市值 ${fmtMoney(stockMvOf(s))}${s.priceDate?' · '+s.priceDate:''}${nextTier?' · 下一止盈档 +'+nextTier.ret+'%（卖'+nextTier.sell+'%）':''}</div>
         </div>
         <div class="fund-return ${ret!==null&&ret>=0?'ret-pos':'ret-neg'}">${fmtPct(ret,1)}</div>
+        ${sAlert?'<span class="trade-badge sell">🔴 止盈</span>':''}${sDip?'<span class="trade-badge buy">🟢 抄底</span>':''}
         <div class="chevron" id="schev-${s.id}">▸</div>
       </div>
       <div class="signal-strip">
@@ -2214,6 +2253,8 @@ function renderStockSection(){
       </div>
       <div class="signal-price">现价 ${s.currentPrice||'--'}${s.ma60?' · MA60 '+Number(s.ma60).toFixed(2):''}${s.ma120?' · MA120 '+Number(s.ma120).toFixed(2):''}</div>
       ${dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0)}
+      ${sAlert ? sellBannerHtml(sAlert) : ''}
+      ${sDip ? `<div class="trade-banner buy">🟢 抄底：较52周高点回撤 ${sDip.dd.toFixed(1)}% 已达 +${sDip.add}% 加仓档 → 双信号建议加仓</div>` : ''}
       <div class="fund-body" id="sbody-${s.id}"></div>
     `;
     list.appendChild(card);
