@@ -1991,15 +1991,23 @@ function profitAlertFromRet(ret, item){
 function profitTakingAlert(f){
   return profitAlertFromRet(computeReturn(f), f);
 }
-// 基金抄底：成本口径目标跌幅安全垫，所有基金都评估（不限暂停中）；文案区分暂停/正常
-function dipAlertFund(f){
+// 基金抄底·成本口径：目标跌幅安全垫，所有基金都评估；仲裁（2026-10-09 定稿）：买入指令只由主信号发——
+// 主信号非暂停才喊加仓，暂停/清仓时横幅降级为中性状态报告；manualPause 不参与口径判定（不管是否暂停都评估）
+function dipAlertFund(f, sig){
   const tdd = f.resumeRule && f.resumeRule.targetDrawdown;
   if(tdd===null || tdd===undefined || tdd==='') return null;
   const ret = computeReturn(f);
   if(ret===null) return null;
   const target = -Math.abs(parseFloat(tdd));
   if(ret > target + 1e-9) return null;  // 1e-9 容差：恰好踩线时浮点误差（-9.999999…）不能漏亮
-  return {ret, target, paused: !!f.manualPause};
+  return {kind:'cost', ret, target, shout: !(sig && sig.level==='pause')};
+}
+// 基金抄底·市场口径：复用股票同款回撤阶梯（≥+30% 大档即 dd≥20%），高估≥80 仲裁否决；同样吃主信号档级
+function dipAlertFundLadder(f, sig){
+  // 字段适配：股票吃 currentPrice，基金净值在 currentNav，不转换会静默不亮
+  const base = dipAlertStock({ ...f, currentPrice: parseFloat(f.currentNav)||0 });
+  if(!base) return null;
+  return {kind:'ladder', dd: base.dd, add: base.add, shout: !(sig && sig.level==='pause')};
 }
 // 股票抄底：直接吃双信号回撤阶梯——≥+30% 大档（即 dd≥20%）且未被高估仲裁否决才亮；阈值与阶梯表联动
 function dipAlertStock(s){
@@ -2014,6 +2022,16 @@ function dipAlertStock(s){
 }
 function sellBannerHtml(a){
   return `<div class="trade-banner sell">⚠️ 达到止盈档：${a.ret>=0?'+':''}${a.ret.toFixed(1)}% ≥ +${a.tier.ret}% 档 → 建议卖出 ${a.tier.sell}% 份额</div>`;
+}
+// 抄底横幅：成本/市场两口径合并成一条（不再各亮各的）；shout=false（主信号暂停中）时只报告状态不建议买入
+function buyBannerHtml(list){
+  const parts = [];
+  for(const d of list){
+    if(d.kind==='cost') parts.push(`成本口径：收益 ${d.ret.toFixed(1)}% 已跌破 ${d.target}% 安全垫`);
+    else parts.push(`市场口径：较52周高点回撤 ${d.dd.toFixed(1)}% 已达 +${d.add}% 加仓档`);
+  }
+  const anyShout = list.some(d=>d.shout);
+  return `<div class="trade-banner buy">🟢 抄底信号 · ${parts.join('；')}${anyShout ? ' → 主信号非暂停，建议加仓/多投' : ' → 主信号暂停中，暂不新增（仅状态提示）'}</div>`;
 }
 
 function pillClass(level){
@@ -2149,7 +2167,9 @@ function renderFundList(){
     card.className = 'fund-card';
 
     const alert = profitTakingAlert(f);
-    const dip = dipAlertFund(f);
+    const dCost = dipAlertFund(f, sig);
+    const dLadder = dipAlertFundLadder(f, sig);
+    const dips = [dCost, dLadder].filter(Boolean);
 
     card.innerHTML = `
       <div class="fund-head" data-id="${f.id}">
@@ -2158,7 +2178,7 @@ function renderFundList(){
           <div class="fund-meta">${escapeHtml(f.theme||'未分类')}${f.isQDII?' · QDII':''} · 市值 ${fmtMoney(f.marketValue||0)}${nextTier?' · 下一止盈档 +'+nextTier.ret+'%（卖'+nextTier.sell+'%）':''}</div>
         </div>
         <div class="fund-return ${ret>=0?'ret-pos':'ret-neg'}">${fmtPct(ret,1)}</div>
-        ${alert?'<span class="trade-badge sell">🔴 止盈</span>':''}${dip?'<span class="trade-badge buy">🟢 抄底</span>':''}
+        ${alert?'<span class="trade-badge sell">🔴 止盈</span>':''}${dips.length?'<span class="trade-badge buy">🟢 抄底</span>':''}
         <div class="chevron" id="chev-${f.id}">▸</div>
       </div>
       <div class="signal-strip">
@@ -2168,7 +2188,7 @@ function renderFundList(){
       <div class="signal-reason">${sig.reasons.join('；')}</div>
       ${dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0)}
       ${alert ? sellBannerHtml(alert) : ''}
-      ${dip ? `<div class="trade-banner buy">🟢 达到目标跌幅：当前 ${dip.ret.toFixed(1)}% 已跌破 ${dip.target}% 安全垫 → ${dip.paused?'均线若已企稳，建议恢复定投':'跌出安全垫价值区，建议加仓/多投'}</div>` : ''}
+      ${dips.length ? buyBannerHtml(dips) : ''}
       <div class="fund-body" id="body-${f.id}"></div>
     `;
     list.appendChild(card);
