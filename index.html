@@ -454,8 +454,8 @@
 <div class="modal-backdrop" id="loginModalBackdrop">
   <div class="modal">
     <h2>登录云同步</h2>
-    <div class="field"><label>邮箱</label><input type="email" id="loginEmail" placeholder="you@example.com"></div>
-    <div class="field" style="margin-top:10px;"><label>密码（至少6位，首次输入即自动注册）</label><input type="password" id="loginPass" placeholder="••••••"></div>
+    <div class="field"><label>邮箱</label><input type="email" id="loginEmail" placeholder="you@example.com" autocomplete="username" autocapitalize="none" spellcheck="false"></div>
+    <div class="field" style="margin-top:10px;"><label>密码（至少6位，首次输入即自动注册）</label><input type="password" id="loginPass" placeholder="••••••" autocomplete="current-password"></div>
     <div class="btn-row"><button class="btn primary" id="loginSubmitBtn">登录 / 注册</button></div>
     <div class="small-note" id="loginMsg" style="margin-top:10px;"></div>
     <div class="small-note">数据按账号隔离存储在 Supabase，每台设备登录一次后长期保持；登录后本地数据自动合并上传。</div>
@@ -2849,7 +2849,8 @@ document.getElementById('forceSyncBtn').addEventListener('click', async ()=>{
   await syncOnOpen();
   showToast('同步完成');
 });
-document.getElementById('loginSubmitBtn').addEventListener('click', async ()=>{
+// 登录提交：提取为具名函数，按钮点击与回车（keydown Enter）共用同一路径
+async function submitLogin(){
   const email = document.getElementById('loginEmail').value.trim();
   const pass = document.getElementById('loginPass').value;
   if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ loginMsg('请输入有效邮箱','var(--brick)'); return; }
@@ -2876,6 +2877,13 @@ document.getElementById('loginSubmitBtn').addEventListener('click', async ()=>{
   else if(/not confirmed/i.test(error.message)) loginMsg('邮箱未确认：请先完成注册时发给你的确认邮件，再回来登录','var(--brick)');
   else if(/[Rr]ate limit/i.test(error.message)) loginMsg('尝试太频繁，请等几分钟再试','var(--brick)');
   else loginMsg('登录失败：'+error.message,'var(--brick)');
+}
+document.getElementById('loginSubmitBtn').addEventListener('click', submitLogin);
+// 任一输入框按回车 = 点「登录 / 注册」，配合 autocomplete 让钥匙串自动填充后一键完成
+['loginEmail','loginPass'].forEach(id=>{
+  document.getElementById(id).addEventListener('keydown', e=>{
+    if(e.key==='Enter'){ e.preventDefault(); submitLogin(); }
+  });
 });
 document.getElementById('loginModalBackdrop').addEventListener('click', e=>{
   if(e.target.id==='loginModalBackdrop') closeLoginModal();
