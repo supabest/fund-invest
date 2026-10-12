@@ -11,6 +11,18 @@ export const VETO_GUW = 50;             // %  商誉/净资产（否决2）
 export const VETO_LEV = 2;              // ×  带息债务/货币资金（否决3）
 export const VCOV_MIN = 0.6;            //    有效覆盖低于此 → 不产出 VQ（spec §6）
 
+// 置信度只读「这一行自己的事」那一类 flag（2026-10-12 首跑实数据后用户裁定，spec §6 同步修订）。
+// `flags` 里另有三类说的是**数据源的回填形态**：`gw_empty_as_zero`（GS 对无商誉公司回空 → 落库按 0 参与）、
+// `pe_na_nonpositive` / `pb_na_nonpositive`（亏损股 PE、净资产为负者 PB 非正）。真数据首跑 5025 行里它们盖了 89%（2522/1204/0），
+// 而原 §6「带任一 flag → B」把它们与个股风险同口径记账 → spec §10 要求的 A 级 ≥40% 数学上不可达（实测 10.6%）。
+// 先例：Task 4 已因同一理由把 `ic_approx` 踢出 flags（见 computeValue 里那条注），本项是同一判据的延续。
+// 不是放宽门禁：三类仍原样留在 `flags` 落库（前视与页面都看得到）；而它们的**数值后果本来就在别处已经付过了**——
+// ep/bm 腿置 NA 拉低 vcov，商誉按 0 进百分位。降级判据只该回答“这一行的数据可不可信”，不该重复罚一遍形态。
+// 反面清单仍在本行降级：`roic_3y_incomplete`（spec §6 原文列了「roic 仅 1-2 期」）、`rf_fallback`（计价锚退化）、`veto:*`。
+const CONFIDENCE_FLAGS = ['roic_3y_incomplete', 'rf_fallback'];
+export const flagsDepressConfidence = (flags: string[]): boolean =>
+  flags.some(f => CONFIDENCE_FLAGS.includes(f) || f.startsWith('veto:'));
+
 export const investedCapital = (r: ValueRaw): number | null =>
   r.cash !== null && r.debt !== null ? r.cash + r.debt : null;   // spec §4.1 近似
 
@@ -233,8 +245,11 @@ export function computeValue(all: ValueRaw[], cn10y: number | null, finRoe?: Map
     // （字段位置：否决位只存在 `ValueRow.gate.vetoed` 上，无顶层 `vetoed`；面值写 `r.vetoed` 会 TS2339。已由 Task 4 修复轮实测证实。）
     // 早退分支本身的回归护栏：新增测试「金融股『有息负债率』腿 NA…」的 `h1.confidence === 'B'` 断言——把早退分支加回去该行变 A、当场红。
     const nulls = [r.vMoat, r.vCash, r.vSafety, r.vHealth].filter(x => x === null).length;
+    // 「带任一 flag」收窄为「带任一**个股级** flag」（`flagsDepressConfidence`，2026-10-12 裁定）。
+    // `r.gate.vetoed` 那项仍是冗余护栏（上方 Minor-6 的注不变）：`flagsDepressConfidence` 已经收了 `veto:*`，
+    // 保留它是防日后有人删掉 `gt.vetoed → flags.push('veto:…')` 那一行时，被否决行静默拿到 A
     r.confidence = (r.grp === 'MARKET' && r.indN < 20) || nulls >= 2 || r.vcov < VCOV_MIN ? 'C'
-      : nulls === 1 || r.flags.length > 0 || r.gate.vetoed ? 'B' : 'A';
+      : nulls === 1 || flagsDepressConfidence(r.flags) || r.gate.vetoed ? 'B' : 'A';
   }
   return out;
 }

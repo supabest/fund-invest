@@ -200,3 +200,55 @@ Deno.test('金融股「有息负债率」腿 NA（spec §5.1 末格）+ 货币�
   assertEquals(h1.vMoat, null);
   assertEquals(h1.confidence, 'B');       // 缺 1 维 → B。原计划的 `tier !== 'qualified' → 早退` 会把这种「门禁不过且无 flag」的行发 A
 });
+
+// ==== 2026-10-12 首跑实数据后的裁定（用户批准「Step 7 三条判据全按推荐改」）====
+// 三类**总体级** flag（GS 对无商誉回空 / PE 非正 / PB 非正）不再参与置信度，但仍原样留在 `flags` 里。
+// 依据是真数据而不是推演：首跑 5025 行里 gw_empty_as_zero 2522、pe_na_nonpositive 1204、pb_na_nonpositive 0，
+// 三类都是「数据源的回填形态」而非「这只票自己的毛病」；而 §6「带任一 flag → B」把它们记在案上，
+// 于是 spec §10 要求的 A 级 ≥40% 被数学锁死在实际 10.6%。先例：Task 4 已因同一理由把 `ic_approx` 踢出 flags
+//（`value_engine.ts` 的 ic_approx 注），本条是同一判据的延续，不是放宽门禁。
+// 拆分的准绳：这条 flag 说的是**数据源形态**，还是**这一行自己的事**。后者（roic 三年不齐、rf_fallback、veto:*）照旧降级。
+Deno.test('总体级 flag 不压置信度（gw 空当 0 / PE 非正 / PB 非正），但信息照留 flags；roic 三年不齐仍压 B', () => {
+  const u = uni({ roic3: [15, 15, 15], roic: 15, fcff: 3e9 }, 25);
+  u[0] = { ...u[0], code: 'g0', gw: null };        // GS 对无商誉公司回空 → 落库按 0 参与，不是缺陷
+  u[1] = { ...u[1], code: 'pe0', pe: -8 };         // 亏损：ep 腿 NA 已降覆盖度，flag 只作说明
+  u[2] = { ...u[2], code: 'pb0', pb: 0 };          // pb=0 不触发否决1（那是 <0），只触发总体级 flag
+  u[3] = { ...u[3], code: 'r3', roic3: [15, null, 16] };   // 对照：三年不齐是它自己的事 → 仍 B
+  const rows = computeValue(u, 1.85);
+  const by = (c: string) => rows.find(r => r.code === c)!;
+  assertEquals(by('u4').confidence, 'A');                                    // 这个宇宙确实产得出 A（否则下面的断言全在测空）
+  assertEquals(by('g0').flags.includes('gw_empty_as_zero'), true);           // 信息不丢：仍然留痕
+  assertEquals(by('g0').confidence, 'A');
+  assertEquals(by('pe0').flags.includes('pe_na_nonpositive'), true);
+  assertEquals(by('pe0').confidence, 'A');
+  assertEquals(by('pb0').flags.includes('pb_na_nonpositive'), true);
+  assertEquals(by('pb0').confidence, 'A');
+  assertEquals(by('r3').flags.includes('roic_3y_incomplete'), true);
+  assertEquals(by('r3').confidence, 'B');
+});
+
+// ==== 上面那轮变异检验（preflight18/mutate_flags.py）揪出的两个覆盖洞，逐条补回归护栏 ====
+// 事实先行：MF11（把 rf_fallback 从 CONFIDENCE_FLAGS 里删掉）与 MF15（把两道否决护栏同时删掉）都在 69 绿下**存活**，
+// 说明「rf_fallback → B」和「否决 → B」这两条判据此前**一行断言都没有**——不是冗余，是洞。
+// 冗余与覆盖洞的区分只能靠「同时删两道」这种变异来做：MF12/MF13 各删一道仍存活（互为护栏，符合预期，如实记录不粉饰），
+// 而 MF15 一删两道就应当当场红 —— 下面两条测试就是为了让这个「应当」变成实测。
+Deno.test('rf_fallback 压置信度 B（计价锚退化是这一行的事）；同一宇宙有 cn10y 时为 A —— 差异只可能来自这条 flag', () => {
+  const u = uni({ roic3: [15, 15, 15], roic: 15, fcff: 3e9 }, 25);
+  const fb = computeValue(u, null).find(r => r.code === 'u4')!;   // cn10y NA → mosOf 恒 rfFallback=true
+  assertEquals(fb.flags, ['rf_fallback']);                        // 只剩这一条：四维齐备、无否决、无总体级 flag
+  assertEquals([fb.vMoat, fb.vCash, fb.vSafety, fb.vHealth].every(v => v !== null), true);
+  assertEquals(fb.vcov, 1);
+  assertEquals(fb.confidence, 'B');
+  assertEquals(computeValue(u, 1.85).find(r => r.code === 'u4')!.confidence, 'A');   // 对照组：宇宙本身产得出 A
+});
+
+Deno.test('被否决行归 B 不归 A（spec §6 A 明写「无否决」）：两道护栏 veto:* 与 gate.vetoed 互为冗余，删任一道仍 B', () => {
+  const u = uni({ roic3: [15, 15, 15], roic: 15, fcff: 3e9 }, 25);
+  u[0] = { ...u[0], code: 'w0', gw: 55 };                         // 否决2：商誉/净资产 > 50%
+  const w0 = computeValue(u, 1.85).find(r => r.code === 'w0')!;
+  assertEquals(w0.tier, 'vetoed');
+  assertEquals(w0.flags, ['veto:商誉/净资产>50%']);
+  assertEquals(w0.vcov, 1);                                       // 商誉百分位是有效腿，覆盖度没掉 → 不是靠 vcov 落的 B
+  assertEquals(w0.confidence, 'B');
+  assertEquals(computeValue(u, 1.85).find(r => r.code === 'u4')!.confidence, 'A');   // 同宇宙非否决行仍是 A
+});
