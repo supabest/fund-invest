@@ -298,9 +298,20 @@ function colByPrefix(t: GsTable, prefix: string): string | undefined {
 // 提问措辞与响应标签不保证一致（V_Q5 问的是「近5年股息率平均值」，探针形态是 `股息率平均[...]`）→ 按候选依次试。
 const colAnyOf = (t: GsTable | null, names: string[]): string | null =>
   t ? names.map(n => colByPrefix(t, n)).find(Boolean) ?? null : null;
-// 严格窗口列 `名称[yyyyMMdd...]`：排除 "资产负债率同比增长率" 这类同名前缀兄弟列
+// 严格窗口列 `名称…[yyyyMMdd…]`：排除 "资产负债率同比增长率" 这类同名前缀兄弟列。
+// 【2026-10-12 首跑实炸后重写】旧写法 `k.startsWith(name + '[')` 要求名称与戳**紧邻**，而真响应在两者之间
+// 夹了英文别名：ROIC 列回 `投入资本回报率roic[20260630]`。colByPrefix 收它（别名以非中文开头），windowCols
+// 不收 → assertCols 放行、assertPeriod 一根不认 → 整批 500。两个匹配器必须同一套规则，否则「守卫放行、
+// 主逻辑失明」这条路径永远测不到。严格性由「拒绝中文后缀兄弟列 + 必须有 8 位数字戳」两点继续提供，
+// 不因允许英文别名而放宽。
 function windowCols(t: GsTable, name: string): string[] {
-  return Object.keys(t).filter(k => k.startsWith(name + '[') && /\[\d{8}/.test(k.slice(name.length))).sort();
+  return Object.keys(t).filter(k => {
+    const l = labelOf(k);
+    if (!l.startsWith(name)) return false;
+    const rest = l.slice(name.length);
+    if (rest.length > 0 && /^[\u4e00-\u9fff]/.test(rest)) return false;   // 中文后缀 = 另一个指标
+    return /\[\d{8}/.test(k.slice(l.length));
+  }).sort();
 }
 
 // 同一指标的「单期年报列族」：按标签前缀取，排除平均值专用列（标签含 `平均`）与区间戳列（`[a-b]`），

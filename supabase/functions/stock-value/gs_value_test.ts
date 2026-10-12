@@ -1,6 +1,6 @@
 // supabase/functions/stock-value/gs_value_test.ts
 import { assertEquals, assertMatch, assertThrows } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { annualCols, assertCols, assertPeriod, mergeValueTables, buildVQ3, yearAnchors, type GsTable } from './gs_value.ts';
+import { annualCols, assertCols, assertPeriod, mergeValueTables, buildVQ3, yearAnchors, windowCols, type GsTable } from './gs_value.ts';
 
 // std@0.224.0 的 assertThrows 第二参数只接受 string / ErrorClass，**无 RegExp 重载**：写
 // `assertThrows(fn, /re/)` 会撞 TS2769 使整个测试文件跑不起来，而且运行时静默忽略消息匹配
@@ -166,4 +166,33 @@ Deno.test('REQUIRED.q5：缺 ROE 族→整批炸（就是差点上线的那条�
   const t5 = { '股票代码': ['1'], '股息率(股票获利率)[20251231]': ['2'] } as GsTable;
   const m = thrownMessage(() => mergeValueTables(fx('vq1_sample.json'), fx('vq2_sample.json'), fx('vq3_sample.json'), fx('vq4_sample.json'), t5, NOW));
   assertMatch(m, /missing column: 净资产收益率roe/);
+});
+
+// ===== 2026-10-12 首跑实炸铁证（Task 10 Step 6 第一次 mode=run → 500 `GS period: no dated column found`）=====
+// 线上 ROIC 列标签是 `投入资本回报率roic[yyyyMMdd]`（q1 一根、q3 三根皆如此），而 Task 2 的 fixture 按**提问措辞**
+// 手抄成裸名 `投入资本回报率[yyyyMMdd]`。于是 assertCols（走 colByPrefix，英文别名属 ASCII 后缀 → 收）放行了，
+// 而 assertPeriod / roic3Keys（走 windowCols，硬要求 `名称[` 紧邻）一根都不认 → 整批炸。
+// 两个匹配器口径分叉就是这条缺陷的形状：守卫放行、主逻辑失明。修法是把 windowCols 的严格性改成与
+// colByPrefix 同一套规则（允许非中文别名），而不是去改提问措辞——GS 回裸名还是回别名不受我们控制。
+const aliasify = (t: GsTable): GsTable => Object.fromEntries(Object.entries(t).map(([k, v]) =>
+  [k.startsWith('投入资本回报率[') ? k.replace('投入资本回报率[', '投入资本回报率roic[') : k, v])) as GsTable;
+
+Deno.test('windowCols：名称与日期戳之间的英文别名必须进窗口集，中文后缀兄弟列仍须排除', () => {
+  const t = {
+    '股票代码': ['600031.SH'],
+    '投入资本回报率roic[20260630]': ['18.4'],
+    '投入资本回报率[20251231]': ['18.9'],
+    '投入资本回报率同比增长率[20260630]': ['1.2'],   // 另一个指标，绝不当窗口列（windowCols 存在的理由）
+    '投入资本回报率ttm': ['12.0'],                    // 无 8 位数字戳 → 不是窗口列（变异：去掉戳校验时本条红）
+  } as GsTable;
+  assertEquals(windowCols(t, '投入资本回报率').sort(),
+    ['投入资本回报率[20251231]', '投入资本回报率roic[20260630]'].sort());
+});
+
+Deno.test('真形态（roic 别名）五表合并：不炸批，当期 ROIC / 三年窗口 / 期次戳全部照绑', () => {
+  const { rows, stamps } = mergeValueTables(aliasify(fx('vq1_sample.json')), fx('vq2_sample.json'),
+    aliasify(fx('vq3_sample.json')), fx('vq4_sample.json'), fx('vq5_legacy_sample.json'), NOW);
+  assertEquals(stamps.roic_period, '20260630');
+  assertEquals(rows.map(r => r.roic), [18.4, 6.1, null]);
+  assertEquals(rows.map(r => r.roic3), [[17.1, 18.0, 18.9], [7.0, 6.5, 6.2], [null, null, null]]);
 });
