@@ -545,13 +545,85 @@ async function upsert(rows: Record<string, unknown>[], table: string, onConflict
   }
 }
 
-// C 层读 stock_business_mix（business-mix 维护）；任何失败静默降级为空 Map，绝不阻塞跑批
-async function fetchMixMap(url: string): Promise<Map<string, MixRow>> {
+// ==== REST 分页读：与 stock-value/index.ts 同款语义复制（A3 先例：不抽公共模块，任一侧改动同步另一侧）====
+// 缺陷不在本腿源码里发现，是价值腿重跑后直查出来的：今晚 `stock_score.in_pool` 标记数正好 **1000**，
+// 而 stock_pool 有 1165 只、本批宇宙中对得上的是 1116 只——116 只池内股的 `in_pool`/池内分位是假阴性
+//（价值腿响应里的 `main_missing=116` 就是它的回声）。PostgREST `db-max-rows` 默认 1000，
+// 而裸 `?select=code` 单页 GET 返 **HTTP 206 + `Content-Range: 0-999/1165`**：不报错、不炸批，静默截断。
+// 实测另一形态：offset 越过总数返 **416 PGRST103** 而不是空数组 ⇒ 收尾条件只能是「已收 >= 总数」。
+// 五条守卫任一不齐就抛错炸批：宁可今晚不跑，也不能拿一个少 116 只的池明天继续。
+type PageGet = (u: string, init: RequestInit) => Promise<{
+  ok: boolean; status: number;
+  headers: { get(k: string): string | null };
+  json(): Promise<unknown>;
+}>;
+
+async function readAllRows(
+  base: string, resource: string, params: string,
+  get: PageGet = fetch as unknown as PageGet, pageSize = 1000,
+): Promise<Record<string, unknown>[]> {
+  // offset 分页只有在确定性排序下才不重不漏（平台默认行序会随真空页/簇迁移漂移）
+  if (!/(^|&)order=/i.test(params)) throw new Error(`read ${resource}: offset 分页要求确定性 order=`);
+  const out: Record<string, unknown>[] = [];
+  let total: number | null = null;
+  for (let from = 0; ;) {
+    const r = await get(`${base}/rest/v1/${resource}?${params}&limit=${pageSize}&offset=${from}`,
+      { headers: { ...svcHeaders(), 'Prefer': 'count=exact' } });
+    if (!r.ok) throw new Error(`read ${resource} page@${from}: ${r.status}`);
+    const m = /^(\d+)-(\d+)\/(\d+)$/.exec(r.headers.get('content-range') ?? '');
+    if (!m) throw new Error(`read ${resource} page@${from}: Content-Range 拿不到总数（count=exact 未生效）`);
+    const [start, end, count] = [Number(m[1]), Number(m[2]), Number(m[3])];
+    if (total === null) total = count;
+    else if (count !== total) throw new Error(`read ${resource}: 总数中途变化 ${total} -> ${count}`);
+    if (start !== from) throw new Error(`read ${resource}: 页起点 ${start} != 请求 offset ${from}`);
+    const page = (await r.json()) as Record<string, unknown>[];
+    // 声明的区间长度与实际行数必须一致：逐页自证，不等收尾才发现页被吃了。
+    // 有了 `start === from` + 这一条，各页严格铺满 [0, total-1]，所以不必再写「总行数 == total」的收尾守卫（恒真，属死代码）
+    if (end - start + 1 !== page.length) throw new Error(`read ${resource} page@${from}: 声明 ${end - start + 1} 行（总数 ${total}）实得 ${page.length} 行`);
+    if (page.length === 0) throw new Error(`read ${resource}: page@${from} 空页而总数 ${total} 未到`);   // 进度守卫：按上面两条推导本不可达，但一旦有人改松了守卫，这里必须是报错而不是死循环吊死整个函数
+    out.push(...page);
+    from += page.length;                                  // 推进量=实收，平台把 db-max-rows 调得比 pageSize 小时也不会静默少收
+    if (from >= total) break;
+  }
+  return out;
+}
+
+// 池成员（`in_pool` 与池内分位的唯一真值源）：去重后的 Set 行数必须等于收回行数——Set 会静默吞掉重复 code，
+// 只能在这里拿两个数把它拉回来。导出可测：变异检验靠它验证「只读第一页」的写法不能溜过。
+async function readPoolSet(base: string, get?: PageGet, pageSize?: number): Promise<Set<string>> {
+  const rows = await readAllRows(base, 'stock_pool', 'select=code&order=code.asc', get, pageSize);
+  const set = new Set(rows.map(x => String(x.code)));
+  if (set.size !== rows.length) throw new Error(`read stock_pool: 去重后 ${set.size} != 收回 ${rows.length}（池内有重复 code）`);
+  return set;
+}
+
+// 池成员在 handler 里有两处消费：每行的 `in_pool` 标记、以及池内 Top10。两者必须同一份分页读，
+// 所以抽成一个导出函数（与价值腿 runSummary 的终审 I-3 教训同款）：「读」与「用」都留在 handler 里，
+// 就没有任何测试能发现「池读退回裸单页」——2026-10-12 变异检验实测 MS6（把 readPoolSet 换成裸 fetch）当场存活，
+// 而它的生产后果正是本腿要修的缺陷：尾部 116 只池内股的 in_pool 假阴性。
+async function pickPoolView<T extends { code: string }>(
+  scored: T[], url: string = Deno.env.get('SUPABASE_URL')!,
+  get: PageGet = fetch as unknown as PageGet,
+): Promise<{ inPool: (code: string) => boolean; top: T[] }> {
+  const poolSet = await readPoolSet(url, get);   // 分页读：裸 `?select=code` 在 1165 只池上会静默只回 1000 只
+  // 入库/比较的 code 口径不带后缀（upsert 行用 r.code.split('.')[0]），池也是 6 位码；
+  // 但入参带市场后缀（GS 表里是 600000.SH），谓词自己剔后缀，不让调用方忘记这一步
+  const has = (code: string) => poolSet.has(code.split('.')[0]);
+  return { inPool: has, top: scored.filter(r => has(r.code)).slice(0, 10) };
+}
+
+// C 层读 stock_business_mix（business-mix 维护）；任何失败静默降级为空 Map，绝不阻塞跑批。
+// ⚠ 静默降级只适用于「整张表读不到」（读不到就少一点 extras 信息位）；它绝不能成为「读少一半」的遮羞布：
+// 今晚 972 行看着安全，而 business-mix 每晚补 300 只 ⇒ 明夜就过 1000，裸读会静默丢掉尾部所有 mix 标记。
+// 导出 + 注入 get 仅为可测。
+async function fetchMixMap(url: string, get: PageGet = fetch as unknown as PageGet): Promise<Map<string, MixRow>> {
   const map = new Map<string, MixRow>();
   try {
-    const resp = await fetch(`${url}/rest/v1/stock_business_mix?select=code,mixed,shift,segments,report_date`, { headers: svcHeaders() });
-    if (!resp.ok) return map;
-    for (const m of (await resp.json()) as MixRow[]) map.set(m.code, m);
+    // order=code.asc 不改变语义：本函数只按 code 建 Map，与行序无关（加确定性 order 是分页的前提）
+    // readAllRows 只交回 Record<string, unknown>[]（通用分页读不认得业务列），所以这里把形状写明；
+    // 直接 `as MixRow[]` 会被 TS2352 拒（与价值腿 readMainSnapshot 的 MainCol 同款教训）
+    type MixCol = { code: string } & Partial<MixRow>;
+    for (const m of (await readAllRows(url, 'stock_business_mix', 'select=code,mixed,shift,segments,report_date&order=code.asc', get)) as MixCol[]) map.set(m.code, m);
   } catch { /* 外部/表缺失 → C 层静默跳过（spec §5.3） */ }
   return map;
 }
@@ -591,12 +663,9 @@ Deno.serve(async (req: Request) => {
     const periodStamp = (Object.keys(finT).find(k => k.startsWith('资产负债率')) ?? '').match(/\[(\d{8})\]/)?.[1] ?? '';
     const batch = new Date().toISOString().slice(0, 10);
     const rows = computeScores(stocks);
-    const poolResp = await fetch(`${Deno.env.get('SUPABASE_URL')}/rest/v1/stock_pool?select=code`, { headers: svcHeaders() });
-    if (!poolResp.ok) throw new Error(`read stock_pool ${poolResp.status} ${await poolResp.text()}`);
-    const pool = await poolResp.json();
-    const poolSet = new Set((pool as { code: string }[]).map(p => p.code));
     const scored = rows.filter(r => r.final !== null);
-    const top = scored.filter(r => poolSet.has(r.code.split('.')[0])).slice(0, 10);
+    const pool = await pickPoolView(scored);   // 池读与两处消费同源分页（见 pickPoolView 上方注释）
+    const top = pool.top;
     // 增强：Top10+持仓 周期警示（扣非增速>100 → 提示核对3年CAGR），失败不阻塞
     const warnings = new Map<string, string[]>();
     for (const r of [...top, ...scored.filter(r => ['000338.SZ', '002415.SZ', '600031.SH'].includes(r.code))]) {
@@ -609,7 +678,7 @@ Deno.serve(async (req: Request) => {
       ths_l1: r.ths[0] ?? null, ths_l2: r.ths[1] ?? null, ths_l3: r.ths[2] ?? null,
       quality: r.quality, growth: r.growth, value: r.value, momentum: r.momentum, final: r.final,
       ind_rank: r.indRank, ind_n: r.indN, market_rank: r.marketRank, market_n: scored.length,
-      in_pool: poolSet.has(r.code.split('.')[0]), cov: r.cov, pe: r.pe, peg: r.peg, roe: r.roe, debt: r.debt,
+      in_pool: pool.inPool(r.code), cov: r.cov, pe: r.pe, peg: r.peg, roe: r.roe, debt: r.debt,
       flags: r.flags, warnings: warnings.get(r.code) ?? [], confidence: r.confidence,
       extras: { fin_period: periodStamp, abs_trend: r.absTrend, pool: { grp: r.grp, ind_n: r.indN }, ...buildRevealExtras(r, mixMap.get(r.code.split('.')[0])) },
     })), 'stock_score', 'batch_date,code');
