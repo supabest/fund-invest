@@ -107,16 +107,76 @@ export async function upsert(
   }
 }
 
-// 主分快照 + 四条腿（供分歧榜归因）：只读最新批次的 in_pool 行（分歧榜本质是池内对比，无需全宇宙）
-async function readMainSnapshot(url: string): Promise<{ batch: string | null; map: Map<string, MainSnap> }> {
-  const b = await fetch(`${url}/rest/v1/stock_score?select=batch_date&order=batch_date.desc&limit=1`, { headers: svcHeaders() });
+// ==== 分页读（2026-10-12 首跑后池对账抓到的真缺陷）====
+// 裸 `?select=code` 的单页被 PostgREST `db-max-rows` 静默截断为 1000 行。取证（服务端 pg_net 实发 GET，只读）：
+// 响应是 **HTTP 206 + `Content-Range: 0-999/1165`**，body 就是 1000 行——不报错、不炸批。
+// 后果：1165 只池只标出 1000 只 `in_pool`（116 只假阴性），主分快照同样只拿到 1000 只归因；
+// 而「池内」这条维度上的每一件事（池内分位 pool_rank、分歧榜、countMainMissing、前端门面）全靠它。
+// 实测另一形态：offset 越过总数返回 **416 PGRST103** 而不是空数组⇒ 收尾条件只能是「已收 >= 总数」，
+// 不得靠「拿到空页」或「拿到不够一页」退出（后者正是旧写法静默截断的形态）。
+// 每条不确定的形态一律抛错炸批：宁可今晚不跑，也不能拿一个少 116 只的池明天继续。
+type PageGet = (u: string, init: RequestInit) => Promise<{
+  ok: boolean; status: number;
+  headers: { get(k: string): string | null };
+  json(): Promise<unknown>;
+}>;
+
+export async function readAllRows(
+  base: string, resource: string, params: string,
+  get: PageGet = fetch as unknown as PageGet, pageSize = 1000,
+): Promise<Record<string, unknown>[]> {
+  // offset 分页只有在确定性排序下才不重不漏（平台默认行序会随真空页/簇迁移漂移）
+  if (!/(^|&)order=/i.test(params)) throw new Error(`read ${resource}: offset 分页要求确定性 order=`);
+  const out: Record<string, unknown>[] = [];
+  let total: number | null = null;
+  for (let from = 0; ;) {
+    const r = await get(`${base}/rest/v1/${resource}?${params}&limit=${pageSize}&offset=${from}`,
+      { headers: { ...svcHeaders(), 'Prefer': 'count=exact' } });
+    if (!r.ok) throw new Error(`read ${resource} page@${from}: ${r.status}`);
+    const m = /^(\d+)-(\d+)\/(\d+)$/.exec(r.headers.get('content-range') ?? '');
+    if (!m) throw new Error(`read ${resource} page@${from}: Content-Range 拿不到总数（count=exact 未生效）`);
+    const [start, end, count] = [Number(m[1]), Number(m[2]), Number(m[3])];
+    if (total === null) total = count;
+    else if (count !== total) throw new Error(`read ${resource}: 总数中途变化 ${total} -> ${count}`);
+    if (start !== from) throw new Error(`read ${resource}: 页起点 ${start} != 请求 offset ${from}`);
+    const page = (await r.json()) as Record<string, unknown>[];
+    // 声明的区间长度与实际行数必须一致：逐页自证，不等收尾才发现页被吃了。
+    // 有了 `start === from` + 这一条，各页严格铺满 [0, total-1]，所以不必再写“总行数 == total”的收尾守卫（恒真，属死代码）
+    if (end - start + 1 !== page.length) throw new Error(`read ${resource} page@${from}: 声明 ${end - start + 1} 行（总数 ${total}）实得 ${page.length} 行`);
+    if (page.length === 0) throw new Error(`read ${resource}: page@${from} 空页而总数 ${total} 未到`);   // 进度守卫：按上面两条推导本不可达，但一旦有人改松了守卫，这里必须是报错而不是死循环吊死整个函数
+    out.push(...page);
+    from += page.length;                                  // 推进量=实收，平台把 db-max-rows 调得比 pageSize 小时也不会静默少收
+    if (from >= total) break;
+  }
+  return out;
+}
+
+// 池成员（`in_pool` 的唯一真值源）：去重后的 Set 行数必须等于收回行数——Set 会静默吞掉重复 code，
+// 只能在这里拿两个数把它拉回来。导出可测：变异检验靠它验证「只读第一页」的写法不能溜过。
+export async function readPoolSet(base: string, get?: PageGet, pageSize?: number): Promise<Set<string>> {
+  const rows = await readAllRows(base, 'stock_pool', 'select=code&order=code.asc', get, pageSize);
+  const set = new Set(rows.map(x => String(x.code)));
+  if (set.size !== rows.length) throw new Error(`read stock_pool: 去重后 ${set.size} != 收回 ${rows.length}（池内有重复 code）`);
+  return set;
+}
+
+// 主分快照 + 四条腿（供分歧榜归因）：只读最新批次的 in_pool 行（分歧榜本质是池内对比，无需全宇宙）。
+// 明细同样走分页：池内 1116 行在旧写法里只回 1000 行，剩下 116 只的 main_final/main_legs 静默变 null。
+// 导出仅为可测（注入 get）。
+export async function readMainSnapshot(
+  base: string, get: PageGet = fetch as unknown as PageGet,
+): Promise<{ batch: string | null; map: Map<string, MainSnap> }> {
+  const b = await get(`${base}/rest/v1/stock_score?select=batch_date&order=batch_date.desc&limit=1`, { headers: svcHeaders() });
   if (!b.ok) throw new Error(`read stock_score batch ${b.status}`);
-  const bb = (await b.json())[0] as { batch_date: string } | undefined;
+  const bb = ((await b.json()) as { batch_date: string }[])[0];
   if (!bb) throw new Error('stock_score has no batch yet — value leg must run AFTER stock-score');
-  const d = await fetch(`${url}/rest/v1/stock_score?select=code,final,confidence,quality,growth,value,momentum&batch_date=eq.${bb.batch_date}&in_pool=eq.true`, { headers: svcHeaders() });
-  if (!d.ok) throw new Error(`read stock_score rows ${d.status}`);
+  const rows = await readAllRows(base, 'stock_score',
+    `select=code,final,confidence,quality,growth,value,momentum&batch_date=eq.${bb.batch_date}&in_pool=eq.true&order=code.asc`, get);
   const map = new Map<string, MainSnap>();
-  for (const x of await d.json()) map.set(String(x.code), {
+  // readAllRows 只交回 Record<string, unknown>（它是通用分页读，不认得业务列），所以这里把形状写明；
+  // 直接 `x.final ?? null` 会被推成 `{} | null`，deno check 当场拒（旧写法靠 fetch 的 any 蒙过去了）
+  type MainCol = { code: string } & Partial<MainSnap>;
+  for (const x of rows as MainCol[]) map.set(String(x.code), {
     final: x.final ?? null, confidence: x.confidence ?? null,
     quality: x.quality ?? null, growth: x.growth ?? null, value: x.value ?? null, momentum: x.momentum ?? null,
   });
@@ -205,9 +265,7 @@ Deno.serve(async (req: Request) => {
     });
 
     const main = await readMainSnapshot(url);
-    const poolR = await fetch(`${url}/rest/v1/stock_pool?select=code`, { headers: svcHeaders() });
-    if (!poolR.ok) throw new Error(`read stock_pool ${poolR.status}`);
-    const poolSet = new Set(((await poolR.json()) as { code: string }[]).map(x => x.code));
+    const poolSet = await readPoolSet(url);
 
     // 金融股否决4 的 ROE 只认本批自己那一列（Task 5 裁定 2）；钥匙必须是 `ValueRaw.code` 原样（带后缀），与引擎内部 `finRoe?.get(s.code)` 同一把
     const finRoe = new Map<string, number>();

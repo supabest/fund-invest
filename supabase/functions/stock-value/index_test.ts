@@ -2,7 +2,8 @@
 import { assertEquals, assertRejects } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import type { MainSnap } from './index.ts';            // 类型导入编译期擦除，不会触发 Deno.serve
 Deno.env.set('STOCK_VALUE_DISABLE_SERVE', '1');           // import 即绑端口 → 必须先关
-const { buildExtras, toDbRow, poolRanks, buildDbRows, countMainMissing, isMainStale, runSummary, errorBody, upsert } = await import('./index.ts');
+const { buildExtras, toDbRow, poolRanks, buildDbRows, countMainMissing, isMainStale, runSummary, errorBody,
+  upsert, readAllRows, readPoolSet, readMainSnapshot } = await import('./index.ts');
 
 const row = { code: '600031.SH', name: '测试制造', ths: ['机械设备', '工程机械', '工程机械'],
   isFin: false, isST: false, roic: 18.4, roic3: [17.1, 18.0, 18.9], fcff: 5.400171e12, cash: 4e10, debt: 1e10,
@@ -193,4 +194,135 @@ Deno.test('upsert：空行集一块也不发（不能发空数组去把本批当
   await upsert([], () => { throw new Error('空批不应报告'); },
     async () => { calls++; return { ok: true, status: 201, text: async () => '' }; });
   assertEquals(calls, 0);
+});
+
+// ==== 2026-10-12 首跑后对账抓到的真缺陷：PostgREST `db-max-rows`=1000 的静默截断 ====
+// 取证（服务端 pg_net 实发 GET，只读）：`?select=code` 单页返回 **HTTP 206 + Content-Range `0-999/1165`**，
+// 于是 1165 只池只标出 1000 只 in_pool，116 只假阴性。它不报错、不炸批，只让「池内」这条维度静默失真。
+// 同一条读法也用在主分快照（`stock_score?...&in_pool=eq.true` 池内 1116 行 → 同样只回 1000）。
+// 实测的第二条形态：offset 越过总数返回 **416 PGRST103**（不是空数组）⇒ 终止条件只能是「已收 >= 总数」。
+type PageResp = { ok: boolean; status: number; headers: { get(k: string): string | null }; json(): Promise<unknown> };
+// 桩一律用 `Promise.resolve` 而不是 `async`：async 而无 await 会被 `deno lint` 报 require-await，
+// 本仓库的判据是「lint 不得高于基线」，测试文件也一样。
+const poolStub = (codes: string[], opts: { hideTotal?: boolean; serverCap?: number } = {}) => {
+  const st = { calls: 0, offsets: [] as number[], prefers: [] as string[] };
+  const get = (u: string, init?: RequestInit): Promise<PageResp> => {
+    st.calls++;
+    st.prefers.push(String((init?.headers as Record<string, string> | undefined)?.['Prefer'] ?? ''));
+    const q = new URL(u).searchParams;
+    const offset = Number(q.get('offset') ?? '0');
+    st.offsets.push(offset);
+    if (offset >= codes.length) return Promise.resolve({ ok: false, status: 416,   // 真平台形态：越界是错误而非空页
+      headers: { get: () => `*/${codes.length}` }, json: () => Promise.resolve({ code: 'PGRST103' }) });
+    // serverCap = 平台侧 db-max-rows 比请求的 limit 更小（这一页就是被截了）
+    const n = Math.min(Number(q.get('limit') ?? '1000'), opts.serverCap ?? Infinity, codes.length - offset);
+    const slice = codes.slice(offset, offset + n);
+    const cr = `${offset}-${offset + slice.length - 1}/${opts.hideTotal ? '*' : codes.length}`;
+    return Promise.resolve({ ok: true, status: 206, headers: { get: (k) => k.toLowerCase() === 'content-range' ? cr : null },
+      json: () => Promise.resolve(slice.map(c => ({ code: c }))) });
+  };
+  return { get: get as never, st };
+};
+const codes1165 = (_n = 1165) => Array.from({ length: _n }, (_, i) => String(i).padStart(6, '0'));
+
+Deno.test('readAllRows：单页被 db-max-rows 截断时必须靠分页取回全部，且每页 offset 由上一页实收行数推进', async () => {
+  const codes = codes1165();
+  const { get, st } = poolStub(codes);
+  const rows = await readAllRows('https://stub.invalid', 'stock_pool', 'select=code&order=code.asc', get);
+  assertEquals(rows.length, 1165);                                  // 旧写法只拿第一页 ⇒ 1000
+  assertEquals(st.calls, 2);                                         // 1000 + 165，不多发一页（第三页会 416）
+  assertEquals(st.offsets, [0, 1000]);
+  assertEquals(rows[1000].code, '001000');                           // 第 1001 行确实是分页接上的
+  // 请求里必须带 `Prefer: count=exact`：没有它 PostgREST 返 `0-999/*`（无总数），
+  // 整套闭合校验就无从谈起，而桩子自己是模拟不出这个差别的——只能直接钉请求
+  assertEquals(st.prefers, ['count=exact', 'count=exact']);
+  // 平台把 db-max-rows 调小（< 请求 limit）时也不能静默少收：靠实收行数推进，照样取全
+  const capped = poolStub(codes, { serverCap: 500 });
+  const r2 = await readAllRows('https://stub.invalid', 'stock_pool', 'select=code&order=code.asc', capped.get, 1000);
+  assertEquals(r2.length, 1165);
+  assertEquals(capped.st.offsets, [0, 500, 1000]);   // 推进量=各页实收（500/500/165），第三页到底
+  assertEquals(capped.st.calls, 3);
+});
+
+Deno.test('readAllRows：总数拿不到就抛（未生效的 count=exact 会让截断重新变成静默）', async () => {
+  const e = await assertRejects(() => readAllRows('https://stub.invalid', 'stock_pool',
+    'select=code&order=code.asc', poolStub(codes1165(), { hideTotal: true }).get), Error);
+  assertEquals(String(e).includes('Content-Range'), true);
+  // Content-Range 整个缺失同样抛（变异：删掉这条守卫后，只回 1000 行的读法看起来完全正常）
+  const noRange = () => Promise.resolve({ ok: true, status: 200,
+    headers: { get: () => null }, json: () => Promise.resolve(codes1165(1000).map(c => ({ code: c }))) });
+  await assertRejects(() => readAllRows('https://stub.invalid', 'stock_pool',
+    'select=code&order=code.asc', noRange as never), Error);
+  // 空表（真平台形态：`0--1/0` + 空数组）也必须抛——池读成空集会把全宇宙 in_pool 静默标 false
+  const empty = (): Promise<PageResp> => Promise.resolve({ ok: true, status: 200,
+    headers: { get: () => '0--1/0' }, json: () => Promise.resolve([]) });
+  const e2 = await assertRejects(() => readPoolSet('https://stub.invalid', empty as never), Error);
+  assertEquals(String(e2).includes('Content-Range'), true);
+});
+
+Deno.test('readAllRows：非 2xx / 页起点与请求不符 / 未要求确定性排序 —— 三种不确定形态一律抛，不得返回部分结果', async () => {
+  await assertRejects(() => readAllRows('https://stub.invalid', 'stock_pool', 'select=code&order=code.asc',
+    () => Promise.resolve({ ok: false, status: 502, headers: { get: () => null }, json: () => Promise.resolve([]) } as never)), Error);
+  // 页起点错位（服务端返回的 range 从 999 开始 ⇒ 有一行被重复或跳过，偏移分页就靠这个对齐自证）
+  const skewed = (u: string): Promise<PageResp> => {
+    const offset = Number(new URL(u).searchParams.get('offset') ?? '0');
+    const cr = offset === 0 ? `0-999/1165` : `999-1164/1165`;
+    return Promise.resolve({ ok: true, status: 206, headers: { get: (k) => k.toLowerCase() === 'content-range' ? cr : null },
+      json: () => Promise.resolve(Array.from({ length: offset === 0 ? 1000 : 166 }, (_, i) => ({ code: String(i) }))) });
+  };
+  const e2 = await assertRejects(() => readAllRows('https://stub.invalid', 'stock_pool',
+    'select=code&order=code.asc', skewed as never), Error);
+  assertEquals(String(e2).includes('页起点'), true);
+  // 没有 order= 时 offset 分页不保证不重不漏 ⇒ 直接拒绝这种调用方写法（判据是参数本身，不是响应）
+  const e3 = await assertRejects(() => readAllRows('https://stub.invalid', 'stock_pool',
+    'select=code', poolStub(codes1165()).get), Error);
+  assertEquals(String(e3).includes('order'), true);
+});
+
+Deno.test('readAllRows：声明区间长度与实际行数不符即抛（页被吃了也不拿部分结果交差）', async () => {
+  const short = (): Promise<PageResp> => Promise.resolve({ ok: true, status: 206,
+    headers: { get: () => '0-4/1000' }, json: () => Promise.resolve([1, 2, 3].map(c => ({ code: String(c) }))) });
+  const e = await assertRejects(() => readAllRows('https://stub.invalid', 'stock_pool',
+    'select=code&order=code.asc', short as never), Error);
+  assertEquals(String(e).includes('1000'), true);
+});
+
+Deno.test('readPoolSet：重复 code 使去重后变少时必抛（Set 会静默吞掉重复，总数就对不上）', async () => {
+  const dup = (): Promise<PageResp> => Promise.resolve({ ok: true, status: 206,
+    headers: { get: () => '0-999/1000' },
+    json: () => Promise.resolve(Array.from({ length: 1000 }, (_, i) => ({ code: String(i % 900) }))) });   // 900 唯一
+  const e = await assertRejects(() => readPoolSet('https://stub.invalid', dup as never), Error);
+  assertEquals(String(e).includes('1000'), true);
+});
+
+Deno.test('readPoolSet：第 1001 只以后的池内代码必须在集合里（首跑那 116 只假阴性）', async () => {
+  const codes = codes1165();
+  const set = await readPoolSet('https://stub.invalid', poolStub(codes).get);
+  assertEquals(set.size, 1165);
+  assertEquals(set.has('001164'), true);        // 旧写法下这一只永远不在 Set 里
+  assertEquals(set.has('000999'), true);
+});
+
+Deno.test('readMainSnapshot：主分快照同样分页——池内 1116 只不得只拿到 1000 只的归因', async () => {
+  const codes = codes1165(1116);
+  let calls = 0;
+  const get = (u: string): Promise<PageResp> => {
+    calls++;
+    const q = new URL(u).searchParams;
+    if ((q.get('limit') ?? '') === '1') {        // 第一批：取最新批次号
+      return Promise.resolve({ ok: true, status: 200, headers: { get: () => '0-0/1' },
+        json: () => Promise.resolve([{ batch_date: '2026-10-12' }]) });
+    }
+    const offset = Number(q.get('offset') ?? '0');
+    const n = Math.min(1000, codes.length - offset);
+    const cr = `${offset}-${offset + n - 1}/${codes.length}`;
+    return Promise.resolve({ ok: true, status: 206, headers: { get: (k) => k.toLowerCase() === 'content-range' ? cr : null },
+      json: () => Promise.resolve(codes.slice(offset, offset + n).map(c => ({   // 首跑形态：1000 只之后仍有 116 只要拿
+        code: c, final: 70, confidence: 'A', quality: 80, growth: 40, value: 44, momentum: 30 }))) });
+  };
+  const m = await readMainSnapshot('https://stub.invalid', get as never);
+  assertEquals(m.batch, '2026-10-12');
+  assertEquals(m.map.size, 1116);
+  assertEquals(m.map.get('001115')?.momentum, 30);
+  assertEquals(calls, 3);                        // 1 次批次 + 2 次明细
 });
