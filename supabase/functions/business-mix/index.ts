@@ -69,22 +69,82 @@ async function fetchZygcfx(code6: string): Promise<ZygcfxRow[]> {
   throw lastErr;
 }
 
+// ---- offset 分页读（2026-10-12 用户裁定「三条腿一并修」：与价值腿/主分腿同型的静默截断）----
+// 缺陷不在本腿源码里发现，是价值腿重跑后直查出来的：PostgREST `db-max-rows` 默认 1000，裸 `?select=code`
+// 单页 GET 返 **HTTP 206 + `Content-Range: 0-999/1165`** —— 不报错、不炸批，静默截断。
+// 后果：池 1165 只 > 1000 ⇒ 每晚只看到按 code 升序的前 1000 只，第 1001 只往后的池成员
+// **永远进不了「最旧优先补拉 300 只」的候选集**——不是慢，是静默饿死。而 stock_business_mix 今晚 972 行、
+// business-mix 每晚补 300 ⇒ 第二处裸读明夜越线。实测另一形态：offset 越过总数返 **416 PGRST103**
+// 而不是空数组 ⇒ 收尾条件只能是「已收 >= 总数」，不得靠「拿到空页/不够一页」退出。
+// 五条守卫任一不齐就抛错炸批：宁可今晚不跑，也不能拿一个少 165 只的池明天继续。
+// 与价值腿逐字对齐的**复制体**而非共享模块：每个 edge 函数各自打包成独立 deploy.ts，跨函数 import 会破坏 bundle。
+type PageGet = (u: string, init: RequestInit) => Promise<{
+  ok: boolean; status: number;
+  headers: { get(k: string): string | null };
+  json(): Promise<unknown>;
+}>;
+
+export async function readAllRows(
+  base: string, resource: string, params: string,
+  get: PageGet = fetch as unknown as PageGet, pageSize = 1000,
+): Promise<Record<string, unknown>[]> {
+  // offset 分页只有在确定性排序下才不重不漏（平台默认行序会随真空页/簇迁移漂移）
+  if (!/(^|&)order=/i.test(params)) throw new Error(`read ${resource}: offset 分页要求确定性 order=`);
+  const out: Record<string, unknown>[] = [];
+  let total: number | null = null;
+  for (let from = 0; ;) {
+    const r = await get(`${base}/rest/v1/${resource}?${params}&limit=${pageSize}&offset=${from}`,
+      { headers: { ...svcHeaders(), 'Prefer': 'count=exact' } });
+    if (!r.ok) throw new Error(`read ${resource} page@${from}: ${r.status}`);
+    const m = /^(\d+)-(\d+)\/(\d+)$/.exec(r.headers.get('content-range') ?? '');
+    if (!m) throw new Error(`read ${resource} page@${from}: Content-Range 拿不到总数（count=exact 未生效）`);
+    const [start, end, count] = [Number(m[1]), Number(m[2]), Number(m[3])];
+    if (total === null) total = count;
+    else if (count !== total) throw new Error(`read ${resource}: 总数中途变化 ${total} -> ${count}`);
+    if (start !== from) throw new Error(`read ${resource}: 页起点 ${start} != 请求 offset ${from}`);
+    const page = (await r.json()) as Record<string, unknown>[];
+    // 声明的区间长度与实际行数必须一致：逐页自证，不等收尾才发现页被吃了。
+    // 有了 `start === from` + 这一条，各页严格铺满 [0, total-1]，所以不必再写「总行数 == total」的收尾守卫（恒真，属死代码）
+    if (end - start + 1 !== page.length) throw new Error(`read ${resource} page@${from}: 声明 ${end - start + 1} 行（总数 ${total}）实得 ${page.length} 行`);
+    if (page.length === 0) throw new Error(`read ${resource}: page@${from} 空页而总数 ${total} 未到`);   // 进度守卫：按上面两条推导本不可达，但一旦有人改松了守卫，这里必须是报错而不是死循环吊死整个函数
+    out.push(...page);
+    from += page.length;                                  // 推进量=实收，平台把 db-max-rows 调得比 pageSize 小时也不会静默少收
+    if (from >= total) break;
+  }
+  return out;
+}
+
+// 池成员（候选集的唯一真值源）：去重后的 Set 行数必须等于收回行数——Set 会静默吞掉重复 code，
+// 只能在这里拿两个数把它拉回来。导出可测：变异检验靠它验证「只读第一页」的写法不能溜过。
+export async function readPoolSet(base: string, get?: PageGet, pageSize?: number): Promise<Set<string>> {
+  const rows = await readAllRows(base, 'stock_pool', 'select=code&order=code.asc', get, pageSize);
+  const set = new Set(rows.map(x => String(x.code)));
+  if (set.size !== rows.length) throw new Error(`read stock_pool: 去重后 ${set.size} != 收回 ${rows.length}（池内有重复 code）`);
+  return set;
+}
+
 // left-join in memory：pool 全代码 + 各自 updated_at（缺表行 = null）→ 最旧优先取 300。
 // nullsfirst 语义：codes 在 mix 表中缺失者排最前（最优先补拉）。
 // 注：为正确区分“缺失”与“已更新但较新”，此处读取 mix 表全量 updated_at（表 ≤ 池 ~1165 行，开销可忽略），
 //     而非 limit 300 —— 一旦表行数 > 300，只读 300 会把“较新的已更新行”误判为“缺失”。见 task-5-report concerns。
-async function pickStaleCodes(): Promise<string[]> {
-  const url = Deno.env.get('SUPABASE_URL')!;
-  const poolResp = await fetch(`${url}/rest/v1/stock_pool?select=code`, { headers: svcHeaders() });
-  if (!poolResp.ok) throw new Error(`read stock_pool ${poolResp.status} ${await poolResp.text()}`);
-  const pool = (await poolResp.json()) as { code: string }[];
+//     「读全量」这个判断从一开始就是对的，错的是读法：全量必须靠分页拿，裸读拿到的只是前 1000 行。
+// 导出 + 注入 get 仅为可测（分页接线与排序优先级必须在不起服务器的情况下验）。
+export async function pickStaleCodes(
+  url: string = Deno.env.get('SUPABASE_URL')!,
+  get: PageGet = fetch as unknown as PageGet,
+): Promise<string[]> {
+  const pool = [...await readPoolSet(url, get)];
 
-  const mixResp = await fetch(`${url}/rest/v1/stock_business_mix?select=code,updated_at&order=updated_at.asc.nullsfirst`, { headers: svcHeaders() });
-  if (!mixResp.ok) throw new Error(`read stock_business_mix ${mixResp.status} ${await mixResp.text()}`);
-  const mix = (await mixResp.json()) as { code: string; updated_at: string | null }[];
+  // 这里只需要 code -> updated_at 的映射，与行序无关，所以 SQL order 用 code.asc 提供确定性即可；
+  // 「nullsfirst + 旧→新」由下面的内存排序负责（原 `order=updated_at.asc.nullsfirst` 在 updated_at 并列时
+  // 行序不定，跨页反而会漂移）
+  // readAllRows 只交回 Record<string, unknown>[]（通用分页读不认得业务列），所以把形状写明；
+  // 直接 `as {code:string;updated_at:string}[]` 会被 TS2352 拒（与价值腿 readMainSnapshot 的 MainCol 同款教训）
+  type MixAtCol = { code: string; updated_at: string | null };
+  const mix = (await readAllRows(url, 'stock_business_mix', 'select=code,updated_at&order=code.asc', get)) as MixAtCol[];
   const updatedAt = new Map(mix.map(m => [m.code, m.updated_at]));
 
-  return pool.map(p => ({ code: p.code, u: updatedAt.get(p.code) ?? null }))
+  return pool.map(code => ({ code, u: updatedAt.get(code) ?? null }))
     .sort((a, b) => {
       if (a.u === null && b.u === null) return a.code < b.code ? -1 : a.code > b.code ? 1 : 0;
       if (a.u === null) return -1; // 缺失优先
@@ -95,6 +155,10 @@ async function pickStaleCodes(): Promise<string[]> {
     .map(r => r.code);
 }
 
+// 守卫仅针对单测场景（index_test.ts 先设 BUSINESS_MIX_DISABLE_SERVE 再动态 import；静态 import 会被
+// 提到 Deno.env.set 之前执行，import 即绑 8000 端口，整套测试以 uncaught error 倒下）。
+// 线上 Edge 不会注入该变量，Deno.serve 注册行为不变。
+if (!Deno.env.get('BUSINESS_MIX_DISABLE_SERVE')) {
 Deno.serve(async (req: Request) => {
   const token = Deno.env.get('DAILY_UPDATE_TOKEN') || '';
   if (!token || req.headers.get('Authorization') !== `Bearer ${token}`) return new Response('unauthorized', { status: 401 });
@@ -141,3 +205,4 @@ Deno.serve(async (req: Request) => {
     return Response.json({ ok: false, error: String(e) }, { status: 500 });
   }
 });
+}
