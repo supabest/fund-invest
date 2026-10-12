@@ -3310,7 +3310,7 @@ grep -c "^Deno.test" scripts/value_forward_check_test.ts   # 期望 15（本单�
 - **plan 自身的 4 处误导（控制方已就地处置，实现者不必碰）**：叙述句里「前端总体=池内(+持仓)」已加实况限定（F-1 之后前端总体就是池内）；Task 7 的 `valuePillHtml` 代码行与接口契约行已按 F-2/F-3 终态改写；「两边百分位次序可能有微小漂移」的**降级表述是错的**（终审实测证明它能直接改变成员资格），其**交付物侧**的两处已列为本单 **F-9** 交实现者执行，plan 正文侧由 N-4 注记第 ③ 条收回；`value_forward_check_test.ts` 第 9 条测试名「与前端 divergeLists 同过滤器」在 F-1 之前名不副实、**F-1 落地即自洽，故不改名**（改名会无谓改动 Task 9 已闭合的交付物）。
 - **提交边界**：向 `.gitignore` 追加 `site/`、`.deploy-site/`、`.vercel-tmp/`、`.wrangler/` 四行（用户选定）。**这是仓库根配置改动，由控制方在提交步骤里单独做、单独复述**，不放进本单。
 
-**预期计数（preflight16 已机械化实测坐实）**：`deno test -A supabase/functions/stock-value/` = **49 + 1(F-3f poolRanks) + 1(F-3f buildDbRows 接线) + 1(F-4 新增) = 52**；`deno test -A scripts/` = **115 + 1(F-1) + 1(F-7g) + 1(F-8 配套) = 118**；`supabase/functions/daily-update/` 仍 **4**。其余判据：`deno check` 全部改动文件无诊断；`deno lint scripts/value_forward_check.ts` **0 problems**；`deno lint scripts/` **总数仍为 9**（不得为过 lint 改 `https://deno.land/std@0.224.0` 的 import 写法）；`deno task verify-bundles` **5 ✅**（F-6 之后 deploy.ts 必须已由新 build.ts 重生成，重跑时逐字节一致；站点实测产物 **46138 bytes**，含 buildDbRows 与 valueFmtPp 后的终态。**字节数不是判据**：实现者实跑为 46137B，差异来自注释行文（反引号/虚词）与函数落位顺序，属噪声；真判据是「`diff -B` 对旧形态为空 + 恰 +2 空行 + verify-bundles 5 ✅ + 两道构建期门禁未被弱化」。
+**预期计数（preflight16 已机械化实测坐实）**：`deno test -A supabase/functions/stock-value/` = **49 + 1(F-3f poolRanks) + 1(F-3f buildDbRows 接线) + 1(F-4 新增) = 52**；Step 5b 再 +7（M5/M6/成功载荷/失败载荷/upsert 分块语义 3 条）= **59**（2026-10-12 实测）；`deno test -A scripts/` = **115 + 1(F-1) + 1(F-7g) + 1(F-8 配套) = 118**；`supabase/functions/daily-update/` 仍 **4**。其余判据：`deno check` 全部改动文件无诊断；`deno lint scripts/value_forward_check.ts` **0 problems**；`deno lint scripts/` **总数仍为 9**（不得为过 lint 改 `https://deno.land/std@0.224.0` 的 import 写法）；`deno task verify-bundles` **5 ✅**（F-6 之后 deploy.ts 必须已由新 build.ts 重生成，重跑时逐字节一致；站点实测产物 **46138 bytes**，含 buildDbRows 与 valueFmtPp 后的终态。**字节数不是判据**：实现者实跑为 46137B，差异来自注释行文（反引号/虚词）与函数落位顺序，属噪声；真判据是「`diff -B` 对旧形态为空 + 恰 +2 空行 + verify-bundles 5 ✅ + 两道构建期门禁未被弱化」。
 
 **preflight16 的六条变异必须全部被杀**（删 F-1 的 `in_pool` 判据 / 还原 F-2 胶囊判断顺序 / 从 `buildDbRows` 摘掉 `pool` 实参 / 摘掉 F-4 的 1231 谓词 / F-7 改回 `push(use[i])` / 任一处的 `valueFmtPp` 还原为 `valueFmtPct`）——任何一条存活即该发现未被真正解决。控制方实测结果：**六条全杀**（M3 在引入 `buildDbRows` 之前**存活**，这是本单把接线抽成纯函数的唯一理由）。
 
@@ -3354,23 +3354,28 @@ select column_name, is_nullable, column_default from information_schema.columns
 
 Expected: 两表存在；每条策略 `roles = {anon,authenticated}`、`cmd = SELECT`；布尔列里 **`rf_fallback` 与 `vetoed` 必须 `is_nullable = NO` 且 `column_default` 为空**（Task 1 裁定：无 default 才能把“漏写”从静默存 false 变成整批报错），`in_pool` 允许 `default false`。不符 → 迁移未真正生效或建的是旧版表，停下上报，不得继续 Step 3。登录用户可读是 I-1 教训的验收点，**必须实际登录一次用前端读取确认**，不能只看 pg_policies。
 
-- [ ] **Step 3: 函数部署（⚠ 需用户明示）**
+- [x] **Step 3: 函数部署（2026-10-12 实做：`stock-value` v1 `ACTIVE`，`verify_jwt=false`）**
 
 ```bash
 cd "/Users/alick/Documents/GitHub/fund invest" && deno task verify-bundles   # 全绿才允许部署
+# entrypoint_path 必须是 **deploy.ts**（不是 index.ts）：上传的是单文件 bundle，
+# 平台把它放在 source/ 下，写 index.ts 会返回 400 "Entrypoint path does not exist"。
+# 该形态以线上已跑通的 stock-score(v7)/sector-trend(v15) 为权威：GET /functions/<slug> 的 entrypoint_path 均以 source/deploy.ts 结尾。
 curl -s -X POST "https://api.supabase.com/v1/projects/$REF/functions/deploy?slug=stock-value" \
   -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
-  -F 'metadata={"entrypoint_path":"index.ts","import_map_path":"","verify_jwt":false,"name":"stock-value","no_cache":true};type=application/json' \
+  -F 'metadata={"entrypoint_path":"deploy.ts","import_map_path":"","verify_jwt":false,"name":"stock-value","no_cache":true};type=application/json' \
   -F "file=@supabase/functions/stock-value/deploy.ts;type=application/typescript"
 ```
 
 Expected: 返回 `version` 自增、`status: ACTIVE`。先 `GET /v1/projects/$REF/functions` 确认令牌与当前版本列表。
 
-- [ ] **Step 4: secrets（`GS_API_KEY` 复用，`DAILY_UPDATE_TOKEN` 复用；⚠ 需用户明示）**
+- [x] **Step 4: secrets（2026-10-12 核对结果：零写入）**
 
 secrets 值一律从现有 `stock-score` 函数复制，**绝不在终端回显**；写入方式用 Management API secrets 端点，命令参数从环境取。
 
-- [ ] **Step 5: ping 验证（无数据写）**
+> 实况：Edge Function 密钥是**项目级共享**的。`GET /secrets` 的名字清单里 `DAILY_UPDATE_TOKEN`/`GS_API_KEY`/`SUPABASE_URL`/`SB_SERVICE_KEY`/`SUPABASE_SERVICE_ROLE_KEY` 全部已在，新函数部署即自动继承 ⇒ **本轮不需要任何密钥写入**。真正的验收以 Step 5 的 ping 为准（它同时证明两个密钥都可用：无 `DAILY_UPDATE_TOKEN` 会 401，无 `GS_API_KEY` 会 500）。
+
+- [x] **Step 5: ping 验证（无数据写；2026-10-12 实测 `200 {"ok":true,"rows":5171}`）**
 
 ```bash
 curl -s -H "Authorization: Bearer $DAILY_UPDATE_TOKEN" "$URL/functions/v1/stock-value?mode=ping"
@@ -3378,11 +3383,29 @@ curl -s -H "Authorization: Bearer $DAILY_UPDATE_TOKEN" "$URL/functions/v1/stock-
 
 Expected: `{"ok":true,"rows":5000+}`。若 rows 明显偏低（<4000）→ P-3 列族丢弃，先排查措辞，不得进入 Step 6。
 
+**认证取值的陷阱（Step 5 实跑发现，适用于所有要调生产函数的步骤，含 Step 6/8）**：`GET /v1/projects/{ref}/secrets` 返回的 `DAILY_UPDATE_TOKEN` **不是运行时生效的那一份**（实测两侧都是 64 位 alnum 但 md5 不同：库里 `de189cc7` vs 生产可用 `11dc16fe`）；拿它去 ping 任何函数（包括已跑通的 `stock-score`）一律 401 `unauthorized`，极易误判成“新函数没拿到密钥”。真正可用的值在 `cron.job.command` 里（`substring(command from 'Bearer ([A-Za-z0-9]+)')`）。**比较两份凭证用 md5，不要把值本身打到终端**；从 `cron.job` 取回后用完立即清零临时文件。另：本机对 `*.supabase.co` 的出网会间歇 `Connection reset`（urllib/curl 均遇过），**失败重试 3–4 次再下结论**。
+
 - [ ] **Step 5b: 部署前的 index.ts 遥测收口（Task 6 评审 parked 的 M3/M5/M6；只动 `index.ts`，改完必须重跑 build.ts + verify-bundles）**
 
 - **M3** `kept_old_batch` 在 upsert 中途失败时不准确：`upsert` 无事务，5224 行分 6 块，第 4 块失败时前 3 块已落库而响应仍称「旧批保留」，而前端（Task 7）读「最新批次」会拿到截断宇宙。修法：`let wrote = false;` 在首个 chunk 前置真，响应改 `kept_old_batch: !wrote`。
 - **M5** `in_pool` 与 `main_final` 有两个池真值源（`main.map` 取上一夜标为 in_pool 的主分行，`in_pool` 列取今晚的 `stock_pool`）：改池当晚新入池行 `main_final=null`，分歧榜归因静默缺席。修法：响应加 `main_missing` 计数（池内但 `main.map` 无该裸 6 位码的行数）。
 - **M6** 主分快照无龄期校验：stock-score 连失败夜时会把陈主分当今晚快照落库。修法：`batch_date` 距 `main_batch` 超 3 天则响应加 `main_stale: true`（不炸批，符合旁路「尽力而为」纪律）。
+
+**Step 5b 终态（2026-10-12 实做，含控制方新发现）**：三条修法若直接内联在 handler 里，就重犯了终审 I-3 的错（接线不在测试路径上）——变异检验把 `main_missing` 一行删掉、把 `kept_old_batch` 退回硬编 `true`，11 条测试全照绿。因此本轮把它们抽成导出的纯函数，与 `buildDbRows` 同款：
+
+```ts
+export function countMainMissing(computed: ValueRow[], poolSet: Set<string>, mainMap: Map<string, MainSnap>): number;
+export function isMainStale(batch: string, mainBatch: string | null, maxAgeDays = 3): boolean;
+export function runSummary(computed, batch, poolSet, main, resolved, divLegOk, finRoeRows, stamps): Record<string, unknown>;
+export function errorBody(msg: string, wrote: boolean): Record<string, unknown>;   // {ok:false,error,kept_old_batch:!wrote}
+export async function upsert(rows, onChunkSent?, post = fetch): Promise<void>;      // post 可注入；每发一块先 onChunkSent?.() 再看状态
+```
+
+关键裁定：**M5 的谓词不吃 `r.in_pool`**（`ValueRow` 根本不产出该字段，池信息属编排层，与 `poolRanks` 同理），改吃 `poolSet`；`deno check` 会当场拒掉写错的版本，变异 NB4 亦被杀。`kept_old_batch` 的真值由 `upsert` 的 `onChunkSent` 回调供给（声明在 `try` 外面，否则 `catch` 看不见）。
+
+新增 7 条测试（52 → **59**）：`countMainMissing` / `isMainStale` / `runSummary` / `errorBody` 各一，`upsert` 三条（分块尺寸 1000/1000/500 且报告 3 次；第 2 块被拒仍报告 2 次并抛错；空行集一块不发）。
+
+变异检验（`preflight17/mutate5b.py`，隔离副本 `/tmp/p5b2`）：**NB1–NB5 全杀，NB6/NB7 存活**。存活的两条是 handler 调用点的池参数（不把 `poolSet` 递给 `runSummary` / `buildDbRows`）——要覆盖它必须真跑 handler，而本仓库 10 个 Edge Function 无一有 serve 级测试先例。**Ruling**：不在此引入 serve 级假 fetch 框架（4000 行×4 表的夹具量与新架构风险，都落在部署前这道时间门上）；改为把这两条变成 **Step 6/7 的机械化验收项**（见下），即在真实数据上一次性证明接线，比离线桩更强（它同时验到 RLS 与列名）。若 Step 6/7 任一断言不过 → 停下修，不得进 Step 8 注册 cron。
 
 - [ ] **Step 6: 首跑 `mode=run`（⚠ 需用户明示）**
 
@@ -3391,6 +3414,22 @@ curl -s -X POST -H "Authorization: Bearer $DAILY_UPDATE_TOKEN" "$URL/functions/v
 ```
 
 Expected 响应字段逐项核对：`rows ≥ 4000`、`qualified > 0`、`vetoed ≥ 0` 且比例可解释、`cn10y_source ∈ override/auto/none`、`div_leg_ok` 为布尔、**`fin_roe_rows` ≥ 池内金融股数量**（若该数接近 0 而有大量 `isFin` 行，即 `finRoe` 键序回归或摊薄列未绑上）、**`stamps.div_period` 与 `stamps.roe_period` 必须以 `1231` 结尾且年份 = 当年 `annualBase`**（Task 6B：若不是 1231，GS 回的是季报/中报**累计非年化**值，而否决4 拿它跟 8% 这个年化阈值比 → 停下重新裁定，不得当正常数据上线）。
+
+**Step 6/7 必须补的两条机械化断言（承接 Step 5b 存活的变异 NB6/NB7，它们不在任何测试路径上）**：
+
+```sql
+-- (a) pool_rank 接线：本批池内有现行的行数必须 > 0，且与 stock_value 的 pool_rank 非空数一致
+select count(*) filter (where in_pool and vq is not null) as pool_scored,
+       count(*) filter (where pool_rank is not null)       as pool_rank_set
+from public.stock_value where batch_date = current_date;
+-- (b) main_missing 接线：响应里的 main_missing 必须等于下面这个直查值
+select count(*) from public.stock_value v
+where v.batch_date = current_date and v.in_pool
+  and not exists (select 1 from public.stock_score s
+                  where s.batch_date = (select max(batch_date) from public.stock_score) and s.code = v.code);
+```
+
+(a) 若 `pool_rank_set = 0` 而 `pool_scored > 0` ⇒ `buildDbRows` 的池参数在 handler 里接错了；(b) 若响应 `main_missing` 为 `undefined`/`0` 而直查 > 0 ⇒ `runSummary` 接错。两者都是**停下修**，不得因“数字看着合理”放行。
 **`vetoed` 的银行名单人工抽检**：抽 3-5 家在 `stock_pool` 里的银行，看 `veto_reasons` 含「无护城河证据」者其 `roe`（对照 `extras.stamps.roe_period` 那一期）是否真 <8%——Task 6B 前后的差异就应体现在这里。
 若 `cn10y_source=none` 且 `qualified` 异常偏少 → `rf_fallback` 退化路径在起作用，先写入 `value_config.cn10y_override` 再重跑，不要直接判“引擎坏了”。
 
