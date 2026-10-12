@@ -1,0 +1,6 @@
+{
+  "_comment": "仓库根命令入口。verify-bundles 是 deploy.ts 构建产物一致性门禁（部署前必跑）；说明见 README.md「构建产物与一致性校验」。",
+  "tasks": {
+    "verify-bundles": "deno run --allow-read --allow-write --allow-run scripts/verify_deploy_bundles.ts"
+  }
+}

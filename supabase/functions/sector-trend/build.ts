@@ -1,4 +1,5 @@
 // build.ts — 构建脚本：deno run --allow-read --allow-write build.ts
+// 校验用（不覆盖已提交产物）：deno run --allow-read --allow-write build.ts /tmp/out.ts —— 见 scripts/verify_deploy_bundles.ts
 // 把 engine.ts + tencent.ts + gs_etf.ts + gs_fund.ts + index.ts 拼接为单文件 deploy.ts（Edge 部署只吃一个入口）：
 //  - 剥离所有相对模块 import（index→engine/tencent/gs_etf/gs_fund、gs_etf→tencent、gs_fund→gs_etf），含内联 `type` 与多行形式
 //    ⚠ 剥离正则要求 import 语句行尾无内容（引号闭合/分号后直接行尾）；残留由 assertNoResidualImport 在构建期拒绝
@@ -63,5 +64,8 @@ const src = '/// <reference lib="deno.ns" />\n' +
   rd("gs_fund.ts") + "\n" + rd("index.ts");
 assertNoDup(src);
 assertNoResidualImport(src);
-Deno.writeTextFileSync("deploy.ts", src);
-console.log("deploy.ts bytes:", src.length);
+// 输出路径可选（缺省 deploy.ts）：一致性门禁把产物写到临时路径再与已提交 deploy.ts 逐字节比对，
+// 从而复用同一份拼接逻辑、且校验过程绝不改动功能目录。
+const out = Deno.args[0] ?? "deploy.ts";
+Deno.writeTextFileSync(out, src);
+console.log(`${out} bytes:`, src.length);

@@ -536,6 +536,10 @@ let stockCap = 0;     // 股票总仓位上限（0=不限）
 let scoreState = null; // { batch, rows: Map<code,row>, top10: row[] }
 let scoreTried = false; // 已尝试拉取；纯本地未接云时不展示占位文案
 
+// 价值腿（stock_value 最新批次）：与 scoreState 同范式——null=未生成/读取失败 → 卡片优雅降级
+let valueState = null;   // { batch, rows: Map<bareCode,row>, top10: row[] }；null=未生成/读取失败 → 卡片优雅降级
+let valueTried = false;
+
 // 板块轮动（sector_rotation_daily 最新批次）：与 scoreState 同范式——null=尚未生成/读取失败，卡片优雅降级
 let sectorState = null; // { batch, rows, accCounts: Map<pk_etf,n>, poolPools: {l1,l2,batch} }
 
@@ -690,7 +694,7 @@ function initCloud(tries){
     if(sbUser && Date.now()-lastPullAt > 60000) syncOnOpen();
   });
   // 评分表 anon 可读、全局共享，客户端就绪即拉一次；失败仅降级不阻塞页面
-  loadStockScores().then(()=>render());
+  Promise.all([loadStockScores(), loadStockValue()]).then(()=>render());
   loadFundamentals().then(()=>renderStockSection());
   setSyncUI();
 }
@@ -713,6 +717,25 @@ async function loadStockScores(){
     const rows = data.filter(r=>r && r.final!==null && r.final!==undefined);
     scoreState = { batch, rows: new Map(rows.map(r=>[String(r.code),r])), top10: rows.filter(r=>r.in_pool).slice(0,10) };
   }catch(e){ console.warn('scores load failed', e); }
+}
+
+// 价值腿（stock_value 只读）：与 loadStockScores 同一只读范式——先取最新批次，再按 in_pool + 持仓取行
+async function loadStockValue(){
+  if(!cloudReady || !sb) return;
+  valueTried = true;
+  try{
+    const { data: b, error: be } = await sb.from('stock_value').select('batch_date')
+      .order('batch_date',{ascending:false}).limit(1).maybeSingle();
+    if(be || !b) return;
+    const batch = b.batch_date;
+    const codes = [...new Set(stocks.map(s=>String(s.code||'').trim()).filter(c=>/^\d{5,6}$/.test(c)))];
+    const orFilter = codes.length ? 'in_pool.eq.true,code.in.(' + codes.join(',') + ')' : 'in_pool.eq.true';
+    const { data, error } = await sb.from('stock_value').select('*')
+      .eq('batch_date', batch).or(orFilter).order('vq',{ascending:false});
+    if(error || !data) return;
+    valueState = { batch, rows: new Map(data.map(r=>[String(r.code), r])),
+      top10: data.filter(r=>r.in_pool && r.tier==='qualified' && r.confidence==='A') };
+  }catch(e){ console.warn('value load failed', e); }
 }
 
 function scoreStars(f){ return f>=90?'★★★★★':f>=80?'★★★★☆':f>=70?'★★★★':f>=60?'★★★':f>=50?'★★':'★'; }
@@ -774,6 +797,131 @@ function scoreDetailHtml(s){
     ${w}<div class="score-src">财务截至 ${escapeHtml(String((sc.extras&&sc.extras.fin_period)||'—'))} · 批次 ${escapeHtml(String(scoreState.batch))} · 评分≠买入建议</div>
   </div>`;
 }
+
+// ==== VALUE_PURE_BEGIN ====
+// 价值腿（stock_value 批次）纯逻辑：唯一实现体，测试经 scripts/value_leg_logic.ts 门面抽取执行；不读全局。
+var VALUE_TABLE = { qualified:'合格', too_rich:'质量达标、价太贵', unqualified:'不合格', vetoed:'硬否决' };
+function valueFmtPct(v, d){ if(v===null || v===undefined || isNaN(Number(v))) return 'NA'; return Number(v).toFixed(d===undefined?1:d)+'%'; }
+function valueFmtPp(v, d){ if(v===null || v===undefined || isNaN(Number(v))) return 'NA'; return Number(v).toFixed(d===undefined?1:d)+'pp'; }
+function valueTierLabel(t){ return (t && VALUE_TABLE[t]) ? VALUE_TABLE[t] : '—'; }
+function valuePillHtml(row){
+  if(!row) return '';
+  // 引擎不变式（value_engine.ts:211）：`vq = tier==='qualified' && vcov>=VCOV_MIN ? vq0 : null`
+  // ⇒ 否决行的 vq **必为 null**。所以「是不是否决」必须排在「有没有分」之前判：
+  // 旧顺序让硬否决胶囊整颗消失（返回 ''），使「被硬否决」与「价值腿尚未生成」在持仓条上视觉完全相同，
+  // 而 tier='vetoed' 这个明确结论就在同一行数据里被丢弃（违反 spec §7.1 否决标记 + §7.4，也违反展示层铁律）。
+  if(row.tier === 'vetoed' || row.vetoed) return '<span class="score-pill score-pill-warn">价值 硬否决 ⛔</span>';
+  if(row.vq===null || row.vq===undefined) return '';       // 其它无分档（too_rich/unqualified/覆盖度不足）维持现状，见控制方裁定第 1 条
+  const pctPos = (row.pool_n && row.pool_rank) ? ' 池内 P' + Math.max(1, Math.round(100 - row.pool_rank/row.pool_n*100)) : '';
+  return '<span class="score-pill">价值 '+Number(row.vq).toFixed(1)+pctPos+'</span>';
+}
+function valueGateHtml(row){
+  if(!row) return '';
+  const bar = (v,l)=>'<div class="score-bar"><span>'+l+'</span><i style="--w:'+Math.max(0,Math.min(100, v==null?0:Number(v)))+'%"></i><em>'+(v==null?'NA':Number(v).toFixed(0))+'</em></div>';
+  const veto = (row.veto_reasons||[]).length ? '<div class="score-warn">⛔ 硬否决：'+escapeHtml(row.veto_reasons.join('、'))+'</div>' : '';
+  const mos = row.margin_of_safety===null||row.margin_of_safety===undefined
+    ? (row.rf_fallback ? '无风险利率口径缺失 → 改用绝对下限（rf_fallback）' : 'NA')
+    : valueFmtPp(row.margin_of_safety, 2)+'（owner yield '+valueFmtPct(row.owner_yield)+' − 十年国债 '+valueFmtPct(row.cn10y, 2)+'）';
+  return '<div class="score-detail">'+bar(row.v_moat,'资本回报护城河')+bar(row.v_cash,'现金回报')
+    +bar(row.v_safety,'安全边际')+bar(row.v_health,'财务稳健')
+    +'<div>门禁：'+escapeHtml(valueTierLabel(row.tier))+' · ROIC 中位 '+valueFmtPct(row.roic_med)+' · 安全边际 '+mos+'</div>'
+    +veto+'<div style="color:var(--muted)">价值分回答“值不值”，不等于买卖指令；与评分分不可互相替代。</div></div>';
+}
+function renderValueTop10(state){
+  if(!state) return '';
+  const list = (state.top10||[]).filter(r => r.tier==='qualified' && r.confidence==='A' && r.vq!==null && r.vq!==undefined)
+    .sort((a,b)=>b.vq-a.vq).slice(0,10);
+  return '<div class="fund-card"><div class="score-card-title">价值 Top10 · 巴菲特式质量价值 '
+    +'<span style="font-weight:400;font-size:11.5px;color:var(--muted)">批次 '+escapeHtml(String(state.batch))+'</span></div>'
+    +(list.length ? list.map((r,i)=>'<div class="score-row" data-code="'+escapeHtml(String(r.code))+'">'
+      +'<span style="color:var(--muted);width:24px">#'+(i+1)+'</span><b>'+escapeHtml(r.name||'')+'</b>'
+      +'<span style="color:var(--muted);font-size:11.5px">'+escapeHtml(String(r.code))+'</span>'
+      +'<span class="score-pill">'+Number(r.vq).toFixed(1)+'分</span>'
+      +'<span style="color:var(--muted);font-size:11px">owner yield '+valueFmtPct(r.owner_yield)
+      +' · 安全边际 '+valueFmtPp(r.margin_of_safety,2)+' · ROIC中位 '+valueFmtPct(r.roic_med)
+      + (r.pool_n && r.pool_rank ? ' · 池内 P' + Math.max(1, Math.round(100 - r.pool_rank / r.pool_n * 100)) : '')
+      +'</span></div>').join('')
+      : '<div class="score-row" style="color:var(--muted)">本批次无 A 级合格标的</div>')
+    +'<div class="score-card-note">门禁用绝对阈值（值不值得拥有），排序用行业内百分位（合格者中谁更靠前）；不构成买卖建议。</div></div>';
+}
+
+// ==== 以下续写：分歧榜与换仓逻辑（Task 8）====
+var SWAP_GAP = 5;   // pp；spec §7.3 换仓门槛——改动需先改 spec（受前视时间表约束，届满前不得调）
+
+function pctOf(values, v, reverse){
+  var n = values.length; if(!n) return null;
+  var below = values.filter(function(x){ return x < v; }).length;
+  var eq = values.filter(function(x){ return x === v; }).length;
+  var p = (below + 0.5*eq) / n * 100;
+  return reverse ? 100 - p : p;
+}
+
+// 分歧榜（spec §7.2 逐字：「VQ **池内**前 20 分位 × V1.1 主分后 50 分位」）：
+// 总体必须是「池内 + A 级 + 两分齐备」，与前视脚本 forwardUniverse 同一个总体——否则页面看到的榜
+// 与前视时间表声称验证的那张榜**同名、不同总体**，本功能「判生死」的证据基础失效。
+// 缺 in_pool 判据的实际后果（终审实测）：一只「已从 stock_pool 摘除但仍有主分快照」的持仓行会
+// ①自己混进榜单 ②改掉其余所有行的百分位（实例：加 1 只池外持仓，600519 从 87.5→70 直接出榜）。
+// 写成 `!== false` 而非 `=== true`：见计划「控制方裁定」第 2 条（保住既有 5 条测试的无 in_pool fixture）。
+function divergeLists(rows){
+  var use = (rows || []).filter(function(r){
+    return r && r.vq !== null && r.vq !== undefined && r.main_final !== null && r.main_final !== undefined
+      && r.confidence === 'A' && r.in_pool !== false;
+  });
+  var vqs = use.map(function(r){ return Number(r.vq); });
+  var ms  = use.map(function(r){ return Number(r.main_final); });
+  var wronged = [], rich = [];
+  for (var i = 0; i < use.length; i++) {
+    var vp = pctOf(vqs, Number(use[i].vq)), mp = pctOf(ms, Number(use[i].main_final));
+    if (vp >= 80 && mp <= 50) wronged.push({ ...use[i], vp, mp });        // 分位随行进榜（spec §7.2 示例要 (P8)/(P22)）
+    if (vp <= 50 && mp >= 80) rich.push({ ...use[i], vp, mp });
+  }
+  wronged.sort(function(a,b){ return b.vq - a.vq; });
+  rich.sort(function(a,b){ return b.main_final - a.main_final; });
+  return { wronged: wronged, rich: rich };
+}
+
+// 换仓建议：纯机会成本比较，只看安全边际差；too_rich 永不构成卖出（spec §7.3）
+function swapSuggest(row, poolRows, heldCodes){
+  if (!row || row.margin_of_safety === null || row.margin_of_safety === undefined || row.rf_fallback) return null;
+  var y = Number(row.margin_of_safety);
+  var best = null;
+  for (var i = 0; i < (poolRows || []).length; i++) {
+    var x = poolRows[i];
+    if (!x || x.code === row.code || x.tier !== 'qualified' || x.confidence !== 'A') continue;
+    if (heldCodes && heldCodes.indexOf(String(x.code)) >= 0) continue;   // spec §7.3：目标必须“未持有”（持仓集合只有前端知道）
+    if (x.margin_of_safety === null || x.margin_of_safety === undefined || x.rf_fallback) continue;  // 口径不一致 → 不混用尺子
+    var gap = Number(x.margin_of_safety) - y;
+    if (gap >= SWAP_GAP - 1e-9 && (!best || gap > best.gap)) best = { target: x, gap: gap };
+  }
+  return best;
+}
+
+function divergeRowHtml(r, tag){
+  var ex = r.extras || {};
+  var ml = ex.main_legs || null;
+  // 归因句（spec §7.2）：价值侧说“为什么便宜”，主分侧说“为什么被低估”——动量腿低是错杀最常见成因；主分侧说“为什么高分”
+  var leg = function(v){ return (v === null || v === undefined || isNaN(Number(v))) ? '—' : Number(v).toFixed(0); };
+  var why = ml ? (' 主分腿：Q' + leg(ml.quality) + '/G' + leg(ml.growth) + '/V' + leg(ml.value) + '/M' + leg(ml.momentum)) : ' 主分四条腿未快照';
+  return '<div class="score-row"><span class="warn-pill">' + tag + '</span><b>' + escapeHtml(r.name || r.code) + '</b>'
+    + '<span style="color:var(--muted);font-size:11.5px">' + escapeHtml(String(r.code)) + '</span>'
+    + '<span class="score-pill">VQ ' + Number(r.vq).toFixed(1) + '(P' + Math.round(r.vp) + ') / 主分 ' + Number(r.main_final).toFixed(1) + '(P' + Math.round(r.mp) + ')</span>'
+    + '<span style="color:var(--muted);font-size:11px">owner yield ' + valueFmtPct(r.owner_yield)
+    + ' · 安全边际 ' + valueFmtPp(r.margin_of_safety, 2) + ' · ROIC中位 ' + valueFmtPct(r.roic_med) + ' · ' + escapeHtml(why) + '</span></div>';
+}
+
+function renderDivergeBoard(state){
+  if (!state || !state.rows || typeof state.rows.forEach !== 'function') return '';
+  var all = [];
+  state.rows.forEach(function(r){ all.push(r); });
+  var d = divergeLists(all);
+  return '<div class="fund-card"><div class="score-card-title">分歧榜 · 两套分数不一致的地方'
+    + '<span style="font-weight:400;font-size:11.5px;color:var(--muted)">批次 ' + escapeHtml(String(state.batch)) + '</span></div>'
+    + (d.wronged.length ? d.wronged.slice(0, 5).map(function(r){ return divergeRowHtml(r, '被错杀'); }).join('') : '')
+    + (d.rich.length ? d.rich.slice(0, 5).map(function(r){ return divergeRowHtml(r, '虚高'); }).join('') : '')
+    + (d.wronged.length + d.rich.length === 0 ? '<div class="score-row" style="color:var(--muted)">本批次无显著分歧样本（两套分数同向）</div>' : '')
+    + '<div class="score-card-note">分歧榜只展示两套口径哪里不一致，不构成买卖建议。</div></div>';
+}
+// ==== VALUE_PURE_END ====
 
 // ==== RESEARCH_PURE_BEGIN ====
 // 产业研究员纯逻辑（唯一实现体；测试经 scripts/research_render_logic.ts 门面抽取执行）
@@ -2241,6 +2389,12 @@ function renderStockSection(){
   list.insertAdjacentHTML('beforeend', sectorStockStripHtml());
   // Top10 区块紧随其后；无批次时 renderScoreTop10 内部降级为占位文案
   list.insertAdjacentHTML('beforeend', renderScoreTop10());
+  // 价值 Top10 紧随评分 Top10；未生成时的降级文案在调用点判定（VALUE_PURE 纯逻辑不读全局）
+  list.insertAdjacentHTML('beforeend', valueState ? renderValueTop10(valueState)
+    : (valueTried ? '<div class="signal-strip"><span class="signal-pill pill-normal">价值批次尚未生成（夜间批处理上线后自动出现）</span></div>' : ''));
+  // Task 7 在 renderStockSection 里插的价值 Top10 语句之后，同一口径的降级（纯函数不读全局）：
+  list.insertAdjacentHTML('beforeend', valueState ? renderDivergeBoard(valueState)
+    : (valueTried ? '<div class="signal-strip"><span class="signal-pill pill-normal">分歧榜待价值批次生成后出现</span></div>' : ''));
   const sectorOvJump = document.getElementById('sectorOvJumpBtn');
   if(sectorOvJump) sectorOvJump.addEventListener('click', ()=>{ const b = document.querySelector('.tab-btn[data-tab="funds"]'); if(b) b.click(); });
   if(stocks.length===0){
@@ -2269,6 +2423,7 @@ function renderStockSection(){
       <div class="signal-strip">
         <span class="signal-pill ${pillCls}">买入参考·${tier}</span>
         ${scorePillHtml(s)}
+        ${valuePillHtml(valueState ? valueState.rows.get(String(s.code||'').trim()) : null)}
         ${researchPillHtml(fundamentals.get(String(s.code)) || null)}
       </div>
       <div class="signal-price">现价 ${s.currentPrice||'--'}${s.ma60?' · MA60 '+Number(s.ma60).toFixed(2):''}${s.ma120?' · MA120 '+Number(s.ma120).toFixed(2):''}</div>
@@ -2299,8 +2454,18 @@ function toggleStockBody(id){
 }
 
 function stockFormHtml(s){
+  // 换仓参考（spec §7.3）：持仓集合在前端、后端无推，所以这里现算；vRowForSwap 为空就是无建议
+  const valueRows = valueState ? [...valueState.rows.values()] : [];
+  const vRowForSwap = valueState ? valueState.rows.get(String(s.code||'').trim()) : null;
+  const heldCodes = stocks.map(x => String(x.code || '').trim()).filter(c => /^\d{5,6}$/.test(c));
+  const swap = swapSuggest(vRowForSwap, valueRows, heldCodes);
+  const swapLineHtml = swap
+    ? `<div class="trade-banner">🔄 换仓参考：${escapeHtml(swap.target.name || swap.target.code)} 的安全边际高 ${swap.gap.toFixed(1)}pp（≥${SWAP_GAP}pp）——需覆盖换手成本与税负，否则维持持有；仅展示，不构成指令</div>`
+    : '';
   return `
     ${scoreDetailHtml(s)}
+    ${valueGateHtml(valueState ? valueState.rows.get(String(s.code||'').trim()) : null)}
+    ${swapLineHtml}
     ${researchReportHtml(fundamentals.get(String(s.code)) || null)}
     <div class="field-grid">
       <div class="field"><label>名称</label><input type="text" data-sk="name" value="${escapeHtml(s.name||'')}"></div>

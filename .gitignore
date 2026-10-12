@@ -3,3 +3,9 @@
 
 # Qoder 本地缓存/配置
 .qoder/
+
+# 本地部署产物与一次性工具目录（不入库）
+site/
+.deploy-site/
+.vercel-tmp/
+.wrangler/

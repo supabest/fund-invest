@@ -37,7 +37,15 @@ function stockReturn(f: any, close: number): number | null {
   return (close - cost) / cost * 100;
 }
 
-function baseSignalLabel(dev: number | null): { label: string; multiplier: number } {
+// evalFundSignalServer 返回结构：level/resumeReady 均可选（baseSignalLabel 与仓位超限路径不带 level）
+interface SignalResult {
+  label: string;
+  level?: string;
+  multiplier: number;
+  resumeReady?: boolean;
+}
+
+function baseSignalLabel(dev: number | null): SignalResult {
   if (dev === null) return { label: '中性(缺数据)', multiplier: 1 };
   let score = 0;
   if (dev <= -15) score += 2;
@@ -52,7 +60,7 @@ function baseSignalLabel(dev: number | null): { label: string; multiplier: numbe
 }
 
 // 复刻页面 evalFundSignal：QDII溢价 → 手动暂停/恢复 → 主题上限(金额锚定) → 常规信号
-function evalFundSignalServer(f: any, nav: number, dev: number | null, streak: number | null, themeCaps: Record<string, number>, themeMv: number, goal: number) {
+function evalFundSignalServer(f: any, nav: number, dev: number | null, streak: number | null, themeCaps: Record<string, number>, themeMv: number, goal: number): SignalResult {
   if (f.isQDII && f.qdiiPremium !== '' && f.qdiiPremium !== undefined && !isNaN(parseFloat(f.qdiiPremium))) {
     const prem = parseFloat(f.qdiiPremium);
     if (prem >= 2) return { label: '暂停（QDII溢价）', level: 'pause', multiplier: 0 };
@@ -169,7 +177,31 @@ async function sendMail(subject: string, html: string): Promise<void> {
   }
 }
 
-Deno.serve(async (req: Request) => {
+// —— 可注入依赖位（比照 sector-trend NightlyDeps）：单测传失败桩验证发信异常不拖垮整链；线上走真 sendMail。
+export interface DailyUpdateDeps {
+  sendMail: (subject: string, html: string) => Promise<void>;
+}
+const REAL_DEPS: DailyUpdateDeps = { sendMail };
+
+// 可读失败日志：统一 `[daily-update][环节]` 前缀，便于 pg_cron/Edge 运行日志按环节归因。
+// 背景：本函数由 pg_cron 经 HTTP 触发、响应体通常被调用方丢弃，失败若只落在 body 里则事后无法定位；
+// 故取数/写库/发信三类失败除写入 summary/抛出外，一律额外打一条可归因日志行。
+function logFailure(
+  stage: "取数" | "写库" | "发信" | "致命",
+  detail: string,
+  err: unknown,
+): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error(`[daily-update][${stage}] ${detail}: ${msg}`);
+}
+
+// 编排主体 = 原 Deno.serve 内联回调逐字提出为具名导出函数（可调用 + 可注入）；逻辑一字未改。
+// 注册守卫仅针对单测场景（index_test.ts 先设 DAILY_UPDATE_DISABLE_SERVE 再动态 import）；
+// 线上 Edge 不会注入该变量，Deno.serve 注册行为不变（同 sector-trend/stock-score）。
+export async function handle(
+  req: Request,
+  deps: DailyUpdateDeps = REAL_DEPS,
+): Promise<Response> {
   const auth = req.headers.get('Authorization') || '';
   const token = Deno.env.get('DAILY_UPDATE_TOKEN') || '';
   if (!token || auth !== 'Bearer ' + token) {
@@ -190,7 +222,11 @@ Deno.serve(async (req: Request) => {
       headers: { ...H, Prefer: 'resolution=merge-duplicates,return=minimal' },
       body: JSON.stringify(rows)
     });
-    if (!r.ok) throw new Error(table + ' upsert failed ' + r.status + ': ' + (await r.text()).slice(0, 200));
+    if (!r.ok) {
+      const txt = (await r.text()).slice(0, 200);
+      logFailure('写库', table + ' upsert 失败 ' + r.status, new Error(txt));
+      throw new Error(table + ' upsert failed ' + r.status + ': ' + txt);
+    }
   };
 
   const fetchRetry = async (url: string, headers: any, tries = 3, timeoutMs = 9000): Promise<Response> => {
@@ -214,7 +250,7 @@ Deno.serve(async (req: Request) => {
       try {
         const r = await fetchRetry('https://' + host + '/api/qt/stock/kline/get?secid=' + secid + '&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f53&klt=101&fqt=' + fqt + '&lmt=' + lmt + '&end=20500101', { headers: { 'User-Agent': 'Mozilla/5.0' } }, 2);
         const j = await r.json();
-        const klines = (j && j.data && j.data.klines) || [];
+        const klines: string[] = (j && j.data && j.data.klines) || [];
         if (!klines.length) { lastErr = new Error('no klines'); continue; }
         const rows = klines.map((kl: string) => { const [dd, cc] = kl.split(','); return { date: dd, close: parseFloat(cc) }; });
         return { date: rows[rows.length - 1].date, close: rows[rows.length - 1].close, closes: rows.map(x => x.close), name: (j && j.data && j.data.name) || '' };
@@ -226,7 +262,10 @@ Deno.serve(async (req: Request) => {
   try {
     // 1. 读取所有用户的资产清单
     const stRes = await fetch(sbUrl + '/rest/v1/dingtou_state?select=user_id,data', { headers: H });
-    if (!stRes.ok) throw new Error('state read failed ' + stRes.status);
+    if (!stRes.ok) {
+      logFailure('取数', 'dingtou_state 读取失败 status=' + stRes.status, new Error('state read failed ' + stRes.status));
+      throw new Error('state read failed ' + stRes.status);
+    }
     const states = await stRes.json();
     summary.users = states.length;
 
@@ -275,6 +314,7 @@ Deno.serve(async (req: Request) => {
         await post('index_history', 'idx_code,idx_date', [{ idx_code: k, idx_date: kk.date, close }]);
         summary.indices.push({ idx: k, ok: true, date: kk.date, close, level: lv.label });
       } catch (e) {
+        logFailure('取数', '指数 ' + k + ' 行情获取失败', e);
         summary.indices.push({ idx: k, ok: false, error: String((e as any)?.message || e).slice(0, 140) });
       }
     }
@@ -326,7 +366,7 @@ Deno.serve(async (req: Request) => {
           const themeSum = funds.reduce((s: number, x: any) => {
             const isSelf = String(x.fundCode || '').trim() === code;
             const xm = (isSelf && f.shares > 0 && close > 0) ? fm : (parseFloat(x.marketValue) || 0);
-            return (x.theme === f.theme) ? s + (parseFloat(xm) || 0) : s;
+            return (x.theme === f.theme) ? s + (xm || 0) : s;
           }, 0);
           const sig = evalFundSignalServer(f, close, dev, streak, themeCaps, themeSum, goal);
           const ret = computeReturn(close, f);
@@ -360,6 +400,7 @@ Deno.serve(async (req: Request) => {
         }
         summary.funds.push({ code, ok: true, nav_date: navDate, nav: close, dev: dev === null ? null : Math.round(dev * 1000) / 1000, streak });
       } catch (e) {
+        logFailure('取数', '基金 ' + code + ' 净值获取/解析失败', e);
         summary.funds.push({ code, ok: false, error: String((e as any)?.message || e).slice(0, 140) });
       }
     }
@@ -415,6 +456,7 @@ Deno.serve(async (req: Request) => {
         summary.stocks.push({ code, ok: true, date: k.date, close });
       } catch (e) {
         const msg = String((e as any)?.message || e).slice(0, 140);
+        logFailure('取数', '股票 ' + code + ' 行情获取失败', e);
         summary.stocks.push({ code, ok: false, error: msg });
         const errUsers = [...new Set(stockJobs.filter(j => j.code === code).map(j => j.userId))];
         for (const uid of errUsers) {
@@ -575,9 +617,10 @@ Deno.serve(async (req: Request) => {
 
       if (items.length > 0 || isFirstRun || force) {
         try {
-          await sendMail('【定投信号台】' + title + ' - ' + dateStr, html);
+          await deps.sendMail('【定投信号台】' + title + ' - ' + dateStr, html);
           summary.notifications[summary.notifications.length - 1].sent = true;
         } catch (e) {
+          logFailure('发信', '用户 ' + userId + ' 报告邮件发送失败', e);
           summary.notifications[summary.notifications.length - 1].mailError = String((e as any)?.message || e).slice(0, 200);
         }
       }
@@ -587,6 +630,11 @@ Deno.serve(async (req: Request) => {
     summary.at = new Date().toISOString();
     return new Response(JSON.stringify(summary), { headers: { 'Content-Type': 'application/json' } });
   } catch (e) {
+    logFailure('致命', 'nightly 任务异常终止', e);
     return new Response(JSON.stringify({ ok: false, error: String((e as any)?.message || e).slice(0, 200) }), { status: 500 });
   }
-});
+}
+
+if (!Deno.env.get('DAILY_UPDATE_DISABLE_SERVE')) {
+  Deno.serve((req: Request) => handle(req));
+}
