@@ -3383,9 +3383,11 @@ curl -s -H "Authorization: Bearer $DAILY_UPDATE_TOKEN" "$URL/functions/v1/stock-
 
 Expected: `{"ok":true,"rows":5000+}`。若 rows 明显偏低（<4000）→ P-3 列族丢弃，先排查措辞，不得进入 Step 6。
 
-**认证取值的陷阱（Step 5 实跑发现，适用于所有要调生产函数的步骤，含 Step 6/8）**：`GET /v1/projects/{ref}/secrets` 返回的 `DAILY_UPDATE_TOKEN` **不是运行时生效的那一份**（实测两侧都是 64 位 alnum 但 md5 不同：库里 `de189cc7` vs 生产可用 `11dc16fe`）；拿它去 ping 任何函数（包括已跑通的 `stock-score`）一律 401 `unauthorized`，极易误判成“新函数没拿到密钥”。真正可用的值在 `cron.job.command` 里（`substring(command from 'Bearer ([A-Za-z0-9]+)')`）。**比较两份凭证用 md5，不要把值本身打到终端**；从 `cron.job` 取回后用完立即清零临时文件。另：本机对 `*.supabase.co` 的出网会间歇 `Connection reset`（urllib/curl 均遇过），**失败重试 3–4 次再下结论**。
+**认证取值的陷阱（Step 5 实跑发现，适用于所有要调生产函数的步骤，含 Step 6/8）**：`GET /v1/projects/{ref}/secrets` 返回的 `DAILY_UPDATE_TOKEN` **不是运行时生效的那一份**（实测两侧都是 64 位 alnum 但 md5 不同：库里 `de189cc7` vs 生产可用 `11dc16fe`）；拿它去 ping 任何函数（包括已跑通的 `stock-score`）一律 401 `unauthorized`，极易误判成“新函数没拿到密钥”。真正可用的值在 `cron.job.command` 里（`substring(command from 'Bearer ([A-Za-z0-9]+)')`）。**比较两份凭证用 md5，不要把值本身打到终端**；从 `cron.job` 取回后用完立即清零临时文件。
 
-- [ ] **Step 5b: 部署前的 index.ts 遥测收口（Task 6 评审 parked 的 M3/M5/M6；只动 `index.ts`，改完必须重跑 build.ts + verify-bundles）**
+**本机网络的结论更正（Step 6 实跑后推翻本条先前那句）**：先前记的“本机对 `*.supabase.co` 会间歇 `Connection reset`，重试 3–4 次再下结论”以及中间一版的“h2 ALPN 被 reset，加 `--http1.1` 立刻通”**都是误判**。实测：curl 停在 Client Hello（`Recv failure: Connection reset by peer`，exit 35），TLS1.2/1.3 × http1.1/h2 间隔重试 **8/8 全挂**；Deno `fetch` 同样 `os error 54`；而同一时刻 `api.supabase.com` 正常。所谓“`--http1.1` 立刻通”是 zsh 不对 `$var` 做词分割、`--tls-max 1.2` 被当成单个非法参数后剩下的时间运气。**结论：本机到 `*.supabase.co` 的出网被 SNI 级按域拦，与客户端 TLS 形态无关，重试不是修法**；调生产函数走 Management API + `net.http_post`（即每晚 cron 的同一条官方路径，见 Step 6）。
+
+- [x] **Step 5b: 部署前的 index.ts 遥测收口（2026-10-12 已完成，commit `a08518b`；Task 6 评审 parked 的 M3/M5/M6）**
 
 - **M3** `kept_old_batch` 在 upsert 中途失败时不准确：`upsert` 无事务，5224 行分 6 块，第 4 块失败时前 3 块已落库而响应仍称「旧批保留」，而前端（Task 7）读「最新批次」会拿到截断宇宙。修法：`let wrote = false;` 在首个 chunk 前置真，响应改 `kept_old_batch: !wrote`。
 - **M5** `in_pool` 与 `main_final` 有两个池真值源（`main.map` 取上一夜标为 in_pool 的主分行，`in_pool` 列取今晚的 `stock_pool`）：改池当晚新入池行 `main_final=null`，分歧榜归因静默缺席。修法：响应加 `main_missing` 计数（池内但 `main.map` 无该裸 6 位码的行数）。
@@ -3407,7 +3409,7 @@ export async function upsert(rows, onChunkSent?, post = fetch): Promise<void>;  
 
 变异检验（`preflight17/mutate5b.py`，隔离副本 `/tmp/p5b2`）：**NB1–NB5 全杀，NB6/NB7 存活**。存活的两条是 handler 调用点的池参数（不把 `poolSet` 递给 `runSummary` / `buildDbRows`）——要覆盖它必须真跑 handler，而本仓库 10 个 Edge Function 无一有 serve 级测试先例。**Ruling**：不在此引入 serve 级假 fetch 框架（4000 行×4 表的夹具量与新架构风险，都落在部署前这道时间门上）；改为把这两条变成 **Step 6/7 的机械化验收项**（见下），即在真实数据上一次性证明接线，比离线桩更强（它同时验到 RLS 与列名）。若 Step 6/7 任一断言不过 → 停下修，不得进 Step 8 注册 cron。
 
-- [ ] **Step 6: 首跑 `mode=run`（⚠ 需用户明示）**
+- [x] **Step 6: 首跑 `mode=run`（用户明示「跑 Step 6 + 两条断言」；2026-10-12 实跑成功：首批 5025 行 / `batch_date=2026-10-12`）**
 
 ```bash
 curl -s -X POST -H "Authorization: Bearer $DAILY_UPDATE_TOKEN" "$URL/functions/v1/stock-value?mode=run"
@@ -3432,6 +3434,20 @@ where v.batch_date = current_date and v.in_pool
 (a) 若 `pool_rank_set = 0` 而 `pool_scored > 0` ⇒ `buildDbRows` 的池参数在 handler 里接错了；(b) 若响应 `main_missing` 为 `undefined`/`0` 而直查 > 0 ⇒ `runSummary` 接错。两者都是**停下修**，不得因“数字看着合理”放行。
 **`vetoed` 的银行名单人工抽检**：抽 3-5 家在 `stock_pool` 里的银行，看 `veto_reasons` 含「无护城河证据」者其 `roe`（对照 `extras.stamps.roe_period` 那一期）是否真 <8%——Task 6B 前后的差异就应体现在这里。
 若 `cn10y_source=none` 且 `qualified` 异常偏少 → `rf_fallback` 退化路径在起作用，先写入 `value_config.cn10y_override` 再重跑，不要直接判“引擎坏了”。
+
+**Step 6 实跑账（2026-10-12）**：
+
+1. **首次尝试 500 炸批**：`{"ok":false,"error":"Error: GS period: no dated column found","kept_old_batch":true}`，`stock_value` 仍 0 行（拒在写之前，旧批不存在——该字段当时为真）。探针（`probe_step6_period.ts`，只 GET）实到根因：线上 q1/q3 的 ROIC 列标签是 **`投入资本回报率roic[20260630]`**，而 fixtures 是裸名 `投入资本回报率[...]`；`assertCols`（走 `colByPrefix`，宽容：别名以非中文开头即收）放行，`assertPeriod`/`roic3Keys`（走 `windowCols`，硬要求名称与戳紧邻）**一根不认** → “守卫放行、主逻辑失明”家族又一种形态。TDD 先红（复现同一句错文）后重写 `windowCols`（拒中文后缀兄弟列 + 必须有 8 位数字戳，严格性不因为允许英文别名而放宽）；61/118/4 绿；变异 MC1（退回紧邻匹配）/MC2（去中文后缀拒绝）/MC3（去数字戳要求）**全杀**（`preflight17/mutate_step6.py`）；commit `f1baedb` → 重部署 **v2 ACTIVE**。这是本笔首次扩展了用户授权（从“跑 Step 6”扩到“修 + 重部署”），已当场声明。
+2. **触发路径改为服务端 pg_net**（本机 TLS 被拦，见上方更正）：`net.http_post(url := …, headers := …, body := '{}'::jsonb, timeout_milliseconds := 900000)`。两个陷阱：① 参数名是 **`timeout_milliseconds`**（写 `timeout` 直接 42883 function does not exist）；用 `pg_get_function_arguments` 实读得权威签名 **`net.http_post(url text, body jsonb, params jsonb, headers jsonb, timeout_milliseconds integer DEFAULT 5000)`**；② `net._http_response` 的正文列叫 **`content`**（不是 `body`），且它是 **text** 不是 jsonb（要 `content::jsonb` 才能取长）。默认 5000ms 解释了既有 nightly 为何在 `net._http_response` 里全是 `timed_out=true` 而函数本体仍在服务端跑完——**Step 8 注册 cron 时是否显式加大该值，属待裁定项**。
+3. **响应实况**（id=142，HTTP 200）：rows 5025、qualified 88、too_rich 800、vetoed 2600、unqualified 1537、a_level 531、`cn10y=1.67 source=auto`、`div_leg_ok=true`、`fin_roe_rows=5190`、`main_batch=2026-10-12`、`main_missing=0`、`main_stale=false`；`stamps`：fin/roic `20260630`、val `20261012`、div/roe **`20251231`**（均为 1231 且年份 = annualBase ✓）。5224→5025 的差额由 `computeValue` 的唯一硬过滤 `!s.isST` 解释（V1.0 决策 2）。
+4. **断言 (a) 决定性通过**：`pool_scored=26 == pool_rank_set=26`（非零相等 ⇒ NB7 接线为真）。**断言 (b) 不具判别力**：响应 `main_missing=0` 与直查 0 相等，但**双方都是 0**（stock-score 当晚 13:30 UTC 已跑，主分批次就是今天）⇒ 它只证明了两边的读数一致，没证明过计数逻辑在非零时也对；此点如实记账，不得当成“已验”。
+5. **本步骤新发现的真缺陷（不属 plan 任何判据，是做池对账时抓出来的）**：见下 Step 6c。
+
+- [ ] **Step 6c（本步现场新增）：PostgREST `db-max-rows`=1000 导致的静默截断——已取证、已本地修好并验完，待用户裁定提交/重部署/重跑**
+
+现场：`stock_value.in_pool` 标了 **1000** 只，直查真池内 1116 只；`marked_but_absent=0`、`present_but_unmarked=116`。取证（服务端 pg_net 实发 GET，只读，`preflight18/probe_pool_pages.py`）：`?select=code` 单页返 **HTTP 206 + `Content-Range: 0-999/1165`**；第二页 `1000-1164/1165` 返 165 行且边界不重不漏（rn=1000 是 688605，rn=1001 是 688606）；offset 越过总数不是空数组而是 **416 PGRST103**。同型写法在 `stock-score/index.ts:100`、`business-mix/index.ts:78`，主分腿 2026-10-12 批次同样 1000/1116/116 ⇒ **该缺陷已在生产存在数周**（自 `in_pool` 上线起）。
+修法（已落本地，未提交）：`index.ts` 新增 `readAllRows`（分页 + `Prefer: count=exact` 闭合校验：总数不可得/页起点错位/声明区间长度≠实收行数/非 2xx/无确定性 `order=` 一律抛错炸批），`readPoolSet`（额外校“去重后 == 收回”）、`readMainSnapshot` 改走同一分页（旧写法同样只拿 1000 只主分归因）。测试 61 → **68**（+7）；变异 **MP1–MP8 全杀**（`preflight18/mutate_pool.py`，MP6 靠钉“请求里真的带了 `Prefer: count=exact`”才能杀，桩子自身模拟不出无总数形态）；deploy.ts 重生成 **55367B**，verify-bundles 5 ✅；lint 基线未抬高（index.ts 0 problems，index_test.ts 8 = HEAD 基线）。
+待用户裁定的三件事：① 提交 + 重部署（v3）+ 重跑本批覆写 2026-10-12（生产写）；② 主分腿 `stock-score` 与 `business-mix` 的同型截断是否本轮一并修（它们各自需一次重跑）；③ 修完重跑后的新判据：`count(*) filter (where in_pool)` 必等于池内且在宇宙的那只数（旧判据 `=1000` 本身是被截断污染的）。
 
 - [ ] **Step 6b: 投入资本近似校准（⚠ 需用户明示才能跑；spec §4.1/§9.1 “落地首周必须校准”，不校准则不得进入 Step 8 注册 cron）**
 
@@ -3504,20 +3520,43 @@ if (given.size >= 3) {
 
 - [ ] **Step 7: 只读健康度复核（不写；输出须脱敏）**
 
+> **2026-10-12 用户裁定③（「Step 7 三条判据全按推荐改」）**：下面这段 SQL 与判据已按 spec §6 / §10 / §11 第 12 条重写。三条红里有两条是**口径写错**而不是引擎错，还有一条是代理计数不具判别力；本节的「实跑账」保留原文当历史证据，不回写修正。重写后的判据必须在**分页修复重跑本批之后**重做（旧批次的 `in_pool` / `main_final` 计数受 1000 行静默截断污染）。
+
 ```sql
 select tier, confidence, count(*) from stock_value where batch_date = current_date group by 1,2 order by 3 desc;
-select count(*) filter (where vq is not null) as with_vq, count(*) filter (where confidence='A') as a_level,
-       percentile_cont(0.5) within group (order by vq) as vq_median,
+-- 分布判据（只报告，不设 50 目标）+ A 级占比 + 池内主分腿缺失
+select count(*) as batch_rows, count(*) filter (where vq is not null) as with_vq,
+       count(*) filter (where confidence='A') as a_level,
+       percentile_cont(0.5) within group (order by vq) as vq_median_scored,
        count(*) filter (where main_final is null and in_pool) as pool_missing_main
   from stock_value where batch_date = current_date;
--- 黄金样本的真实数据版（spec §10“招商银行——金融股 NA 路径”）：单测只能用合成 fixture 走同一代码路径，
--- 而这里验证真池子里的银行股确实没被“无护城河证据”误杀（P-1：roic 对金融股天然 NA）
-select count(*) filter (where roic_cur is null and vetoed and veto_reasons::text like '%无护城河%') as fin_miskilled,
-       count(*) filter (where roic_cur is null) as roic_na_rows
-  from stock_value where batch_date = current_date and ths_l1 in ('银行','非银金融','证券','保险');
+-- 机制判据（近 50 的期望只属于这一条）：四维腿百分位在全宇宙非空行上的中位数
+select percentile_cont(0.5) within group (order by v_moat)   as moat_med,
+       percentile_cont(0.5) within group (order by v_cash)   as cash_med,
+       percentile_cont(0.5) within group (order by v_safety) as safety_med,
+       percentile_cont(0.5) within group (order by v_health) as health_med
+  from stock_value where batch_date = current_date;
+-- 黄金样本（招行——金融股 NA 路径）：不再用代理计数，导出待对账名单逐只查 ROE
+select code, name, roic_cur, vq, veto_reasons from stock_value
+  where batch_date = current_date and ths_l1 in ('银行','非银金融','证券','保险')
+    and roic_cur is null and vetoed and veto_reasons::text like '%无护城河%' order by code;
 ```
 
-判据（spec §10）：`vq_median` 应近 50、A 级占比 ≥40%、`pool_missing_main` 应为 0、`fin_miskilled` **必须为 0**（不为 0 则金融股否决4 的 ROE 对标路径未生效，属引擎缺陷）。不达则**停线上**（不注册 cron），先把原因写进报告给用户。
+判据（spec §10 + §11 第 12 条）：
+
+1. `pool_missing_main` **必须为 0**（分母是分页修复后重跑的真 `in_pool` 行数）。
+2. **机制判据**：四个 `*_med` 各落在 50 ±5。超出即百分位机制本身坏了（首跑实测 48.6 / 49.9 / 48.1 / 50.0 ✅）；这条与门禁无关，也只有这条能证明「百分位没被行业漂移污染」。
+3. **分布判据**：`vq_median_scored`（在 `vq is not null` 行内算）**只如实报告、不设 50 目标**——VQ 只对 `qualified` 且 `vcov ≥ 0.6` 的行产出，被门禁挡掉的那批根本不参与，合格者中位必然高于全宇宙（首跑 77.8）；要设红线也只能是反方向的：它**低于 50 才该停线上**（那才说明门禁在挡错人）。
+4. **A 级占比 ≥40%**（分母仍是本批全行数，不改口径 —— 用户选的是「降 flag 而不是改分母」那条）：必须在总体级 flag 拆分（裁定①）落地后重测；拆分前它数学上不可达（真正卡住它的是 `gw_empty_as_zero` 2522 + `pe_na_nonpositive` 1204 这两类总体级形态，不是个股风险）。仍不达则停线上。
+5. **金融股误杀：逐只对账取代代理计数**。对上面导出的名单逐只比对 **对应报告期摊薄 ROE**（执行方式：`probe_step7_banks.ts`，行情数据源为 Management API 预导出的本地 `banks_20261012.json`，因本机到 `*.supabase.co` 的 TLS 被拦无法直连）。判据：**每一只因「无护城河证据」被否决的金融股，其 ROE 必须 < 8**（`ROIC_GATE`）；出现任一 ROE ≥ 8 的只 → 否决4 的 ROE 对标路径未生效，属引擎缺陷，停线上。首跑对账结果：42/42 只精确等价（中国银行 7.9314 杀 / 中信银行 8.5204 不杀 / 招行 11.7986 未被误杀）。
+
+**Step 7 实跑账（2026-10-12，针对已落库的 5025 行首批）**：按上述判据——`pool_missing_main=0` ✅；`fin_miskilled=53` ❌；`vq_median=77.8` vs 应近 50 ❌；A 级 531/5025=10.6% vs ≥40% ❌。逐条查因后，**三条红的都是判据本身，不是引擎**，需用户裁定才能改 spec（判据权威在 spec §10/§6，改动权归用户）：
+
+- **`fin_miskilled` 这条代理 SQL 无法分辨对错**。它用 `roic_cur is null and vetoed and veto_reasons like '%无护城河%'` 当“误杀”的代理，而金融股本来 `roic` 全 NA，“无护城河证据”否决4 对它们改走 ROE 对标（`value_engine.ts:49-51`）——判据把“路径被走到”当成了“路径算错了”。逐只对账探针（`probe_step7_banks.ts`，读 Management API 预导出的 `banks_20261012.json`，因本机 TLS 被拦无法直连）：**42/42 只银行的“无护城河证据”精确等价于 2025 年报摊薄 ROE < 8**，分界干净（中国银行 7.9314 → 杀 / 中信银行 8.5204 → 不杀；招行 11.7986 未被误杀）。⇒ 引擎行为正确；但 42 只银行全部 `qualified=0` 是设计结果（Task 5 裁定 2 + 否决4），要不要为金融股单开一套门槛，属 spec 级问题。
+- **`vq_median` 77.8 是选择效应，不是分布失真**。VQ 按设计只对 `qualified` 行（且 vcov≥0.6）产出，88 只 qualified 的中位数当然不是全宇宙的 50；而全宇宙四维腿均值实测 48.6/49.9/48.1/50.0（百分位机制健康）。spec §10 那句“VQ 分布中位数应近 50”默认了 VQ 覆盖全宇宙，与 §4–§5 的门禁设计矛盾。
+- **A 级 ≥40% 在当前 flag 集下数学不可达**。flags 覆盖 89% 行（`gw_empty_as_zero` 2522、`roic_3y_incomplete` 1771、`pe_na_nonpositive` 1204），而 §6 定“带任一 flag → 不得为 A”；这三类都是**总体级**数据形态（GS 对无商誉回空、三年 ROIC 缺失、PE 为非正数），不是个股风险。引擎里已有先例：Task 4 曾因同一理由把 `ic_approx` 踢出 flags（见 `value_engine.ts:195-199` 注释）。clean_rows 553 里 531 是 A ⇒ 门禁本身在正常工作。可选裁定：（甲）把这三类总体级 flag 降为“不影响置信度”的注记（与 ic_approx 同处理）；（乙）保留 flag 但 A 级阈值改按“clean 行内的 A 占比”算；（丙）判据原样不动 ⇒ 价值腿永远进不了 cron。
+
+⇒ **行动：按判据要意——不注册 cron（Step 8 挂起），先把原因写进本报告给用户**。Step 6c 的分页修复完成后需重跑本批，Step 7 这几项 SQL 必须重做（尤其 `pool_missing_main` 与 `in_pool` 计数受截断污染）。
 
 - [ ] **Step 8: 注册 cron（⚠ 需用户明示；排在 stock-score 后 15 分钟）**
 
