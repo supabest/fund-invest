@@ -3425,13 +3425,18 @@ select count(*) filter (where in_pool and vq is not null) as pool_scored,
        count(*) filter (where pool_rank is not null)       as pool_rank_set
 from public.stock_value where batch_date = current_date;
 -- (b) main_missing 接线：响应里的 main_missing 必须等于下面这个直查值
+-- 判据 SQL 自身的一次纠错（2026-10-12，v3 重跑后）：原先漏了 `s.in_pool` 谓词，于是直查量的是「主分批次里
+-- 有没有这只码」，而函数 `countMainMissing` 读的是最新批次 **in_pool=eq.true** 的行建 map（index.ts:174）——
+-- 两者不同事，才会出现响应 116 而直查 0 的假矛盾。补齐谓词后实测：直查 **116** == 响应 **116** ✅（旧形态仍返 0），
+--   断言 (b) 自此才真正**具判别力**（非零相等），首跑那夜的「0 == 0」不算验过。
 select count(*) from public.stock_value v
 where v.batch_date = current_date and v.in_pool
   and not exists (select 1 from public.stock_score s
-                  where s.batch_date = (select max(batch_date) from public.stock_score) and s.code = v.code);
+                  where s.batch_date = (select max(batch_date) from public.stock_score)
+                    and s.in_pool and s.code = v.code);
 ```
 
-(a) 若 `pool_rank_set = 0` 而 `pool_scored > 0` ⇒ `buildDbRows` 的池参数在 handler 里接错了；(b) 若响应 `main_missing` 为 `undefined`/`0` 而直查 > 0 ⇒ `runSummary` 接错。两者都是**停下修**，不得因“数字看着合理”放行。
+(a) 若 `pool_rank_set = 0` 而 `pool_scored > 0` ⇒ `buildDbRows` 的池参数在 handler 里接错了；(b) 若响应 `main_missing` 为 `undefined`/`0` 而直查 > 0 ⇒ `runSummary` 接错。两者都是**停下修**，不得因“数字看着合理”放行。反方向的不等（响应 > 0、直查 = 0）**先怀疑判据 SQL 的口径**而不是函数错了——2026-10-12 实测正是这一形态，根因就是上面那条缺的 `s.in_pool`。
 **`vetoed` 的银行名单人工抽检**：抽 3-5 家在 `stock_pool` 里的银行，看 `veto_reasons` 含「无护城河证据」者其 `roe`（对照 `extras.stamps.roe_period` 那一期）是否真 <8%——Task 6B 前后的差异就应体现在这里。
 若 `cn10y_source=none` 且 `qualified` 异常偏少 → `rf_fallback` 退化路径在起作用，先写入 `value_config.cn10y_override` 再重跑，不要直接判“引擎坏了”。
 
@@ -3544,11 +3549,12 @@ select code, name, roic_cur, vq, veto_reasons from stock_value
 
 判据（spec §10 + §11 第 12 条）：
 
-1. `pool_missing_main` **必须为 0**（分母是分页修复后重跑的真 `in_pool` 行数）。
+1. `pool_missing_main` **必须为 0**（分母是分页修复后重跑的真 `in_pool` 行数）。v3 重跑后实测 **116**，且与响应 `main_missing=116` 逐字相等 ⇒ 价值腿侧接线为真；这 116 的**成因在主分腿**（`stock_score` 自己那条同型裸读，标记数恰好 1000），凭裁定② 部署 `stock-score` v8 后的下一夜批次应归 0。本条红线保留，但归因顺序固定：先看主分腿当批 `in_pool` 计数是否恰好 1000。
 2. **机制判据**：四个 `*_med` 各落在 50 ±5。超出即百分位机制本身坏了（首跑实测 48.6 / 49.9 / 48.1 / 50.0 ✅）；这条与门禁无关，也只有这条能证明「百分位没被行业漂移污染」。
 3. **分布判据**：`vq_median_scored`（在 `vq is not null` 行内算）**只如实报告、不设 50 目标**——VQ 只对 `qualified` 且 `vcov ≥ 0.6` 的行产出，被门禁挡掉的那批根本不参与，合格者中位必然高于全宇宙（首跑 77.8）；要设红线也只能是反方向的：它**低于 50 才该停线上**（那才说明门禁在挡错人）。
-4. **A 级占比 ≥40%**（分母仍是本批全行数，不改口径 —— 用户选的是「降 flag 而不是改分母」那条）：必须在总体级 flag 拆分（裁定①）落地后重测；拆分前它数学上不可达（真正卡住它的是 `gw_empty_as_zero` 2522 + `pe_na_nonpositive` 1204 这两类总体级形态，不是个股风险）。仍不达则停线上。
+4. **A 级占比 ≥40%，分母 = 非否决行**（用户裁定，2026-10-12「分母改为非否决行」；此前的「全批分母」经实数据证明与 §6 自相矛盾）。全批口径下这条红线**永远够不着**：5025 行里 2600 只（51.7%）是否决行，而 §6 明写否决行不得为 A —— 用一个规则把一半样本挡在门外，再用总数去考另一个规则。重跑（裁定① flag 拆分已生效）实测：全批 **1246/5025 = 24.8%**，非否决口径 **1246/2425 = 51.4%** ✅。仍不达（非否决口径 <40%）则停线上。
 5. **金融股误杀：逐只对账取代代理计数**。对上面导出的名单逐只比对 **对应报告期摊薄 ROE**（执行方式：`probe_step7_banks.ts`，行情数据源为 Management API 预导出的本地 `banks_20261012.json`，因本机到 `*.supabase.co` 的 TLS 被拦无法直连）。判据：**每一只因「无护城河证据」被否决的金融股，其 ROE 必须 < 8**（`ROIC_GATE`）；出现任一 ROE ≥ 8 的只 → 否决4 的 ROE 对标路径未生效，属引擎缺陷，停线上。首跑对账结果：42/42 只精确等价（中国银行 7.9314 杀 / 中信银行 8.5204 不杀 / 招行 11.7986 未被误杀）。
+   **v3 重跑后的新批复核（2026-10-12，`preflight18/dump_fin.py` 导出 + `probe_step7_fin.ts` 对账）**：名单扩到 **71 只**（银行 17 + 非银金融 54），**67/71 满足「被杀者 ROE<8」**；余 4 只（`000987 越秀资本`/`300059 东方财富`/`600517 国网英大`/`603300 海南华铁`，皆 ths_l1=非银金融）ROE 10.59–13.15 却带「无护城河证据」——查实**不是 ROE 规则的误杀**：它们 `roic_cur`/`roic_med` 双双 <8，走的是产业股 ROIC 路径（71 只里 53 只 `roic_cur` 为 null 走 ROE、18 只非 null 且 **18/18 全部 <8** 走 ROIC，零误杀零漏判）。根因是**集合差**：`isFin` 由 GS 市场成员列判定（`gs_value.ts:199` `!mkt.includes('全部A股(非金融)')`），与 `ths_l1 ∈ 四类` 不是同一集合。**裁定（用户，2026-10-12）：维持 GS 成员列口径**（上线前夜不改判定集合）；因此本条判据的统计总体必须按 `isFin` 划，凡「ROE≥8 却被杀」的 ths_l1 非银行，逐只确认其 ROIC 证据后方可放行。
 
 **Step 7 实跑账（2026-10-12，针对已落库的 5025 行首批）**：按上述判据——`pool_missing_main=0` ✅；`fin_miskilled=53` ❌；`vq_median=77.8` vs 应近 50 ❌；A 级 531/5025=10.6% vs ≥40% ❌。逐条查因后，**三条红的都是判据本身，不是引擎**，需用户裁定才能改 spec（判据权威在 spec §10/§6，改动权归用户）：
 
