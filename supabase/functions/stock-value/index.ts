@@ -85,13 +85,24 @@ function svcHeaders(): Record<string, string> {
   return { apikey: k, Authorization: `Bearer ${k}`, 'Content-Type': 'application/json' };
 }
 
-async function upsert(rows: DbRow[]) {
+// onChunkSent 用回调而不是让 upsert 返回布尔：分块循环里「本块已发出」是过程事实，
+// 由调用方持有 wrote 状态、被调方只负责报告，避免函数返回值在多个 return 点被误解。
+// post 可注入（默认 fetch）：「失败时已发出几块」是 wrote 的唯一来源，旧版把它整段留在 handler 里、
+// 变异检验直接存活；故只开这一个接缝，不重构整个 handler。导出仅为可测。
+export async function upsert(
+  rows: DbRow[],
+  onChunkSent?: () => void,
+  post: (url: string, init: RequestInit) => Promise<{ ok: boolean; status: number; text: () => Promise<string> }> = fetch,
+): Promise<void> {
   const url = Deno.env.get('SUPABASE_URL')!;
   for (let i = 0; i < rows.length; i += 1000) {
-    const r = await fetch(`${url}/rest/v1/stock_value?on_conflict=batch_date,code`, {
+    const r = await post(`${url}/rest/v1/stock_value?on_conflict=batch_date,code`, {
       method: 'POST', headers: { ...svcHeaders(), 'Prefer': 'resolution=merge-duplicates' },
       body: JSON.stringify(rows.slice(i, i + 1000)),
     });
+    // 先报告「本块已发出」再检查状态：PostgREST 可能已收下本块但返回非 2xx（限流/超时截断），
+    // 此时旧批**已经**被覆盖，catch 里不能再称「保留」。
+    onChunkSent?.();
     if (!r.ok) throw new Error(`upsert stock_value ${r.status} ${await r.text()}`);
   }
 }
@@ -112,6 +123,51 @@ async function readMainSnapshot(url: string): Promise<{ batch: string | null; ma
   return { batch: bb.batch_date, map };
 }
 
+// 遥测（Task 6 评审 parked M5）：今晚池内但主分快照缺位的行数。两个真值源（主分快照取**上一夜**的
+// in_pool 行、poolSet 取**今晚**的 stock_pool）在改池当晚必然不等：新入池行 main_final=null →
+// 分歧榜归因静默缺席。不报数就永远是静默缺陷。池成员一律从 poolSet 问，不在 ValueRow 上找 in_pool
+//（引擎不接池信息，见 poolRanks 同款理由）；抽成导出纯函数同 buildDbRows 的教训（终审 I-3）——不抽就没人测得动。
+export function countMainMissing(computed: ValueRow[], poolSet: Set<string>, mainMap: Map<string, MainSnap>): number {
+  return computed.filter(r => poolSet.has(r.code.split('.')[0]) && !mainMap.has(r.code.split('.')[0])).length;
+}
+
+// 遥测（M6）：主分快照龄期。stock-score 连失败夜会把自己的陈快照当今晚的落库；
+// 尽力而为纪律是**不炸批**，但必须把陈度如实报出。mainBatch=null（无主分批次）不属于「陈」，交给主分自己报错。
+export function isMainStale(batch: string, mainBatch: string | null, maxAgeDays = 3): boolean {
+  if (mainBatch === null) return false;
+  return (Date.parse(`${batch}T00:00:00Z`) - Date.parse(`${mainBatch}T00:00:00Z`)) / 86_400_000 > maxAgeDays;
+}
+
+// 首跑成功载荷。抽成导出纯函数的理由与 buildDbRows 完全同款（终审 I-3 陷阱）：遥测字段的**接线**（把 poolSet
+// 与 main 递到正确的谓词上）若留在 handler 里，就没有任何测试能发现 `main_missing` 永远不被计算、或
+// `main_stale` 拿错了批次。这里把两个遥测和口径计数一并算完，handler 只递参数、不拼对象。
+type MainSnapshot = { batch: string | null; map: Map<string, MainSnap> };
+export function runSummary(
+  computed: ValueRow[], batch: string, poolSet: Set<string>, main: MainSnapshot,
+  resolved: { cn10y: number | null; source: string }, divLegOk: boolean, finRoeRows: number,
+  stamps: Record<string, string>,
+): Record<string, unknown> {
+  const by = (t: string) => computed.filter(r => r.tier === t).length;
+  return {
+    ok: true, batch_date: batch, rows: computed.length, qualified: by('qualified'),
+    too_rich: by('too_rich'), vetoed: by('vetoed'), unqualified: by('unqualified'),
+    a_level: computed.filter(r => r.confidence === 'A').length,
+    cn10y: resolved.cn10y, cn10y_source: resolved.source, div_leg_ok: divLegOk,
+    fin_roe_rows: finRoeRows,   // 遥测（Task 6 评审 M4）：带后缀键的金融股 ROE 行数——它是唯一无单测护栏的否决4 入口，靠这个数才能「首夜看穿」
+    main_batch: main.batch,
+    main_missing: countMainMissing(computed, poolSet, main.map),   // 遥测（M5）：改池当晚新入池、归因静默缺席的只数
+    main_stale: isMainStale(batch, main.batch),                    // 遥测（M6）：主分快照龄期超阈，不炸批但如实报出
+    stamps,
+  };
+}
+
+// 失败载荷（M3）：kept_old_batch 必须由实际写入过程回答，不得硬编 true。upsert 无事务，5224 行分 6 块，
+// 第 4 块失败时前 3 块已落库而旧批已被覆盖；前端读「最新批次」会拿到截断宇宙，谎称「旧批保留」比报错更难发现。
+// 抽成导出纯函数同上两个谓词的理由：「写过了仍称保留」这个错误方向必须变成可测缺陷。
+export function errorBody(msg: string, wrote: boolean): Record<string, unknown> {
+  return { ok: false, error: msg, kept_old_batch: !wrote };
+}
+
 if (!Deno.env.get('STOCK_VALUE_DISABLE_SERVE')) {
 Deno.serve(async (req: Request) => {
   const token = Deno.env.get('DAILY_UPDATE_TOKEN') || '';
@@ -120,6 +176,9 @@ Deno.serve(async (req: Request) => {
   if (!key) return Response.json({ ok: false, error: 'GS_API_KEY missing' }, { status: 500 });
   const mode = new URL(req.url).searchParams.get('mode') || 'run';
   const url = Deno.env.get('SUPABASE_URL')!;
+  // M3（Task 6 评审）：「旧批是否还在」必须由实际写入过程回答，不是由 catch 分支猜。**必须声明在 try 外面**——
+  // try 内的 let 对 catch 不可见；放外层则「进不了 try 就是没写」依旧成立。
+  let wrote = false;
   try {
     if (mode === 'ping') {
       const t = await gsValueFetch(V_Q4, key, 30_000);
@@ -155,19 +214,13 @@ Deno.serve(async (req: Request) => {
     for (const s of rows) if (s.roe !== null) finRoe.set(s.code, s.roe);
     const computed = computeValue(rows as ValueRaw[], resolved.cn10y, finRoe);
     const batch = now.toISOString().slice(0, 10);
-    await upsert(buildDbRows(computed, batch, poolSet, main.map, stamps, resolved.source));
+    await upsert(buildDbRows(computed, batch, poolSet, main.map, stamps, resolved.source), () => { wrote = true; });
 
-    const by = (t: string) => computed.filter(r => r.tier === t).length;
-    return Response.json({ ok: true, batch_date: batch, rows: computed.length, qualified: by('qualified'),
-      too_rich: by('too_rich'), vetoed: by('vetoed'), unqualified: by('unqualified'),
-      a_level: computed.filter(r => r.confidence === 'A').length,
-      cn10y: resolved.cn10y, cn10y_source: resolved.source, div_leg_ok: t5 !== null,
-      fin_roe_rows: finRoe.size,   // 遥测（Task 6 评审 M4）：带后缀键的金融股 ROE 行数——它是唯一无单测护栏的否决4 入口，靠这个数才能「首夜看穿」
-      main_batch: main.batch, stamps });
+    return Response.json(runSummary(computed, batch, poolSet, main, resolved, t5 !== null, finRoe.size, stamps));
   } catch (e) {
     // 不分述原始错误（可能含 URL）；gsValueFetch 已折叠 TypeError，这里再洗一道
     const msg = String(e).replace(/\S*apiKey=\S*/g, 'apiKey=REDACTED').slice(0, 300);
-    return Response.json({ ok: false, error: msg, kept_old_batch: true }, { status: 500 });
+    return Response.json(errorBody(msg, wrote), { status: 500 });
   }
 });
 }
