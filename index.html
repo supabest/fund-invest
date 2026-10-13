@@ -164,6 +164,11 @@
   .score-row:nth-child(odd){background:var(--panel-2);}
   .score-card-note{font-size:11px; color:var(--muted); line-height:1.6; padding:10px 16px 14px;}
   .score-pill{background:var(--jade-dim); color:var(--jade); font-size:11.5px; padding:3px 10px; border-radius:20px; font-weight:600; white-space:nowrap;}
+  .trend-badge{font-size:10.5px; padding:2px 7px; border-radius:12px; font-weight:600; white-space:nowrap; border:1px solid transparent; cursor:help;}
+  .trend-steady{background:var(--jade-dim); color:var(--jade); border-color:var(--jade-dim);}
+  .trend-mixed{background:rgba(255,255,255,.06); color:var(--muted); border-color:rgba(255,255,255,.12);}
+  .trend-broken{background:rgba(200,80,70,.14); color:var(--brick); border-color:rgba(200,80,70,.3);}
+  .trend-na{background:transparent; color:var(--muted); border-style:dashed; border-color:rgba(255,255,255,.15);}
   .score-pill-warn{color:var(--gold);}
   .score-detail{background:var(--panel-2); border-radius:10px; padding:12px; margin-bottom:14px;}
   .score-detail .score-summary{font-size:11.5px; color:var(--muted); margin-top:8px; line-height:1.8;}
@@ -694,7 +699,7 @@ function initCloud(tries){
     if(sbUser && Date.now()-lastPullAt > 60000) syncOnOpen();
   });
   // 评分表 anon 可读、全局共享，客户端就绪即拉一次；失败仅降级不阻塞页面
-  Promise.all([loadStockScores(), loadStockValue()]).then(()=>render());
+  Promise.all([loadStockScores(), loadStockValue()]).then(()=>{ render(); loadTrendBadges(); });
   loadFundamentals().then(()=>renderStockSection());
   setSyncUI();
 }
@@ -838,7 +843,7 @@ function valueGateHtml(row){
     +'<div>门禁：'+escapeHtml(valueTierLabel(row.tier))+' · ROIC 中位 '+valueFmtPct(row.roic_med)+' · 安全边际 '+mos+'</div>'
     +veto+'<div style="color:var(--muted)">价值分回答“值不值”，不等于买卖指令；与评分分不可互相替代。</div></div>';
 }
-function renderValueTop10(state){
+function renderValueTop10(state, trendMap){
   if(!state) return '';
   const list = (state.top10||[]).filter(r => r.tier==='qualified' && r.confidence==='A' && r.vq!==null && r.vq!==undefined)
     .sort((a,b)=>b.vq-a.vq).slice(0,10);
@@ -848,6 +853,7 @@ function renderValueTop10(state){
       +'<span style="color:var(--muted);width:24px">#'+(i+1)+'</span><b>'+escapeHtml(r.name||'')+'</b>'
       +'<span style="color:var(--muted);font-size:11.5px">'+escapeHtml(String(r.code))+'</span>'
       +'<span class="score-pill">'+Number(r.vq).toFixed(1)+'分</span>'
+      +trendBadgeHtml(trendMap ? trendMap[String(r.code)] : null)
       +'<span style="color:var(--muted);font-size:11px">owner yield '+valueFmtPct(r.owner_yield)
       +' · 安全边际 '+valueFmtPp(r.margin_of_safety,2)+' · ROIC中位 '+valueFmtPct(r.roic_med)
       + (r.pool_n && r.pool_rank ? ' · 池内 P' + Math.max(1, Math.round(100 - r.pool_rank / r.pool_n * 100)) : '')
@@ -952,7 +958,127 @@ function legFilter(codes){
 function legTiebreakCol(){ return 'code'; }   // offset 分页的全序并列键：仅按分值排存在 tie，跨页会重行/漏行
 function legRange(i){ return [i * LEG_PAGE_SIZE, i * LEG_PAGE_SIZE + LEG_PAGE_SIZE - 1]; }
 function legHasMore(n){ return n === LEG_PAGE_SIZE; }   // 满页才可能还有下一页；短页/空页即停
+
+// ---- 长期趋势标签（2026-10-13 用户裁定：只做标签、不进分数）----
+// 判据：不用日线 MA250（群延迟半年、且穿越不度量“稳定”），改用 月线 MA24 + 24 个月 log 价回归（斜率定方向、R² 定稳定）。
+// 论据：A股个股长动量证据弱（短期反转主导），"稳定"这半边才有效力 → 故把 R² 当硬门禁，而非只看方向穿越。
+var TREND_MIN_BARS = 500;      // 日线门禁：不足 500 根（≈2 年）一律判 NA，绝不用短窗凑一个能渲染的数
+var TREND_MONTHLY_MA = 24;     // 主判据窗口：24 个月月线（2 年）。一年不算“长期”——这是把标签名副其实地钉在口径上
+var TREND_LOOKBACK = 760;      // 拉 760 根 ≈ 3.15 年（东财单次实测可返回 760/1000/2000 根）：MA24 + 500 根门禁 + 停牌余量
+var TREND_R2_STEADY = 0.6;     // "慢牛"的稳定度下限：R² 低于此一律归纠缠，防高噪声上行冒充长期上升
+var TREND_LABEL_CN = { steady: '长期↑慢牛', mixed: '长期纠缠', broken: '长期破位' };
+
+// 月末收盘序列：同月取该月最后一个交易日；上游可能乱序，这里自己按月份定序（不依赖调用点）
+function monthEndCloses(rows){
+  var byMonth = {}, keys = [];
+  (rows || []).forEach(function(r){
+    if(!r) return;
+    var d = String(r.date || ''), c = Number(r.close);
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(d) || !isFinite(c) || c <= 0) return;
+    var mk = d.slice(0, 7);
+    if(!Object.prototype.hasOwnProperty.call(byMonth, mk)){ byMonth[mk] = { last: d, close: c }; keys.push(mk); }
+    else if(d > byMonth[mk].last){ byMonth[mk].last = d; byMonth[mk].close = c; }
+  });
+  keys.sort();
+  return keys.map(function(k){ return byMonth[k].close; });
+}
+
+// 对 log 价做最小二乘：slope=每根斜率，r2=拟合优度（"稳定"的量化），annualized=exp(slope*250)-1
+// 常数价序列 syy=0 属 0/0 退化 → r2 判 null；把它当 0 或 1 都会伪造出"稳定/不稳定"的结论
+function olsLogTrend(closes, w, perYear){
+  var arr = closes || [], n = arr.length;
+  if(n < w) return null;
+  var win = arr.slice(-w), ys = [], i;
+  for(i = 0; i < win.length; i++){
+    var p = Number(win[i]);
+    if(!isFinite(p) || p <= 0) return null;
+    ys.push(Math.log(p));
+  }
+  var m = ys.length, my = 0;
+  for(i = 0; i < m; i++) my += ys[i];
+  my /= m;
+  var mx = (m - 1) / 2, sxy = 0, sxx = 0, syy = 0;
+  for(i = 0; i < m; i++){
+    var dx = i - mx, dy = ys[i] - my;
+    sxy += dx * dy; sxx += dx * dx; syy += dy * dy;
+  }
+  var slope = sxx === 0 ? 0 : sxy / sxx;
+  // syy 用相对阈值而非 ===0：全等价格的 log 残差在浮点上是 ~1e-15 而非 0，
+  // 写 ===0 会漏判并返回一个假的 r2=0（把「无法判定」伪装成「完全不稳定」）。
+  return { slope: slope, r2: syy <= 1e-12 ? null : (sxy * sxy) / (sxx * syy),
+    annualized: Math.exp(slope * (perYear || 250)) - 1, n: m };
+}
+
+// 三态判据：慢牛 = 价上 24 月线 且 月线斜率>0 且 R²≥0.6；破位 = 价破 24 月线 且 斜率非正；其余 = 纠缠
+// 回归喂的是**月线收盘**（24 个点）而非日线：噪声低一个量级，R² 才真的在度量“稳定”，而不是日线抖动
+function longTrendStats(rows){
+  var arr = (rows || []).filter(function(r){
+    return r && /^\d{4}-\d{2}-\d{2}$/.test(String(r.date || '')) && isFinite(Number(r.close)) && Number(r.close) > 0;
+  }).sort(function(a, b){ return String(a.date) < String(b.date) ? -1 : 1; });
+  if(arr.length < TREND_MIN_BARS) return null;
+  var monthly = monthEndCloses(arr);
+  if(monthly.length < TREND_MONTHLY_MA) return null;
+  var win = monthly.slice(-TREND_MONTHLY_MA);
+  var t = olsLogTrend(win, TREND_MONTHLY_MA, 12);
+  if(!t) return null;
+  return { close: Number(arr[arr.length - 1].close),
+    ma24m: win.reduce(function(a, b){ return a + b; }, 0) / TREND_MONTHLY_MA,
+    monthly: monthly.length, bars: arr.length, slope: t.slope, r2: t.r2, annualized: t.annualized };
+}
+
+function longTrendLabel(s){
+  if(!s) return null;
+  if(s.close > s.ma24m && s.slope > 0 && s.r2 !== null && s.r2 >= TREND_R2_STEADY) return 'steady';
+  if(s.close < s.ma24m && s.slope <= 0) return 'broken';
+  return 'mixed';
+}
+
+// 角标：三态各有类名；未判定/取数失败一律渲染 trend-na 显式占位（空串=界面无感，正是本轮要防的静默降级）
+function trendBadgeHtml(stats){
+  var known = { steady: 1, mixed: 1, broken: 1 };
+  var label = (stats && known[stats.label]) ? stats.label : null;
+  var num = function(v, d){ return (v === null || v === undefined || !isFinite(Number(v))) ? 'NA' : Number(v).toFixed(d); };
+  var title = label
+    ? '近 2 年年化 ' + (isFinite(Number(stats.annualized)) ? (Number(stats.annualized) * 100).toFixed(1) + '%' : 'NA')
+      + ' · 月线拟合R² ' + num(stats.r2, 2) + ' · 24月线 ' + num(stats.ma24m, 2) + ' · 样本 ' + num(stats.bars, 0) + ' 根'
+      + '（纯展示标签，不参与评分与排序）'
+    : '长期趋势未判定（日线需 ' + TREND_MIN_BARS + ' 根且月末满 ' + TREND_MONTHLY_MA + ' 个；次新股/长期停牌/取数失败均归此类）';
+  return '<span class="trend-badge ' + (label ? 'trend-' + label : 'trend-na') + '" title="'
+    + escapeHtml(title) + '">' + (label ? TREND_LABEL_CN[label] : '长期—') + '</span>';
+}
+
+// 东财 secid 前缀：与 autoFetchStockData 既有口径同源，不另立第二套（6→沪 1.、其余 6 位→深 0.、5 位→港 116.）
+function secidOf(code){
+  var v = String(code === null || code === undefined ? '' : code).trim();
+  if(/^\d{5}$/.test(v)) return '116.' + v;
+  if(/^\d{6}$/.test(v)) return (v.charAt(0) === '6' ? '1.' : '0.') + v;
+  return null;
+}
 // ==== VALUE_PURE_END ====
+
+// ---- 长期趋势角标取数编排（非纯逻辑：外网 JSONP + 全局缓存 + 重渲染）----
+// 只给「价值 Top10」补标签：榜单本身 ≤10 行，外网请求天然封顶；不进 cron、不落库、不写任何表。
+var trendCache = {};        // code -> {label,annualized,r2,close,ma24m,bars} | {failed:1}；进程内缓存，刷新页面重取
+function loadTrendBadges(){
+  var list = (valueState && valueState.top10 ? valueState.top10 : [])
+    .filter(function(r){ return r && r.tier === 'qualified' && r.confidence === 'A' && r.vq !== null && r.vq !== undefined; })
+    .sort(function(a, b){ return b.vq - a.vq; }).slice(0, 10);
+  var todo = list.filter(function(r){ return !trendCache[String(r.code)]; });
+  if(!todo.length) return Promise.resolve(0);
+  return Promise.all(todo.map(function(r){
+    var code = String(r.code), secid = secidOf(code);
+    if(!secid){ trendCache[code] = { failed: 1 }; return Promise.resolve(); }
+    return fetchKlineJsonp(secid, 1, TREND_LOOKBACK).then(function(j){
+      var rows = ((j && j.data && j.data.klines) || []).map(function(kl){
+        var parts = String(kl).split(',');
+        return { date: parts[0], close: parseFloat(parts[1]) };
+      });
+      var st = longTrendStats(rows);
+      trendCache[code] = st ? { label: longTrendLabel(st), annualized: st.annualized, r2: st.r2, close: st.close, ma24m: st.ma24m, bars: st.bars }
+                            : { failed: 1, monthly: monthEndCloses(rows).length, bars: rows.length };
+    }).catch(function(){ trendCache[code] = { failed: 1 }; });
+  })).then(function(){ if(document.getElementById('stockList')) renderStockSection(); return todo.length; });
+}
 
 // ==== RESEARCH_PURE_BEGIN ====
 // 产业研究员纯逻辑（唯一实现体；测试经 scripts/research_render_logic.ts 门面抽取执行）
@@ -1882,6 +2008,9 @@ function ensureBenchmarkData(){
 }
 // K线 JSONP 抓取：东财主站+数字前缀镜像轮换，单域名失败自动换下一个（网络波动兜底）
 function fetchKlineJsonp(secid, fqt, lmt){
+  // 中心守卫（secid 归一为 secidOf 后必配）：null/畸形 secid 一律显式 reject，
+  // 绝不拼出 '...secid=null...' 那种请求——那会把「代码非法」伪装成「网络失败」。
+  if(!secid || !/^\d+\.[0-9A-Za-z.]+$/.test(String(secid))) return Promise.reject(new Error('invalid secid'));
   return new Promise((resolve, reject)=>{
     const hosts = ['push2his.eastmoney.com','1.push2his.eastmoney.com','23.push2his.eastmoney.com','92.push2his.eastmoney.com'];
     let i = 0;
@@ -2428,7 +2557,7 @@ function renderStockSection(){
   // Top10 区块紧随其后；无批次时 renderScoreTop10 内部降级为占位文案
   list.insertAdjacentHTML('beforeend', renderScoreTop10());
   // 价值 Top10 紧随评分 Top10；未生成时的降级文案在调用点判定（VALUE_PURE 纯逻辑不读全局）
-  list.insertAdjacentHTML('beforeend', valueState ? renderValueTop10(valueState)
+  list.insertAdjacentHTML('beforeend', valueState ? renderValueTop10(valueState, trendCache)
     : (valueTried ? '<div class="signal-strip"><span class="signal-pill pill-normal">价值批次尚未生成（夜间批处理上线后自动出现）</span></div>' : ''));
   // Task 7 在 renderStockSection 里插的价值 Top10 语句之后，同一口径的降级（纯函数不读全局）：
   list.insertAdjacentHTML('beforeend', valueState ? renderDivergeBoard(valueState)
@@ -2544,7 +2673,7 @@ function autoFetchStockData(id){
   const code = (body ? (body.querySelector('[data-sk="code"]').value||'') : (s?s.code:'')).trim();
   const setStatus = (text, color)=>{ if(statusEl){ statusEl.textContent = text; statusEl.style.color = color || 'var(--muted)'; } };
   if(!/^\d{5,6}$/.test(code)){ setStatus('请先填写 5-6 位代码（A股6位/港股5位）', 'var(--brick)'); return; }
-  const secid = code.length===5 ? ('116.'+code) : (code.startsWith('6') ? ('1.'+code) : ('0.'+code));
+  const secid = secidOf(code);
   setStatus('正在获取行情（多线路自动重试）…');
   fetchKlineJsonp(secid, 1, 260).then(j=>{
     const rows = j.data.klines.map(kl=>{ const [dd,cc]=kl.split(','); return { date:dd, close:parseFloat(cc) }; });
@@ -2988,7 +3117,7 @@ async function autoRefreshStocks(){
     const body = document.getElementById('sbody-'+s.id);
     if(body && body.classList.contains('open')) continue;
     const code = String(s.code).trim();
-    const secid = code.length===5 ? ('116.'+code) : (code.startsWith('6') ? ('1.'+code) : ('0.'+code));
+    const secid = secidOf(code);
     try{
       const j = await fetchKlineJsonp(secid, 1, 260);
       const rows = j.data.klines.map(kl=>{ const seg = kl.split(','); return { date: seg[0], close: parseFloat(seg[1]) }; }).filter(r=>!isNaN(r.close));

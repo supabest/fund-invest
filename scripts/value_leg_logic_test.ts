@@ -1,7 +1,9 @@
 // scripts/value_leg_logic_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueTop10,
-  LEG_PAGE_SIZE, legOrderOpts, legFilter, legRange, legHasMore, legTiebreakCol } from "./value_leg_logic.ts";
+  LEG_PAGE_SIZE, legOrderOpts, legFilter, legRange, legHasMore, legTiebreakCol,
+  TREND_LOOKBACK, TREND_MIN_BARS, TREND_MONTHLY_MA, monthEndCloses, olsLogTrend, longTrendStats, longTrendLabel,
+  trendBadgeHtml, secidOf } from "./value_leg_logic.ts";
 
 const row = { code:'600031', name:'潍柴', vq:78.4, tier:'qualified', confidence:'A', vetoed:false,
   owner_yield:6.2, margin_of_safety:4.35, cn10y:1.85, roic_med:18.0, v_moat:80, v_cash:70, v_safety:75, v_health:66,
@@ -247,3 +249,140 @@ Deno.test('全序守卫：凡用 .range() 翻页的函数都必须带 code 并�
   }
   assertEquals(legTiebreakCol(), 'code');
 });
+// ==== 长期趋势标签（2026-10-13 用户裁定：只做标签、不进分数）====
+// 造日序列：months 个月 × 每月 perMonth 个交易日，月内按 (1+step) 复利，跨月再跳 1%
+// 噪声只打在**每月最后一个交易日**上（月线判据必须用月线级噪声测；
+// 原先按奇偶日打锯齿，月末恒落奇数日 → 噪声被月线采样整段吃掉，fixture 测不出「纠缠」）
+function mkTrendRows(months: number, step = 0.002, perMonth = 21, endZig = 0) {
+  const out: { date: string; close: number }[] = [];
+  let p = 100;
+  for (let m = 0; m < months; m++) {
+    const yr = 2024 + Math.floor(m / 12), mm = String((m % 12) + 1).padStart(2, '0');
+    for (let d = 1; d <= perMonth; d++) {
+      const c = endZig > 0 && d === perMonth ? p * (1 + endZig * (m % 2 ? -1 : 1)) : p;
+      out.push({ date: `${yr}-${mm}-${String(d).padStart(2, '0')}`, close: c });
+      p *= (1 + step);
+    }
+    p *= 1.01;
+  }
+  return out;
+}
+
+Deno.test('monthEndCloses：每月只取最后一个交易日；乱序输入必须自己排序（不许依赖上游有序）', () => {
+  const rows = mkTrendRows(26);
+  const got = monthEndCloses(rows);
+  assertEquals(got.length, 26, '26 个月应得 26 个月末收盘');
+  const shuffled = rows.slice().reverse();
+  assertEquals(monthEndCloses(shuffled), got, '乱序输入结果与有序不一致');
+  assertEquals(monthEndCloses([]), []);
+  assertEquals(monthEndCloses(null as never), []);
+});
+
+Deno.test('olsLogTrend：第三参 perYear 决定年化口径（月线喂 12、日线喂 250）；常数价 → R²=null', () => {
+  const up = mkTrendRows(30).map(r => r.close);
+  const t = olsLogTrend(up, 250);
+  assertEquals(t !== null, true, '630 根应能算 250 窗回归');
+  assertEquals(t!.r2! > 0.99, true, '单调上升的 R² 必须接近 1，实得 ' + t!.r2);
+  assertEquals(t!.slope > 0, true);
+  assertEquals(t!.annualized > 0, true);
+  // 月线年化：同一斜率，perYear=12 与 perYear=250 年化必须不同（防把月线当日线年化）
+  const m = olsLogTrend(monthEndCloses(mkTrendRows(30, 0.002)), 24, 12);
+  assertEquals(m !== null, true);
+  assertEquals(m!.slope > 0, true, '月序列上升斜率必须为正，实得 ' + m!.slope);
+  assertEquals(Math.abs(m!.annualized - (Math.exp(m!.slope * 12) - 1)) < 1e-12, true, '年化必须按 perYear=12 折算');
+  const flat = olsLogTrend(new Array(250).fill(100), 250);
+  assertEquals(flat!.r2, null, '全等价格 R² 是 0/0，必须判 null 而非 0 或 1');
+  assertEquals(olsLogTrend([1, 2, 3], 250), null, '样本不足窗口 → null，不得用短窗凑');
+});
+
+Deno.test('longTrendStats：口径是真长期（≥500 根 且 ≥24 个月末），不足判 null 绝不凑', () => {
+  assertEquals(TREND_MONTHLY_MA, 24, '主判据必须是 24 个月月线，不是 12——一年不算“长期”');
+  assertEquals(TREND_MIN_BARS, 500, '日线门禁 500 根 ≈ 2 年');
+  assertEquals(TREND_LOOKBACK >= TREND_MIN_BARS + 200, true, '拉取窗必须留缺勤余量');
+  assertEquals(longTrendStats(mkTrendRows(20)), null, '420 根 < 500 门禁，必须判 null');
+  assertEquals(longTrendStats(mkTrendRows(30, 0.002, 15)), null, '450 根（26 个月）仍不够 500 根');
+  assertEquals(longTrendStats([]), null);
+  const s = longTrendStats(mkTrendRows(30));
+  assertEquals(s !== null, true);
+  assertEquals(s!.monthly >= 24, true, '月线 MA24 至少需 24 个月末');
+  assertEquals(typeof s!.ma24m, 'number', '字段名随口径改成 ma24m');
+  assertEquals('ma12m' in s!, false, '旧字段必须消失，留着就是两套口径并存');
+  assertEquals(typeof s!.close, 'number');
+});
+
+Deno.test('longTrendLabel：三态判据（steady=价上24月线+斜率正+R²>=0.6；broken=破24月线+斜率非正；余纠缠）', () => {
+  assertEquals(longTrendLabel(longTrendStats(mkTrendRows(30, 0.002))), 'steady', '三年稳定复利上升应判慢牛');
+  assertEquals(longTrendLabel(longTrendStats(mkTrendRows(30, -0.002))), 'broken', '持续下行应判破位');
+  // 隔离 R² 门禁（变异检验 M1 逼出来的）：fixture 必须 close>ma24m 且 slope>0 且 R²<0.6，
+  // mixed 才只能由 R² 门禁得出。旧 fixture（30 个月末，close<ma24m）的 mixed 其实是位置条件给的，
+  // 把 TREND_R2_STEADY 改成 0 照样绿 —— 测试没隔离它声称在验的东西。
+  // 实测 months=31 endZig=0.25：close=191.9 > ma24m=131.3、slope=0.01682>0、R²=0.173<0.6
+  assertEquals(longTrendLabel(longTrendStats(mkTrendRows(31, 0.0002, 21, 0.25))), 'mixed',
+    '价上 24 月线且斜率为正，但月线 R²=0.17 未过 0.6 门禁 —— 涨得多不等于稳定上升，必须由 R² 拦下');
+  // 反向对照（也实测过）：同样月末 ±18% 摆动但趋势强上行 → R²=0.784 仍判 steady，
+  // 说明 R² 门禁不是刀锋：真在上升的标的不会被个别月份抖动误杀。
+  assertEquals(longTrendLabel(longTrendStats(mkTrendRows(30, 0.002, 21, 0.18))), 'steady',
+    'R² 门禁只拦“没有方向的大幅摆动”，不拦带噪声的真上行');
+  assertEquals(longTrendLabel(null), null, 'stats=null 必须透出 null');
+});
+
+Deno.test('secidOf：与 autoFetchStockData 既有口径同源（6→沪、其余 6 位→深、5 位→港；非法→null）', () => {
+  assertEquals(secidOf('600519'), '1.600519');
+  assertEquals(secidOf('000001'), '0.000001');
+  assertEquals(secidOf('300750'), '0.300750');
+  assertEquals(secidOf('00700'), '116.00700');
+  assertEquals(secidOf(' 600031 '), '1.600031', '代码要 trim');
+  assertEquals(secidOf('abc'), null);
+  assertEquals(secidOf(''), null);
+  assertEquals(secidOf(null as never), null);
+});
+
+Deno.test('trendBadgeHtml：三态各有类名；无数据必须渲染 trend-na 占位（空串=界面无感，正是本轮要防的静默降级）', () => {
+  const html = (label: string | null) =>
+    trendBadgeHtml(label === null ? null : { label, annualized: 0.2312, r2: 0.81, close: 10, ma24m: 9 });
+  assertEquals(html('steady').includes('trend-steady'), true);
+  assertEquals(html('broken').includes('trend-broken'), true);
+  assertEquals(html('mixed').includes('trend-mixed'), true);
+  const na = html(null);
+  assertEquals(na.includes('trend-na'), true, '缺数据也要显式占位');
+  assertEquals(na.length > 0, true, '禁止返回空串');
+  assertEquals(html('steady').includes('23.1%'), true, 'title 须露出年化（可核对，不含糊）');
+  assertEquals(html('steady').includes('24月线'), true, 'title 须披露判据窗口，不含糊成“长期”');
+  assertEquals(html(null).includes('500'), true, 'NA 的 title 须说明缺多少数据');
+});
+
+Deno.test('renderValueTop10：传入 trendMap 则行内挂角标；不传第二参仍渲染 trend-na（旧调用点向后兼容）', () => {
+  const st = { batch: '2026-10-13', top10: [row] as never[] };
+  const withMap = renderValueTop10(st, { '600031': { label: 'steady', annualized: 0.2, r2: 0.9, close: 1, ma24m: 0.9 } } as never);
+  assertEquals(withMap.includes('trend-steady'), true);
+  const without = renderValueTop10(st);
+  assertEquals(without.includes('trend-na'), true, '未传 map 要显式"数据不足"而非消失');
+  assertEquals(without.includes('78.4'), true, '角标不得影响分数渲染');
+});
+
+Deno.test('接线守卫：取角标必须真调 fetchKlineJsonp+secidOf+TREND_LOOKBACK，且渲染点把 map 传进 renderValueTop10', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const start = html.indexOf('function loadTrendBadges(');
+  assertEquals(start >= 0, true, 'loadTrendBadges 不存在');
+  const body = html.slice(start, html.indexOf('\n}\n', start));
+  for (const call of ['fetchKlineJsonp(', 'secidOf(', 'TREND_LOOKBACK', 'longTrendStats(', 'longTrendLabel(', 'renderStockSection()']) {
+    assertEquals(body.includes(call), true, 'loadTrendBadges 未调用 ' + call.slice(0, -1));
+  }
+  // 守卫只认「调用点」这一字面写法，且必须排除函数定义行：
+  // 上一版用 /renderValueTop10\([^)]*,/ 宽泛正则，命中了 `function renderValueTop10(state, trendMap){`
+  // 本身，于是调用点漏传 trendCache（角标线上恒 NA）时守卫仍然绿 —— 典型的假绿守卫（MS6 同型）。
+  const callLines = html.split('\n')
+    .filter(l => /renderValueTop10\s*\(/.test(l))
+    .filter(l => !/^\s*function\s+renderValueTop10/.test(l));
+  assertEquals(callLines.length >= 1, true, '找不到 renderValueTop10 的调用点（只有定义，没人渲染？）');
+  assertEquals(callLines.some(l => /renderValueTop10\s*\(\s*valueState\s*,\s*trendCache\s*\)/.test(l)), true,
+    '渲染调用点没把 trendCache 作为第二参传进 renderValueTop10，角标恒为 NA；实际调用点：\n' + callLines.join('\n'));
+});
+
+Deno.test('边界守卫（用户裁定"只做标签不进分数"的可执行化）：长期趋势字样绝不出现在打分/排序/门禁表达式里', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const polluted = html.split('\n').filter(l => /longTrend|trendLabel|trendStats|TREND_LOOKBACK/.test(l))
+    .filter(l => /renorm|W_M|W_Q|W_G|W_V|\.vq\s*[-+*/]|vq\s*=|final\s*[-+*/]|score\s*\+=/.test(l));
+  assertEquals(polluted, [], '长期趋势被接进了分数计算：\n' + polluted.join('\n'));
+});
+
