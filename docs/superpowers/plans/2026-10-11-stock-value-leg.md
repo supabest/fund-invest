@@ -3599,12 +3599,19 @@ select cron.schedule('stock-value-nightly', '45 13 * * *',
 
 令牌写 `$DAILY_UPDATE_TOKEN` 变量插值，**执行后不得** `select job.command`（含 Bearer 原值，既有凭据安全规范）；只 `select jobid, schedule from cron.job where jobname='stock-value-nightly'` 确认已注册。
 
-- [ ] **Step 9: 前端双端部署（Pages + Vercel；⚠ 需用户明示）**
+- [x] **Step 9: 前端双端部署（Pages + Vercel；⚠ 需用户明示）**
 
 沿用既有链：`cp index.html site/index.html` → `wrangler pages deploy . --project-name=fund-invest888 --branch=main` → `vercel deploy --prod --yes`。
 验收踩过的两个坑必须重做：① 部署后先打专属 URL 确认新内容（`grep -c renderDivergeBoard`），再 `sleep 25` 后复验 `pages.dev` 别名（别名传播有延迟）；② `*.vercel.app` 直连可能超时，内容级拿不到证据时**如实说明**，只以 CLI `vercel inspect` 的 `target: production` / `status: Ready` 为据。
 
-- [ ] **Step 10: 更新文档与收尾**
+> **Step 9 实跑账（2026-10-13，用户明示「双端部署 + push」）**：部署前只读预检在生产响应上打出**两条前端缺陷**，且都源于本计划第 1979 行 prescribed 的写法（不是实现偏差）——
+> ① **缺陷 A（致命）**：`order('vq',{ascending:false})` 未指定 nulls 修饰符 ⇒ PG 默认 `DESC NULLS FIRST`，而引擎不变式 `vetoed ⇒ vq=null` 让精选池 1116 行中 **1090 行无分**；真服务器实测旧串返回的 1000 行里**有分行 0**、首条有分行名次 **1091** ⇒ 价值腿 Top10 恒空。② **缺陷 B**：全页 `.range(` 出现 0 次，`db-max-rows=1000` 静默截断 ⇒ 池尾 **116 行**（含持仓股）拿不到；同族第三处 `loadThsPoolNames()` 的 `.limit(1000)` 会丢尾部行业名。
+> 修法（`4d94f12`）：参数构造下沉进 `VALUE_PURE` 块（`legOrderOpts`/`legFilter`/`legRange`/`legHasMore`/`legTiebreakCol` 五函数，门面已导出），三处查询改为翻页 + `nullsFirst:false` + `code` 升序并列键（offset 分页的全序前提）。新增 7 条测试含**接线守卫**（函数体必须真调用纯函数）与**全序守卫**；变异 M1 摘掉 nullsFirst、M2 页面绕开纯函数、M3 legRange 恒返回首窗 ⇒ 3/3 全杀。生产侧实证：`order=vq.desc.nullslast` 下 26 只有分行全部回到第一页，两页 1000+116 闭合、code 零重复。
+> 部署验收（按原文两个坑重做）：`cp index.html site/index.html` 后 `cmp` 一致 → Pages `wrangler pages deploy . --project-name=fund-invest888 --branch=main` 得专属 URL `c95d4195.fund-invest888.pages.dev`，直拉 187792 字节与 `index.html` **逐字节一致**（`legTiebreakCol`×4、`nullsFirst`×2、`range(from,to)`×3）→ `sleep 25` 复验别名 `fund-invest888.pages.dev` 同样逐字节一致。Vercel `deploy --prod --yes` 成功，但 `*.vercel.app` **三种通道全部超时**（直连 `--noproxy`、走系统代理、`vercel curl`——后者本机 curl 同样连不上），故按原文口径**如实说明：Vercel 无内容级证据**，仅以 `vercel inspect` 的 `target: production` / `status: ● Ready`（deployment `dpl_2oUy…`）为据。
+
+- [x] **Step 10: 更新文档与收尾**
+
+> **Step 10 实跑账（2026-10-13）**：README 模块清单第 28 行已有 `stock-value`（Task 期间已加，本轮不重复动）；spec §11 追加**决议 16–20**，即计划对 spec 的 A1–A5 五条修订逐条回写并标注「计划阶段发现（2026-10-11）」，未伪装成原始设计。前视时间表起算日＝首个可用批次 **2026-10-13**。
 
 ```bash
 # README.md：模块清单加 stock-value（仅这一行，不混入无关脏文件）
