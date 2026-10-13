@@ -1,6 +1,7 @@
 // scripts/value_leg_logic_test.ts
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueTop10 } from "./value_leg_logic.ts";
+import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueTop10,
+  LEG_PAGE_SIZE, legOrderOpts, legFilter, legRange, legHasMore, legTiebreakCol } from "./value_leg_logic.ts";
 
 const row = { code:'600031', name:'潍柴', vq:78.4, tier:'qualified', confidence:'A', vetoed:false,
   owner_yield:6.2, margin_of_safety:4.35, cn10y:1.85, roic_med:18.0, v_moat:80, v_cash:70, v_safety:75, v_health:66,
@@ -187,4 +188,62 @@ Deno.test('安全边际三处统一按 pp 渲染，旧单位 4.35% 不得残留�
   const drows = [v('a',95,30,6), v('b',50,50,3), v('c',10,95,1), v('d',92,28,5), v('e',90,20,4)];
   const dstate = { batch: '2026-10-11', rows: new Map(drows.map(r => [r.code, r as never])) } as never;
   assertEquals(renderDivergeBoard(dstate).includes('安全边际 6.00pp'), true);  // 第三处沿用 2 位小数
+});
+
+// ==== 2026-10-13 Step 9 预检修复单（缺陷 A：DESC NULLS FIRST 让 Top10 恒空；缺陷 B：单页 1000 行静默截断）====
+// 实测依据（2026-10-13 批，只读）：stock_value in_pool 1116 行中 vq 为 NULL 的 1090 行，
+// order=vq.desc 下首条有分行名次 = 1091，单页 1000 行内含分行 0 只，qualified+A 的 26 只全在页外。
+Deno.test('legOrderOpts：两条腿排序必须显式 nullsFirst:false（默认 DESC NULLS FIRST 是缺陷 A 的根）', () => {
+  const o = legOrderOpts();
+  assertEquals(o.ascending, false);
+  assertEquals(o.nullsFirst, false);   // 严格 === false：写成 undefined（＝不传）等于没修
+});
+
+Deno.test('legFilter：非法代码剔除，无持仓时退化为纯 in_pool', () => {
+  assertEquals(legFilter(['600031', 'abc', '000001', '1234']), 'in_pool.eq.true,code.in.(600031,000001)');  // in. 形式：PostgREST 列.操作符.值，与现行页面同形
+  assertEquals(legFilter([]), 'in_pool.eq.true');
+  assertEquals(legFilter(['600031']).includes('in_pool.eq.true'), true);  // 精选池条件不得丢
+});
+
+Deno.test('legRange：窗口按 1000 递增且不重叠（1116 行需两窗，第二窗 from=1000）', () => {
+  assertEquals(legRange(0), [0, 999]);
+  assertEquals(legRange(1), [1000, 1999]);
+  assertEquals(legRange(1)[0], LEG_PAGE_SIZE);
+});
+
+Deno.test('legHasMore：满页才继续，短页/空页即停（防死循环）', () => {
+  assertEquals(legHasMore(1000), true);
+  assertEquals(legHasMore(116), false);
+  assertEquals(legHasMore(0), false);
+});
+
+Deno.test('接线守卫：三条翻页查询函数体内必须真的调用对应的纯函数（含 loadThsPoolNames）', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const REQUIRED: Record<string, string[]> = {
+    loadStockValue: ['legOrderOpts(', 'legFilter(', 'legRange(', 'legHasMore(', 'legTiebreakCol('],
+    loadStockScores: ['legOrderOpts(', 'legFilter(', 'legRange(', 'legHasMore(', 'legTiebreakCol('],
+    // 这条取全池行业名，故意不带持仓 or 条件——所以只要求翻页/排序四件
+    loadThsPoolNames: ['legOrderOpts(', 'legRange(', 'legHasMore(', 'legTiebreakCol('],
+  };
+  for (const fn of Object.keys(REQUIRED)) {
+    const start = html.indexOf('async function ' + fn + '(');
+    assertEquals(start >= 0, true, fn + ' 已不在 index.html 里');
+    const end = html.indexOf('\n}\n', start);
+    assertEquals(end > start, true, fn + ' 函数体边界未找到');
+    const body = html.slice(start, end);
+    for (const call of REQUIRED[fn]) {
+      assertEquals(body.includes(call), true, fn + ' 未调用 ' + call.slice(0, -1) + '（缺陷会原地复活）');
+    }
+  }
+});
+
+Deno.test('全序守卫：凡用 .range() 翻页的函数都必须带 code 并列键（tie 会让跨页重行/漏行）', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const paged = html.split('async function ').filter(f => f.startsWith('load') && f.includes('.range('));
+  assertEquals(paged.length >= 3, true, '应至少找到三条翻页查询，实际 ' + paged.length);
+  for (const body of paged) {
+    assertEquals(body.includes(".order(legTiebreakCol(), {ascending:true})"), true,
+      'load' + body.slice(0, body.indexOf('(')) + ' 翻页却缺全序并列键');
+  }
+  assertEquals(legTiebreakCol(), 'code');
 });

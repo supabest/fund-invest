@@ -708,13 +708,18 @@ async function loadStockScores(){
       .order('batch_date',{ascending:false}).limit(1).maybeSingle();
     if(be || !b) return;
     const batch = b.batch_date;
-    // 精选池行（in_pool）+ 我的持仓行（code.in）一次取回
-    const codes = [...new Set(stocks.map(s=>String(s.code||'').trim()).filter(c=>/^\d{5,6}$/.test(c)))];
-    const orFilter = codes.length ? 'in_pool.eq.true,code.in.(' + codes.join(',') + ')' : 'in_pool.eq.true';
-    const { data, error } = await sb.from('stock_score').select('*')
-      .eq('batch_date', batch).or(orFilter).order('final',{ascending:false});
-    if(error || !data) return;
-    const rows = data.filter(r=>r && r.final!==null && r.final!==undefined);
+    // 精选池行（in_pool）+ 我的持仓行（code.in）；参数构造全部走 VALUE_PURE 的 leg* 纯函数（有单测）
+    const orFilter = legFilter(stocks.map(s=>s.code));
+    const all = [];
+    for(let i=0;i<LEG_MAX_PAGES;i++){
+      const [from,to] = legRange(i);
+      const { data, error } = await sb.from('stock_score').select('*')
+        .eq('batch_date', batch).or(orFilter).order('final', legOrderOpts()).order(legTiebreakCol(), {ascending:true}).range(from,to);
+      if(error || !data) return;
+      all.push(...data);
+      if(!legHasMore(data.length)) break;
+    }
+    const rows = all.filter(r=>r && r.final!==null && r.final!==undefined);
     scoreState = { batch, rows: new Map(rows.map(r=>[String(r.code),r])), top10: rows.filter(r=>r.in_pool).slice(0,10) };
   }catch(e){ console.warn('scores load failed', e); }
 }
@@ -728,11 +733,17 @@ async function loadStockValue(){
       .order('batch_date',{ascending:false}).limit(1).maybeSingle();
     if(be || !b) return;
     const batch = b.batch_date;
-    const codes = [...new Set(stocks.map(s=>String(s.code||'').trim()).filter(c=>/^\d{5,6}$/.test(c)))];
-    const orFilter = codes.length ? 'in_pool.eq.true,code.in.(' + codes.join(',') + ')' : 'in_pool.eq.true';
-    const { data, error } = await sb.from('stock_value').select('*')
-      .eq('batch_date', batch).or(orFilter).order('vq',{ascending:false});
-    if(error || !data) return;
+    // vq 排序必须 nullslast（否决行 vq 恒 null，默认 NULLS FIRST 会把有分行整批挤出页外）；同样要翻页
+    const orFilter = legFilter(stocks.map(s=>s.code));
+    const data = [];
+    for(let i=0;i<LEG_MAX_PAGES;i++){
+      const [from,to] = legRange(i);
+      const { data: page, error } = await sb.from('stock_value').select('*')
+        .eq('batch_date', batch).or(orFilter).order('vq', legOrderOpts()).order(legTiebreakCol(), {ascending:true}).range(from,to);
+      if(error || !page) return;
+      data.push(...page);
+      if(!legHasMore(page.length)) break;
+    }
     valueState = { batch, rows: new Map(data.map(r=>[String(r.code), r])),
       top10: data.filter(r=>r.in_pool && r.tier==='qualified' && r.confidence==='A') };
   }catch(e){ console.warn('value load failed', e); }
@@ -921,6 +932,26 @@ function renderDivergeBoard(state){
     + (d.wronged.length + d.rich.length === 0 ? '<div class="score-row" style="color:var(--muted)">本批次无显著分歧样本（两套分数同向）</div>' : '')
     + '<div class="score-card-note">分歧榜只展示两套口径哪里不一致，不构成买卖建议。</div></div>';
 }
+// ---- 两条腿 REST 查询构造（2026-10-13 Step 9 预检修复单：缺陷 A + 缺陷 B）----
+// A：PostgREST 未指定 nulls 修饰符时走 PG 默认 DESC NULLS FIRST，而引擎不变式（value_engine.ts:211）
+//    让否决行 vq 恒为 null ⇒ 2026-10-13 批精选池 1116 行里 1090 行无分，首条有分行名次 1091，
+//    单页页首整千行无分 → 价值腿 Top10 恒空。必须显式 nullsFirst:false。
+// B：db-max-rows=1000 静默截断（同一缺陷先在 stock_score 腿带病数周，见 plan Step 6c）⇒ 1116 行只回 1000，
+//    尾 116 行里的持仓股评分/价值胶囊整块不显示。必须翻页。
+var LEG_PAGE_SIZE = 1000;          // 与 PostgREST db-max-rows 对齐；页大小取满即“看着满”其实在丢数据
+var LEG_MAX_PAGES = 10;            // 硬上限防御：全池才 5226 行，10 窗 = 1 万行足够覆盖且不会死循环
+function legOrderOpts(){ return { ascending:false, nullsFirst:false }; }
+function legFilter(codes){
+  var seen = {}, clean = [];
+  (codes || []).forEach(function(c){
+    var v = String(c === null || c === undefined ? '' : c).trim();
+    if(/^\d{5,6}$/.test(v) && !seen[v]){ seen[v] = 1; clean.push(v); }
+  });
+  return clean.length ? 'in_pool.eq.true,code.in.(' + clean.join(',') + ')' : 'in_pool.eq.true';
+}
+function legTiebreakCol(){ return 'code'; }   // offset 分页的全序并列键：仅按分值排存在 tie，跨页会重行/漏行
+function legRange(i){ return [i * LEG_PAGE_SIZE, i * LEG_PAGE_SIZE + LEG_PAGE_SIZE - 1]; }
+function legHasMore(n){ return n === LEG_PAGE_SIZE; }   // 满页才可能还有下一页；短页/空页即停
 // ==== VALUE_PURE_END ====
 
 // ==== RESEARCH_PURE_BEGIN ====
@@ -1404,9 +1435,16 @@ async function loadThsPoolNames(){
     const { data: b } = await sb.from('stock_score').select('batch_date')
       .order('batch_date',{ascending:false}).limit(1).maybeSingle();
     if(!b) return empty;
-    const { data, error } = await sb.from('stock_score').select('ths_l1,ths_l2')
-      .eq('batch_date', b.batch_date).eq('in_pool', true).limit(1000);
-    if(error || !data) return empty;
+    const data = [];                                   // 池 1116 行 > db-max-rows，单页会静默丢掉尾部的行业名
+    for(let i=0;i<LEG_MAX_PAGES;i++){
+      const [from,to] = legRange(i);
+      const { data: page, error } = await sb.from('stock_score').select('ths_l1,ths_l2')
+        .eq('batch_date', b.batch_date).eq('in_pool', true)
+        .order('final', legOrderOpts()).order(legTiebreakCol(), {ascending:true}).range(from,to);
+      if(error || !page) return empty;
+      data.push(...page);
+      if(!legHasMore(page.length)) break;
+    }
     const pick = k => [...new Set(data.map(r=>String(r[k]||'').trim()).filter(s=>s.length))];
     return { l1: pick('ths_l1'), l2: pick('ths_l2'), batch: b.batch_date };
   }catch(e){ return empty; }
