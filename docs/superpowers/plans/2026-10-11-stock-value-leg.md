@@ -3454,7 +3454,15 @@ where v.batch_date = current_date and v.in_pool
 修法（已落本地，未提交）：`index.ts` 新增 `readAllRows`（分页 + `Prefer: count=exact` 闭合校验：总数不可得/页起点错位/声明区间长度≠实收行数/非 2xx/无确定性 `order=` 一律抛错炸批），`readPoolSet`（额外校“去重后 == 收回”）、`readMainSnapshot` 改走同一分页（旧写法同样只拿 1000 只主分归因）。测试 61 → **68**（+7）；变异 **MP1–MP8 全杀**（`preflight18/mutate_pool.py`，MP6 靠钉“请求里真的带了 `Prefer: count=exact`”才能杀，桩子自身模拟不出无总数形态）；deploy.ts 重生成 **55367B**，verify-bundles 5 ✅；lint 基线未抬高（index.ts 0 problems，index_test.ts 8 = HEAD 基线）。
 待用户裁定的三件事：① 提交 + 重部署（v3）+ 重跑本批覆写 2026-10-12（生产写）；② 主分腿 `stock-score` 与 `business-mix` 的同型截断是否本轮一并修（它们各自需一次重跑）；③ 修完重跑后的新判据：`count(*) filter (where in_pool)` 必等于池内且在宇宙的那只数（旧判据 `=1000` 本身是被截断污染的）。
 
-- [ ] **Step 6b: 投入资本近似校准（⚠ 需用户明示才能跑；spec §4.1/§9.1 “落地首周必须校准”，不校准则不得进入 Step 8 注册 cron）**
+- [x] **Step 6b: 投入资本近似校准（⚠ 需用户明示才能跑；spec §4.1/§9.1 “落地首周必须校准”，不校准则不得进入 Step 8 注册 cron）**
+> **实跑（2026-10-13，用户明示「同批做」）**：样本扩到 **10 只**（原文要求 3 只）。真值取自 GS 三表接口
+> `balanceSheet`，字段名由探针打印的真实响应树形确认为 `sEWithoutMI` / `totalShareholderEquity`（报告期 2025-12-31），非猜列名。
+> 中位误差 **20.48%（归母口径）/ 25.05%（股东权益合计口径）**，逐只散布 2.4%–74.6%；`ic` 列 == `cash + debt` 全批校验通过（偏差 >1 元的行 0）。
+> 两个合理读数恰跨在 25% 线上 ⇒ 单看中位数不能判，补做**传导分析**：`oy = min(cashY, normY)` 使 5/10 行的 IC 误差完全不传递（Δoy=0），
+> 其余 5 行换真值只会抬高 owner_yield（+0.30 ~ +7.18pp），**无一例被算高**；受 IC 影响的行共 3831 只，原文 remedy「逐只补取」实测约 2.5 小时不可执行。
+> **结论：按 spec §11 决议 15 的修订条款判定为豁免保留**（近似 + `ic_approx=true` 知情标记，评分行为零改动）。
+> 附带产出：净资产可由 `总市值/市净率` 零成本反推（中位误差 1.93%），但换上它会让 1399 行新过 `MOS_GATE=2pp`、qualified 88→≈1400
+> ——即这条近似当前在替门禁承担筛选强度，已作为「换真值须与门禁重设计同批做」记入 §4.1 附注，本轮不做。
 
 先写一次性探针实跑（响应形态未知，**不得猜列名就写解析器**，同 Task 5 的纪律）：
 
@@ -3523,7 +3531,14 @@ if (given.size >= 3) {
 
 探针产物不入库：`rm scripts/probe_ic_calibration.ts`（与 Task 5 Step 5 同纪律）。**探针输出里若出现 key，不得贴进任何文档/提交/记忆。**
 
-- [ ] **Step 7: 只读健康度复核（不写；输出须脱敏）**
+- [x] **Step 7: 只读健康度复核（不写；输出须脱敏）**
+> **五判据在「两条腿重跑后的新批」上全部转绿（2026-10-13，用户明示「两条都重跑，今晚就关掉判据①」）**：
+> 手动 `stock-score?mode=run`（33s，5025 行）→ `in_pool` 标记 **1116**（旧形态恒 1000）→ `stock-value?mode=run`（12s，5025 行）→
+> ① `pool_missing_main = 0` ✅（两侧 in_pool 均 1116，断言 (b) 修正口径直查 0 == 响应 0）；
+> ② 机制四维 **47.83 / 48.87 / 48.57 / 50.69** 全部落 50±5 ✅；③ 分布 `vq_median_scored` **77.84**（88 行，只报告）✅；
+> ④ A 级 **1246 / 非否决 2417 = 51.6% ≥40%** ✅（全批口径 24.8% 如实并列，分母已由决议 13 定为非否决行）；
+> ⑤ 金融股逐只对账 **零误杀** ✅：71 只「无护城河」否决行 = 53 只 ROE 路径（GS 摊薄 ROE 全 <8）+ 18 只 ROIC 路径（18/18 `roic_cur`/`roic_med` 双 <8、门槛违规 0）；
+> 探针侧 67/71 与 ROE<8 一致，4 只 ROE≥8（东方财富/越秀资本/国网英大/海南华铁）全落在 ROIC 路径，67 = 53 + 14 精确对齐。
 
 > **2026-10-12 用户裁定③（「Step 7 三条判据全按推荐改」）**：下面这段 SQL 与判据已按 spec §6 / §10 / §11 第 12 条重写。三条红里有两条是**口径写错**而不是引擎错，还有一条是代理计数不具判别力；本节的「实跑账」保留原文当历史证据，不回写修正。重写后的判据必须在**分页修复重跑本批之后**重做（旧批次的 `in_pool` / `main_final` 计数受 1000 行静默截断污染）。
 
@@ -3564,7 +3579,12 @@ select code, name, roic_cur, vq, veto_reasons from stock_value
 
 ⇒ **行动：按判据要意——不注册 cron（Step 8 挂起），先把原因写进本报告给用户**。Step 6c 的分页修复完成后需重跑本批，Step 7 这几项 SQL 必须重做（尤其 `pool_missing_main` 与 `in_pool` 计数受截断污染）。
 
-- [ ] **Step 8: 注册 cron（⚠ 需用户明示；排在 stock-score 后 15 分钟）**
+- [x] **Step 8: 注册 cron（⚠ 需用户明示；排在 stock-score 后 15 分钟）**
+> **已注册（2026-10-13，用户明示「6b 裁定完就注册 cron」）**：`cron.schedule('stock-value-nightly','45 13 * * *')` →
+> **jobid=10 / active=true / schedule `45 13 * * *`**（21:45 北京，紧跟 stock-score 21:30）；全库现有 6 个 job。
+> 注册前只读确认同名 job 不存在；注册后只取 `jobid/schedule/active`，未 `select command`。
+> 端到端用 `?mode=ping` 验证夜间同一 URL+令牌组合：`status=200 {"ok":true,"rows":5225}`，无副作用（函数里 `mode` 缺省才是 run）。
+> 落库脚本 `scripts/cron_stock_value.sql` 只存 `$DAILY_UPDATE_TOKEN` 占位符，真令牌仅在拼接的执行串里，未打印未入库。
 
 ```sql
 -- scripts/cron_stock_value.sql
