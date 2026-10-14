@@ -3,7 +3,8 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueTop10,
   LEG_PAGE_SIZE, legOrderOpts, legFilter, legRange, legHasMore, legTiebreakCol,
   TREND_LOOKBACK, TREND_MIN_BARS, TREND_MONTHLY_MA, monthEndCloses, olsLogTrend, longTrendStats, longTrendLabel,
-  trendBadgeHtml, secidOf, AUTH_TIMEOUT_MS, authErrHint } from "./value_leg_logic.ts";
+  trendBadgeHtml, secidOf, AUTH_TIMEOUT_MS, authErrHint,
+  TREND_LABEL_CN, TREND_NA_CN } from "./value_leg_logic.ts";
 
 const row = { code:'600031', name:'潍柴', vq:78.4, tier:'qualified', confidence:'A', vetoed:false,
   owner_yield:6.2, margin_of_safety:4.35, cn10y:1.85, roic_med:18.0, v_moat:80, v_cash:70, v_safety:75, v_health:66,
@@ -391,6 +392,55 @@ Deno.test('authErrHint：网络不可达必须与「密码不对」分开说—�
   assertEquals(authErrHint(null).length > 0, true, '空错误也要有文案，禁止空串');
   assertEquals(authErrHint({ message: 'weird upstream thing' }).includes('weird upstream thing'), true,
     '未知错误必须透出原文，不许折叠成「配置或网络问题」这种含糊话');
+});
+
+// 云天化（600096）2026-10-14 真实月线：24 个月里从 18.97 冲到 42.97 再崩回 27.41。
+// 判据三条件全过 → 仍判 steady。用它验的不是判据，是「披露有没有把判据没看的那一半说出来」。
+const YTH_24 = [18.97, 19.31, 20.07, 17.91, 19.87, 19.34, 20.20, 20.37, 23.06, 25.61, 25.40, 27.36,
+  29.57, 32.01, 36.79, 42.97, 31.99, 34.78, 30.44, 30.20, 29.67, 31.24, 27.86, 27.41];
+function rowsFromMonthly(closes: number[], perMonth = 21) {
+  const out: { date: string; close: number }[] = [];
+  [15.0, 16.0].concat(closes).forEach((c, m) => {   // 前置 2 个填充月，凑够 500 根日线门禁
+    const yr = 2022 + Math.floor(m / 12), mm = String((m % 12) + 1).padStart(2, '0');
+    for (let d = 1; d <= perMonth; d++) out.push({ date: `${yr}-${mm}-${String(d).padStart(2, '0')}`, close: c });
+  });
+  return out;
+}
+
+Deno.test('标签词不许承诺判据没度量的东西：去掉「慢/牛」这类叙事词，且必须把窗口写死成 24 月', () => {
+  for (const k of ['steady', 'mixed', 'broken']) {
+    const t = TREND_LABEL_CN[k as 'steady' | 'mixed' | 'broken'];
+    assertEquals(/牛|慢/.test(t), false, `${k} 的文案「${t}」在承诺判据没度量的速度/形态`);
+    assertEquals(/长期/.test(t), false, `${k} 的文案「${t}」用「长期」这种模糊词——窗口其实是 24 个月，不是长期`);
+    assertEquals(t.includes('24月'), true, `${k} 的文案「${t}」没写清窗口`);
+  }
+  assertEquals(TREND_NA_CN.includes('24月') && !/长期/.test(TREND_NA_CN), true, '未判定态同样要写清窗口');
+});
+
+Deno.test('披露必须补上判据没看的那两个数：距 24 月窗口峰值回撤、近 3 月年化（云天化判 steady 却距峰 −36%）', () => {
+  const st = longTrendStats(rowsFromMonthly(YTH_24))!;
+  assertEquals(longTrendLabel(st), 'steady', '前提：判据本身没被改动，云天化形态仍判 steady');
+  assertEquals(st.peakDraw! < -0.3, true, '距窗口峰值回撤应约 −36%，实得 ' + st.peakDraw);
+  assertEquals(st.recent3! < 0, true, '近 3 月年化必须为负（真实值约 −54%），实得 ' + st.recent3);
+  const html = trendBadgeHtml(Object.assign({}, st, { label: 'steady' }));
+  const title = (html.match(/title="([^"]*)"/) || ['', ''])[1];
+  assertEquals(/距24月峰值/.test(title), true, 'title 没披露距峰回撤：' + title);
+  assertEquals(/近3月年化/.test(title), true, 'title 没披露近 3 月方向：' + title);
+  assertEquals(/-3\d\.\d%/.test(title), true, '回撤数值要真的算进文案，实得：' + title);
+});
+
+Deno.test('距峰回撤必须内联可见：iPhone 没有 hover，挂在 title 上的披露在手机上等于没披露', () => {
+  // deno-lint-ignore no-explicit-any
+  const st: any = Object.assign({}, longTrendStats(rowsFromMonthly(YTH_24))!, { label: 'steady' });
+  const visible = (trendBadgeHtml(st) as string).replace(/ title="[^"]*"/, '');   // 剥掉 title，只剩肉眼可读的字
+  assertEquals(/距峰/.test(visible), true, '内联可见文字里没有「距峰」：' + visible);
+  assertEquals(/-36%/.test(visible), true, '内联文字里没有回撤数值：' + visible);
+  const na = trendBadgeHtml(null) as string;
+  assertEquals(/null|NaN|undefined/.test(na), false, 'NA 态内联出现脏值：' + na);
+  // deno-lint-ignore no-explicit-any
+  const legacy: any = { label: 'steady', annualized: 0.3, r2: 0.7, ma24m: 20, bars: 760 };   // 旧数据没有 peakDraw
+  assertEquals(/null|NaN|undefined/.test(trendBadgeHtml(legacy) as string), false,
+    '缺 peakDraw 字段时内联出现脏值（宁可不显示也不许显示 null）');
 });
 
 Deno.test('接线守卫：submitLogin 必须给两处 auth 调用套超时 + try/catch（否则网络挂起 = 界面永久「正在登录…」）', async () => {

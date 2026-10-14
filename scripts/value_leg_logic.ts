@@ -4,7 +4,8 @@ const SHIM = `function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({
 const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter', 'legRange', 'legHasMore', 'legTiebreakCol', 'valueFmtPct', 'valueTierLabel', 'valuePillHtml', 'valueGateHtml', 'renderValueTop10', 'SWAP_GAP', 'divergeLists', 'swapSuggest', 'renderDivergeBoard',
   'TREND_LOOKBACK', 'TREND_MIN_BARS', 'TREND_MONTHLY_MA', 'TREND_R2_STEADY', 'monthEndCloses', 'olsLogTrend',
   'longTrendStats', 'longTrendLabel', 'trendBadgeHtml', 'secidOf',
-  'AUTH_TIMEOUT_MS', 'authErrHint'];
+  'AUTH_TIMEOUT_MS', 'authErrHint',
+  'TREND_LABEL_CN', 'TREND_NA_CN'];
 
 async function load(): Promise<Record<string, unknown>> {
   const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
@@ -39,9 +40,11 @@ export const TREND_MONTHLY_MA = NS.TREND_MONTHLY_MA as number;
 export const TREND_R2_STEADY = NS.TREND_R2_STEADY as number;
 export const monthEndCloses = NS.monthEndCloses as (rows: { date: string; close: number }[] | null) => number[];
 export const olsLogTrend = NS.olsLogTrend as (closes: number[], w: number, perYear?: number) => { slope: number; r2: number | null; annualized: number; n: number } | null;
-export const longTrendStats = NS.longTrendStats as (rows: { date: string; close: number }[] | null) => { close: number; ma24m: number; monthly: number; bars: number; slope: number; r2: number | null; annualized: number } | null;
+export const longTrendStats = NS.longTrendStats as (rows: { date: string; close: number }[] | null) => { close: number; ma24m: number; monthly: number; bars: number; slope: number; r2: number | null; annualized: number; peak: number; peakDraw: number | null; recent3: number | null } | null;
 export const longTrendLabel = NS.longTrendLabel as (s: { close: number; ma24m: number; slope: number; r2: number | null } | null) => 'steady' | 'mixed' | 'broken' | null;
 export const trendBadgeHtml = NS.trendBadgeHtml as (stats: Record<string, unknown> | null) => string;
 export const secidOf = NS.secidOf as (code: string | null) => string | null;
 export const AUTH_TIMEOUT_MS = NS.AUTH_TIMEOUT_MS as number;
+export const TREND_LABEL_CN = NS.TREND_LABEL_CN as Record<'steady' | 'mixed' | 'broken', string>;
+export const TREND_NA_CN = NS.TREND_NA_CN as string;
 export const authErrHint = NS.authErrHint as (e: { name?: string; message?: string; __authTimeout?: number } | null) => string;
