@@ -3,7 +3,7 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueTop10,
   LEG_PAGE_SIZE, legOrderOpts, legFilter, legRange, legHasMore, legTiebreakCol,
   TREND_LOOKBACK, TREND_MIN_BARS, TREND_MONTHLY_MA, monthEndCloses, olsLogTrend, longTrendStats, longTrendLabel,
-  trendBadgeHtml, secidOf } from "./value_leg_logic.ts";
+  trendBadgeHtml, secidOf, AUTH_TIMEOUT_MS, authErrHint } from "./value_leg_logic.ts";
 
 const row = { code:'600031', name:'潍柴', vq:78.4, tier:'qualified', confidence:'A', vetoed:false,
   owner_yield:6.2, margin_of_safety:4.35, cn10y:1.85, roic_med:18.0, v_moat:80, v_cash:70, v_safety:75, v_health:66,
@@ -377,6 +377,40 @@ Deno.test('接线守卫：取角标必须真调 fetchKlineJsonp+secidOf+TREND_LO
   assertEquals(callLines.length >= 1, true, '找不到 renderValueTop10 的调用点（只有定义，没人渲染？）');
   assertEquals(callLines.some(l => /renderValueTop10\s*\(\s*valueState\s*,\s*trendCache\s*\)/.test(l)), true,
     '渲染调用点没把 trendCache 作为第二参传进 renderValueTop10，角标恒为 NA；实际调用点：\n' + callLines.join('\n'));
+});
+
+Deno.test('authErrHint：网络不可达必须与「密码不对」分开说——登录卡死的真凶是网络，一律推给凭据就是误导', () => {
+  const net = authErrHint({ __authTimeout: 1 });
+  assertEquals(/网络|连不上/.test(net), true, '超时须指向网络，实得：' + net);
+  assertEquals(/密码|凭据/.test(net), false, '超时不得暗示是密码错');
+  const fetchErr = authErrHint({ name: 'AuthRetryableFetchError', message: 'Failed to fetch' });
+  assertEquals(/网络|连不上/.test(fetchErr), true, 'fetch 失败须指向网络，实得：' + fetchErr);
+  assertEquals(/密码|凭据/.test(authErrHint({ message: 'Invalid login credentials' })), true, '凭据错要明说');
+  assertEquals(/确认/.test(authErrHint({ message: 'Email not confirmed' })), true, '未确认要指向确认邮件');
+  assertEquals(/分钟/.test(authErrHint({ message: 'Request rate limit reached' })), true, '限流要给等待时长');
+  assertEquals(authErrHint(null).length > 0, true, '空错误也要有文案，禁止空串');
+  assertEquals(authErrHint({ message: 'weird upstream thing' }).includes('weird upstream thing'), true,
+    '未知错误必须透出原文，不许折叠成「配置或网络问题」这种含糊话');
+});
+
+Deno.test('接线守卫：submitLogin 必须给两处 auth 调用套超时 + try/catch（否则网络挂起 = 界面永久「正在登录…」）', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const start = html.indexOf('async function submitLogin(');
+  assertEquals(start >= 0, true, 'submitLogin 不存在');
+  const body = html.slice(start, html.indexOf('\n}\n', start));
+  assertEquals(AUTH_TIMEOUT_MS > 0 && AUTH_TIMEOUT_MS <= 30000, true, '超时必须是有限值，实得 ' + AUTH_TIMEOUT_MS);
+  assertEquals(/withAuthTimeout\(\s*sb\.auth\.signInWithPassword/.test(body), true, '登录请求没套超时');
+  assertEquals(/withAuthTimeout\(\s*sb\.auth\.signUp/.test(body), true, '注册请求没套超时（同样会永久挂起）');
+  // 变异检验 L3 逼出来的：只查「有没有 try」会假绿 —— 两处 auth 请求各自都要有一层 try。
+  const tryCount = (body.match(/\btry\s*\{/g) || []).length;
+  assertEquals(tryCount >= 2, true, 'submitLogin 里 try 只有 ' + tryCount + ' 处，登录与注册必须各自被 catch 包住');
+  // 变异检验 L8 逼出来的：只查「出现过 authErrHint」会假绿 —— 终态分支绕过纯函数照样绿。
+  const hintCount = (body.match(/authErrHint\(/g) || []).length;
+  assertEquals(hintCount >= 3, true, '失败文案只走 ' + hintCount + ' 次 authErrHint，登录/注册/终态三条路径必须全部经它出，不许在页面里另写文案');
+  // L8 第二轮：计数是脆的（4 处删成 3 处照样过 >=3）。改成钉住「终态兜底那一行」本身。
+  const lastMsg = (body.trimEnd().split('\n').filter(l => l.includes('loginMsg(')).pop() || '').trim();
+  assertEquals(/authErrHint\(/.test(lastMsg), true,
+    'submitLogin 的终态兜底分支绕过了 authErrHint，实得：' + lastMsg);
 });
 
 Deno.test('边界守卫（用户裁定"只做标签不进分数"的可执行化）：长期趋势字样绝不出现在打分/排序/门禁表达式里', async () => {

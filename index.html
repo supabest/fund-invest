@@ -1054,6 +1054,25 @@ function secidOf(code){
   if(/^\d{6}$/.test(v)) return (v.charAt(0) === '6' ? '1.' : '0.') + v;
   return null;
 }
+
+// ---- 登录/注册失败的文案分类（纯函数：把 SDK 错误分成人能行动的话）----
+// 最关键的分叉是「连不上」与「账号不对」。把网络问题报成密码错，人会去反复试密码，永远查不到真因。
+var AUTH_TIMEOUT_MS = 15000;   // supabase-js 的 auth 请求默认无超时：网络被黑洞时 promise 永不返回，界面就永久停在「正在登录…」
+function authErrHint(e){
+  if(!e) return '登录未成功：未知原因，可再试一次';
+  var netHint = '连不上 Supabase（网络层，不是账号问题）：换一次网络（WiFi ↔ 蜂窝）或开代理后重试';
+  if(e.__authTimeout) return '已等 ' + Math.round(AUTH_TIMEOUT_MS / 1000) + ' 秒无响应：' + netHint;
+  var name = String(e.name || '');
+  var m = String(e.message || e.error_description || e.msg || '');
+  if(name === 'AuthRetryableFetchError' || /Failed to fetch|NetworkError|Load failed|ERR_NETWORK|Network request failed|timeout/i.test(m)) return netHint;
+  if(/Invalid login credentials/i.test(m)) return '邮箱或密码不对（该邮箱若已注册，这里不会自动改注册）';
+  if(/already registered/i.test(m)) return '该邮箱已注册，密码不对';
+  if(/not confirmed/i.test(m)) return '邮箱未确认：去收确认邮件（可能藏在垃圾箱），点确认链接后回来再点「登录 / 注册」';
+  if(/rate limit|too many requests|429/i.test(m)) return '尝试太频繁，请等几分钟再试';
+  if(/signups.*not allowed|disabled for this/i.test(m)) return '项目已关闭注册：这个邮箱还没有账号';
+  if(/email_address_invalid|is invalid/i.test(m)) return '邮箱无效：请使用真实存在的邮箱（QQ/163/Gmail 等），不能随便编一个域名';
+  return '登录失败：' + (m || name || '未知错误');   // 未知一律透出原文，不许折叠成「配置或网络问题」这种含糊话
+}
 // ==== VALUE_PURE_END ====
 
 // ---- 长期趋势角标取数编排（非纯逻辑：外网 JSONP + 全局缓存 + 重渲染）----
@@ -3242,34 +3261,42 @@ document.getElementById('forceSyncBtn').addEventListener('click', async ()=>{
   await syncOnOpen();
   showToast('同步完成');
 });
+// auth 请求加硬超时：Promise.race 到点即报「无响应」，绝不让界面无限期停在「正在登录…」
+function withAuthTimeout(promise){
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise(function(_resolve, reject){ setTimeout(function(){ reject({ __authTimeout: 1 }); }, AUTH_TIMEOUT_MS); }),
+  ]);
+}
+
 // 登录提交：提取为具名函数，按钮点击与回车（keydown Enter）共用同一路径
 async function submitLogin(){
   const email = document.getElementById('loginEmail').value.trim();
   const pass = document.getElementById('loginPass').value;
+  // 先挡空指针：SDK 未就绪时 sb 为 null，直接 sb.auth 会抛异常 → 界面永久停在「正在登录…」且不吭声
+  if(!cloudReady || !sb){ loginMsg('云端 SDK 尚未就绪：请等几秒，或刷新页面再试','var(--brick)'); return; }
   if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)){ loginMsg('请输入有效邮箱','var(--brick)'); return; }
   if(pass.length<6){ loginMsg('密码至少6位','var(--brick)'); return; }
   loginMsg('正在登录…');
-  // 先尝试登录；凭据不存在则自动注册
-  const { error } = await sb.auth.signInWithPassword({ email, password: pass });
-  if(!error){ return; } // 成功由 onAuthStateChange 接管
-  if(/Invalid login credentials/i.test(error.message)){
+  // 先尝试登录；凭据不存在则自动注册。两处请求都必须套超时并进 try：
+  // supabase-js 默认无超时，网络黑洞时 await 永不返回，界面就永久停在「正在登录…」——这正是本次线上故障的形态。
+  let r;
+  try{
+    r = await withAuthTimeout(sb.auth.signInWithPassword({ email, password: pass }));
+  }catch(e){ loginMsg(authErrHint(e),'var(--brick)'); return; }
+  if(!r.error){ return; } // 成功由 onAuthStateChange 接管
+  if(/Invalid login credentials/i.test(r.error.message)){
     loginMsg('新邮箱？正在自动注册…');
-    const signup = await sb.auth.signUp({ email, password: pass });
-    if(signup.error){
-      if(/already registered/i.test(signup.error.message)) loginMsg('该邮箱已注册，密码不对','var(--brick)');
-      else if(/email_address_invalid|is invalid/i.test(signup.error.message)) loginMsg('邮箱无效：请使用真实存在的邮箱（QQ/163/Gmail 等），不能随便编一个域名','var(--brick)');
-      else if(/[Rr]ate limit/i.test(signup.error.message)) loginMsg('尝试太频繁，请等几分钟再试','var(--brick)');
-      else loginMsg('注册失败：'+signup.error.message,'var(--brick)');
-      return;
-    }
+    let signup;
+    try{
+      signup = await withAuthTimeout(sb.auth.signUp({ email, password: pass }));
+    }catch(e){ loginMsg(authErrHint(e),'var(--brick)'); return; }
+    if(signup.error){ loginMsg(authErrHint(signup.error),'var(--brick)'); return; }
     if(signup.data.session){ return; } // 注册即登录成功
     loginMsg('项目开启了邮箱确认：请点开邮箱里的确认邮件（可能藏在垃圾箱），点确认链接后回来重新点「登录 / 注册」','var(--gold)');
     return;
   }
-  if(/email_address_invalid|is invalid/i.test(error.message)) loginMsg('邮箱无效：请使用真实存在的邮箱（QQ/163/Gmail 等）','var(--brick)');
-  else if(/not confirmed/i.test(error.message)) loginMsg('邮箱未确认：请先完成注册时发给你的确认邮件，再回来登录','var(--brick)');
-  else if(/[Rr]ate limit/i.test(error.message)) loginMsg('尝试太频繁，请等几分钟再试','var(--brick)');
-  else loginMsg('登录失败：'+error.message,'var(--brick)');
+  loginMsg(authErrHint(r.error),'var(--brick)');
 }
 document.getElementById('loginSubmitBtn').addEventListener('click', submitLogin);
 // 任一输入框按回车 = 点「登录 / 注册」，配合 autocomplete 让钥匙串自动填充后一键完成

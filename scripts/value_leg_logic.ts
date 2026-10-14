@@ -3,7 +3,8 @@ const MARKER = /\/\/ ==== VALUE_PURE_BEGIN ====([\s\S]*?)\/\/ ==== VALUE_PURE_EN
 const SHIM = `function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[m])); }\n`;
 const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter', 'legRange', 'legHasMore', 'legTiebreakCol', 'valueFmtPct', 'valueTierLabel', 'valuePillHtml', 'valueGateHtml', 'renderValueTop10', 'SWAP_GAP', 'divergeLists', 'swapSuggest', 'renderDivergeBoard',
   'TREND_LOOKBACK', 'TREND_MIN_BARS', 'TREND_MONTHLY_MA', 'TREND_R2_STEADY', 'monthEndCloses', 'olsLogTrend',
-  'longTrendStats', 'longTrendLabel', 'trendBadgeHtml', 'secidOf'];
+  'longTrendStats', 'longTrendLabel', 'trendBadgeHtml', 'secidOf',
+  'AUTH_TIMEOUT_MS', 'authErrHint'];
 
 async function load(): Promise<Record<string, unknown>> {
   const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
@@ -42,3 +43,5 @@ export const longTrendStats = NS.longTrendStats as (rows: { date: string; close:
 export const longTrendLabel = NS.longTrendLabel as (s: { close: number; ma24m: number; slope: number; r2: number | null } | null) => 'steady' | 'mixed' | 'broken' | null;
 export const trendBadgeHtml = NS.trendBadgeHtml as (stats: Record<string, unknown> | null) => string;
 export const secidOf = NS.secidOf as (code: string | null) => string | null;
+export const AUTH_TIMEOUT_MS = NS.AUTH_TIMEOUT_MS as number;
+export const authErrHint = NS.authErrHint as (e: { name?: string; message?: string; __authTimeout?: number } | null) => string;
