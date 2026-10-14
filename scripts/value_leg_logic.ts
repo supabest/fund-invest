@@ -2,7 +2,7 @@
 const MARKER = /\/\/ ==== VALUE_PURE_BEGIN ====([\s\S]*?)\/\/ ==== VALUE_PURE_END ====/;
 const SHIM = `function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[m])); }\n`;
 const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter', 'legRange', 'legHasMore', 'legTiebreakCol', 'valueFmtPct', 'valueTierLabel', 'valuePillHtml', 'valueGateHtml', 'renderValueTop10', 'SWAP_GAP', 'divergeLists', 'swapSuggest', 'renderDivergeBoard',
-  'TREND_LOOKBACK', 'TREND_MIN_BARS', 'TREND_MONTHLY_MA', 'TREND_R2_STEADY', 'monthEndCloses', 'olsLogTrend',
+  'TREND_LOOKBACK', 'TREND_KLT', 'TREND_FQT', 'TREND_MIN_MONTHS', 'TREND_POSITION_MA', 'TREND_R2_STEADY', 'TREND_DD_RATIO_MIN', 'monthEndCloses', 'olsLogTrend',
   'longTrendStats', 'longTrendLabel', 'trendBadgeHtml', 'secidOf',
   'AUTH_TIMEOUT_MS', 'authErrHint',
   'TREND_LABEL_CN', 'TREND_NA_CN'];
@@ -35,13 +35,18 @@ export const legRange = NS.legRange as (i: number) => [number, number];
 export const legHasMore = NS.legHasMore as (n: number) => boolean;
 export const legTiebreakCol = NS.legTiebreakCol as () => string;
 export const TREND_LOOKBACK = NS.TREND_LOOKBACK as number;
-export const TREND_MIN_BARS = NS.TREND_MIN_BARS as number;
-export const TREND_MONTHLY_MA = NS.TREND_MONTHLY_MA as number;
+export const TREND_KLT = NS.TREND_KLT as number;          // 103 = 月线
+export const TREND_FQT = NS.TREND_FQT as number;          // 2 = 后复权（前复权全历史实测有非正价）
+export const TREND_MIN_MONTHS = NS.TREND_MIN_MONTHS as number;
+export const TREND_POSITION_MA = NS.TREND_POSITION_MA as number;   // 位置项窗口（近 24 月线），与长期方向窗口是两回事
 export const TREND_R2_STEADY = NS.TREND_R2_STEADY as number;
+export const TREND_DD_RATIO_MIN = NS.TREND_DD_RATIO_MIN as number;   // 2026-10-14 用户裁定的收益回撤门禁
 export const monthEndCloses = NS.monthEndCloses as (rows: { date: string; close: number }[] | null) => number[];
 export const olsLogTrend = NS.olsLogTrend as (closes: number[], w: number, perYear?: number) => { slope: number; r2: number | null; annualized: number; n: number } | null;
-export const longTrendStats = NS.longTrendStats as (rows: { date: string; close: number }[] | null) => { close: number; ma24m: number; monthly: number; bars: number; slope: number; r2: number | null; annualized: number; peak: number; peakDraw: number | null; recent3: number | null } | null;
-export const longTrendLabel = NS.longTrendLabel as (s: { close: number; ma24m: number; slope: number; r2: number | null } | null) => 'steady' | 'mixed' | 'broken' | null;
+export type TrendStats = { close: number; ma24m: number; months: number; firstYear: number | null; slope: number;
+  r2: number | null; annualized: number; mdd: number; fromPeak: number; ddRatio: number | null; recent24: number | null };
+export const longTrendStats = NS.longTrendStats as (rows: { date: string; close: number }[] | null) => TrendStats | null;
+export const longTrendLabel = NS.longTrendLabel as (s: TrendStats | null) => 'steady' | 'mixed' | 'broken' | null;
 export const trendBadgeHtml = NS.trendBadgeHtml as (stats: Record<string, unknown> | null) => string;
 export const secidOf = NS.secidOf as (code: string | null) => string | null;
 export const AUTH_TIMEOUT_MS = NS.AUTH_TIMEOUT_MS as number;

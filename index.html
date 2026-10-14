@@ -960,17 +960,27 @@ function legTiebreakCol(){ return 'code'; }   // offset 分页的全序并列键
 function legRange(i){ return [i * LEG_PAGE_SIZE, i * LEG_PAGE_SIZE + LEG_PAGE_SIZE - 1]; }
 function legHasMore(n){ return n === LEG_PAGE_SIZE; }   // 满页才可能还有下一页；短页/空页即停
 
-// ---- 长期趋势标签（2026-10-13 用户裁定：只做标签、不进分数）----
-// 判据：不用日线 MA250（群延迟半年、且穿越不度量“稳定”），改用 月线 MA24 + 24 个月 log 价回归（斜率定方向、R² 定稳定）。
-// 论据：A股个股长动量证据弱（短期反转主导），"稳定"这半边才有效力 → 故把 R² 当硬门禁，而非只看方向穿越。
-var TREND_MIN_BARS = 500;      // 日线门禁：不足 500 根（≈2 年）一律判 NA，绝不用短窗凑一个能渲染的数
-var TREND_MONTHLY_MA = 24;     // 主判据窗口：24 个月月线（2 年）。一年不算“长期”——这是把标签名副其实地钉在口径上
-var TREND_LOOKBACK = 760;      // 拉 760 根 ≈ 3.15 年（东财单次实测可返回 760/1000/2000 根）：MA24 + 500 根门禁 + 停牌余量
-var TREND_R2_STEADY = 0.6;     // "稳升"的稳定度下限：R² 低于此一律归纠缠，防高噪声上行冒充长期上升
-var TREND_LABEL_CN = { steady: '24月↑稳升', mixed: '24月↔纠缠', broken: '24月↓破位' };
-var TREND_NA_CN = '24月—';   // 数据不足，未判定（不是看空）
+// ---- 长期趋势标签（2026-10-13 只做标签不进分数；2026-10-14 用户裁定：窗口改「上市至今」+ 最深回撤纳入判据）----
+// 口径三改，每一条都是实测逼出来的，不是审美：
+// ① 数据源 日线→月线（klt=103）全历史：实测东财单次可返回 108~390 根月线、最早 1991-01，「上市至今」不需要翻页；
+// ② 复权 fqt=1 前复权→fqt=2 后复权：前复权全历史实测有大片非正价（云天化 75/342、格力 231/354、泸州老窖 243/389、
+//    贵州茅台最低 −314），log 价直接 NaN；更坏的是坏点被过滤后「上市至今」会静默变成「前复权转正至今」（华域 362→153 月）。
+//    后复权含分红再投资，长期口径本就该用总回报；代价是页面上不能再打印绝对价（那不是行情价），只打印比率。
+// ③ 判据加「最深回撤」：24 月窗对「暴涨后深回撤」不敏感——云天化三条件全踩线过（线上 +2.4%、R² 0.620 vs 门禁 0.6、
+//    斜率 +38%），而距峰 −36%、近 3 月年化 −54%。全历史口径下它 R² 只有 0.352、年化 4.2%、最深回撤 −87%，自然出局。
+// 深回撤门禁写成乘法 `年化 ≥ RATIO_MIN × |最深回撤|`：无回撤（单调上行）时自动通过，不必造 Infinity 这种脏值。
+var TREND_KLT = 103;             // 月线粒度
+var TREND_FQT = 2;               // 后复权（见上 ②）
+var TREND_LOOKBACK = 10000;      // 一次拉到上市首日（实测最老一批 8510 根日线 / 390 根月线，未触顶）
+var TREND_MIN_MONTHS = 24;       // 月线门禁：上市不足 24 个月一律 NA，绝不用短窗凑一个能渲染的数
+var TREND_POSITION_MA = 24;      // 位置项窗口：近 24 月线只用来判「现在破没破」，与长期方向是两回事
+var TREND_R2_STEADY = 0.6;       // 稳定度下限（沿用，不随窗口改动而重新调参）
+var TREND_DD_RATIO_MIN = 0.15;   // 收益回撤下限：年化 / |上市至今最深回撤|（2026-10-14 用户裁定：形式取比率而非绝对 MDD 阈值，因为绝对阈值实测=年限罚——MDD>-70% 仅过 45/122、通过者上市月数中位 77 vs 全体 118；0.15 档稳升 21/122=17%，池抽样 122 只中位比 0.119）
+var TREND_LABEL_CN = { steady: '长期↑稳升', mixed: '长期↔纠缠', broken: '长期↓破位' };
+var TREND_NA_CN = '长期—';   // 数据不足，未判定（不是看空）
 
 // 月末收盘序列：同月取该月最后一个交易日；上游可能乱序，这里自己按月份定序（不依赖调用点）
+// 非正价/畸形行在这一步丢掉 —— 后复权本该没有，但日线源/旧缓存仍可能有，防线不靠上游保证
 function monthEndCloses(rows){
   var byMonth = {}, keys = [];
   (rows || []).forEach(function(r){
@@ -985,7 +995,7 @@ function monthEndCloses(rows){
   return keys.map(function(k){ return byMonth[k].close; });
 }
 
-// 对 log 价做最小二乘：slope=每根斜率，r2=拟合优度（"稳定"的量化），annualized=exp(slope*250)-1
+// 对 log 价做最小二乘：slope=每根斜率，r2=拟合优度（"稳定"的量化），annualized=exp(slope*perYear)-1
 // 常数价序列 syy=0 属 0/0 退化 → r2 判 null；把它当 0 或 1 都会伪造出"稳定/不稳定"的结论
 function olsLogTrend(closes, w, perYear){
   var arr = closes || [], n = arr.length;
@@ -1011,60 +1021,79 @@ function olsLogTrend(closes, w, perYear){
     annualized: Math.exp(slope * (perYear || 250)) - 1, n: m };
 }
 
-// 三态判据：稳升 = 价上 24 月线 且 月线斜率>0 且 R²≥0.6；破位 = 价破 24 月线 且 斜率非正；其余 = 纠缠
-// 回归喂的是**月线收盘**（24 个点）而非日线：噪声低一个量级，R² 才真的在度量“稳定”，而不是日线抖动
+// 峰谷最深回撤：遍历过程中的历史最高峰 → 之后的最低点；fromPeak = 现价距那个历史峰
+function maxDrawdown(closes){
+  var cs = closes || []; if(!cs.length) return { mdd: 0, peak: null, fromPeak: null };
+  var peak = cs[0], mdd = 0;
+  for(var i = 0; i < cs.length; i++){
+    if(cs[i] > peak) peak = cs[i];
+    var dd = cs[i] / peak - 1;
+    if(dd < mdd) mdd = dd;
+  }
+  return { mdd: mdd, peak: peak, fromPeak: peak > 0 ? cs[cs.length - 1] / peak - 1 : null };
+}
+
+// 长期趋势统计：回归喂**上市至今全部月线**（不再 slice(-24)）；位置项仍看近 24 月线
+// as-of 口径（2026-10-14 用户裁定，spec 决议 24）：东财当月未收盘根**计入**样本，标签就是「当日价口径」。
+// 别“顺手”改成丢末根：实测边界股（伟明环保）只有 recent24 会在 0 上下跨零（−1.6% ↔ +1.2%）而翻转 mixed/broken，
+// 年化/R²/MDD 对末根几乎不敏感；丢末根代价是「现价破没破 24 月线」不再是现价口径，且标签最多滞后一个月。
 function longTrendStats(rows){
+  var monthly = monthEndCloses(rows);
+  if(monthly.length < TREND_MIN_MONTHS) return null;
+  var t = olsLogTrend(monthly, monthly.length, 12);
+  if(!t) return null;
   var arr = (rows || []).filter(function(r){
     return r && /^\d{4}-\d{2}-\d{2}$/.test(String(r.date || '')) && isFinite(Number(r.close)) && Number(r.close) > 0;
   }).sort(function(a, b){ return String(a.date) < String(b.date) ? -1 : 1; });
-  if(arr.length < TREND_MIN_BARS) return null;
-  var monthly = monthEndCloses(arr);
-  if(monthly.length < TREND_MONTHLY_MA) return null;
-  var win = monthly.slice(-TREND_MONTHLY_MA);
-  var t = olsLogTrend(win, TREND_MONTHLY_MA, 12);
-  if(!t) return null;
-  var close = Number(arr[arr.length - 1].close);
-  // 下面两项**不参与判定，只用于披露**。三条件全在看「24 个月前 vs 现在」这条连线：
-  // 斜率是两端说话（中间的山峰只贡献残差），MA24 天生滞后，R² 的解释力来自前半段单边。
-  // 于是云天化(600096) 18.97→42.97→27.41 三条件全踩线过、被判上行，而它距峰 −36%、近 3 月年化 −54%。
-  var peak = win[0];
-  for(var pi = 1; pi < win.length; pi++){ if(win[pi] > peak) peak = win[pi]; }
-  var r3 = olsLogTrend(monthly, 3, 12);
+  var dd = maxDrawdown(monthly);
+  var close = monthly[monthly.length - 1];
+  var win = monthly.slice(-TREND_POSITION_MA);
+  var r24 = olsLogTrend(monthly, TREND_POSITION_MA, 12);
   return { close: close,
-    ma24m: win.reduce(function(a, b){ return a + b; }, 0) / TREND_MONTHLY_MA,
-    monthly: monthly.length, bars: arr.length, slope: t.slope, r2: t.r2, annualized: t.annualized,
-    peak: peak, peakDraw: peak > 0 ? close / peak - 1 : null, recent3: r3 ? r3.annualized : null };
+    ma24m: win.reduce(function(a, b){ return a + b; }, 0) / win.length,
+    months: monthly.length, firstYear: arr.length ? parseInt(String(arr[0].date).slice(0, 4), 10) : null,
+    slope: t.slope, r2: t.r2, annualized: t.annualized,
+    mdd: dd.mdd, fromPeak: dd.fromPeak,
+    ddRatio: dd.mdd < 0 ? t.annualized / Math.abs(dd.mdd) : null,
+    recent24: r24 ? r24.annualized : null };
 }
 
+// 三态：稳升 = 长期年化>0 且 R²≥0.6 且 年化≥RATIO_MIN×|最深回撤| 且 现价在 24 月线之上
+//       破位 = 长期年化≤0（上市以来阴跌，中期反弹不洗白），或 现价破 24 月线且近 24 月也在跌
+//       其余 = 纠缠（各条件互相矛盾，给不出方向）
 function longTrendLabel(s){
   if(!s) return null;
-  if(s.close > s.ma24m && s.slope > 0 && s.r2 !== null && s.r2 >= TREND_R2_STEADY) return 'steady';
-  if(s.close < s.ma24m && s.slope <= 0) return 'broken';
+  var costOk = s.annualized >= TREND_DD_RATIO_MIN * Math.abs(s.mdd);
+  if(s.annualized > 0 && s.r2 !== null && s.r2 >= TREND_R2_STEADY && s.close > s.ma24m && costOk) return 'steady';
+  if(s.annualized <= 0) return 'broken';
+  if(s.close < s.ma24m && s.recent24 !== null && s.recent24 <= 0) return 'broken';
   return 'mixed';
 }
 
 // 角标：三态各有类名；未判定/取数失败一律渲染 trend-na 显式占位（空串=界面无感，正是本轮要防的静默降级）
+// 后复权口径下绝对价不是行情价，所以 title 只报比率与样本，不再报「24月线 26.77」这种会误导的数
 function trendBadgeHtml(stats){
   var known = { steady: 1, mixed: 1, broken: 1 };
   var label = (stats && known[stats.label]) ? stats.label : null;
   var num = function(v, d){ return (v === null || v === undefined || !isFinite(Number(v))) ? 'NA' : Number(v).toFixed(d); };
   var pctv = function(v){ return (v === null || v === undefined || !isFinite(Number(v))) ? 'NA' : (Number(v) * 100).toFixed(1) + '%'; };
   var title = label
-    ? '近 2 年年化 ' + pctv(stats.annualized)
-      + ' · 月线拟合R² ' + num(stats.r2, 2) + ' · 24月线 ' + num(stats.ma24m, 2) + ' · 样本 ' + num(stats.bars, 0) + ' 根'
-      // 判据没看的两项，必须一起报出来：否则「上行」两个字会被读成「现在还在涨」
-      + ' · 距24月峰值 ' + pctv(stats.peakDraw) + ' · 近3月年化 ' + pctv(stats.recent3)
+    ? '上市以来年化 ' + pctv(stats.annualized)
+      + ' · 月线拟合R² ' + num(stats.r2, 2)
+      + ' · 最深回撤 ' + pctv(stats.mdd) + ' · 距峰 ' + pctv(stats.fromPeak)
+      + ' · 近24月年化 ' + pctv(stats.recent24)
+      + ' · 样本 ' + num(stats.months, 0) + ' 个月' + (stats.firstYear ? '（' + stats.firstYear + ' 年起，后复权含分红）' : '（起点未知，后复权含分红）')
       + '（纯展示标签，不参与评分与排序）'
-    : '近 24 个月趋势未判定（日线需 ' + TREND_MIN_BARS + ' 根且月末满 ' + TREND_MONTHLY_MA + ' 个；次新股/长期停牌/取数失败均归此类）';
+    : '长期趋势未判定（月线需满 ' + TREND_MIN_MONTHS + ' 根；次新股/长期停牌/取数失败均归此类）';
   var badge = '<span class="trend-badge ' + (label ? 'trend-' + label : 'trend-na') + '" title="'
     + escapeHtml(title) + '">' + (label ? TREND_LABEL_CN[label] : TREND_NA_CN) + '</span>';
-  // 距峰回撤做成**内联**文字而不是只挂 title：手机上根本没有 hover，挂 title 的披露在手机上等于没披露。
+  // 最深回撤已经进了判据，就必须不依赖 hover 可见：手机上没有 hover，挂 title 的判据输入等于没说。
   // 字段缺失（旧数据/未判定）时整段不渲染——宁可不显示，也不许显示 null。
-  var draw = (label && stats.peakDraw !== null && stats.peakDraw !== undefined && isFinite(Number(stats.peakDraw)))
-    ? '<span class="trend-draw" title="距 24 个月窗口最高点的回撤。判据不看这项，仅作披露">距峰 '
-      + (Number(stats.peakDraw) * 100).toFixed(0) + '%</span>'
+  var ddv = (label && stats.mdd !== null && stats.mdd !== undefined && isFinite(Number(stats.mdd)))
+    ? '<span class="trend-draw" title="上市以来最深峰谷回撤，已纳入判据">回撤 '
+      + (Number(stats.mdd) * 100).toFixed(0) + '%</span>'
     : '';
-  return badge + draw;
+  return badge + ddv;
 }
 
 // 东财 secid 前缀：与 autoFetchStockData 既有口径同源，不另立第二套（6→沪 1.、其余 6 位→深 0.、5 位→港 116.）
@@ -1097,7 +1126,7 @@ function authErrHint(e){
 
 // ---- 长期趋势角标取数编排（非纯逻辑：外网 JSONP + 全局缓存 + 重渲染）----
 // 只给「价值 Top10」补标签：榜单本身 ≤10 行，外网请求天然封顶；不进 cron、不落库、不写任何表。
-var trendCache = {};        // code -> {label,annualized,r2,close,ma24m,bars} | {failed:1}；进程内缓存，刷新页面重取
+var trendCache = {};        // code -> longTrendStats 整包 + label | {failed:1}；进程内缓存，刷新页面重取
 function loadTrendBadges(){
   var list = (valueState && valueState.top10 ? valueState.top10 : [])
     .filter(function(r){ return r && r.tier === 'qualified' && r.confidence === 'A' && r.vq !== null && r.vq !== undefined; })
@@ -1107,14 +1136,16 @@ function loadTrendBadges(){
   return Promise.all(todo.map(function(r){
     var code = String(r.code), secid = secidOf(code);
     if(!secid){ trendCache[code] = { failed: 1 }; return Promise.resolve(); }
-    return fetchKlineJsonp(secid, 1, TREND_LOOKBACK).then(function(j){
+    return fetchKlineJsonp(secid, TREND_FQT, TREND_LOOKBACK, TREND_KLT).then(function(j){
       var rows = ((j && j.data && j.data.klines) || []).map(function(kl){
         var parts = String(kl).split(',');
         return { date: parts[0], close: parseFloat(parts[1]) };
       });
       var st = longTrendStats(rows);
-      trendCache[code] = st ? { label: longTrendLabel(st), annualized: st.annualized, r2: st.r2, close: st.close, ma24m: st.ma24m, bars: st.bars }
-                            : { failed: 1, monthly: monthEndCloses(rows).length, bars: rows.length };
+      // 整包透传，不逐字段枚举：上一版枚举了 6 个字段，把 peakDraw/recent3 漏在缓存里
+      // ⇒ 角标只渲染出词、距峰永不显示，而单元/端到端测试全绿（它们都绕过了 trendCache 这一跳）。
+      trendCache[code] = st ? Object.assign({}, st, { label: longTrendLabel(st) })
+                            : { failed: 1, monthly: monthEndCloses(rows).length };
     }).catch(function(){ trendCache[code] = { failed: 1 }; });
   })).then(function(){ if(document.getElementById('stockList')) renderStockSection(); return todo.length; });
 }
@@ -2046,7 +2077,7 @@ function ensureBenchmarkData(){
   });
 }
 // K线 JSONP 抓取：东财主站+数字前缀镜像轮换，单域名失败自动换下一个（网络波动兜底）
-function fetchKlineJsonp(secid, fqt, lmt){
+function fetchKlineJsonp(secid, fqt, lmt, klt){
   // 中心守卫（secid 归一为 secidOf 后必配）：null/畸形 secid 一律显式 reject，
   // 绝不拼出 '...secid=null...' 那种请求——那会把「代码非法」伪装成「网络失败」。
   if(!secid || !/^\d+\.[0-9A-Za-z.]+$/.test(String(secid))) return Promise.reject(new Error('invalid secid'));
@@ -2067,7 +2098,7 @@ function fetchKlineJsonp(secid, fqt, lmt){
         else tryNext();
       };
       script.onerror = ()=>{ if(settled) return; settled = true; clearTimeout(timer); cleanup(); tryNext(); };
-      script.src = 'https://'+host+'/api/qt/stock/kline/get?secid='+secid+'&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f53&klt=101&fqt='+fqt+'&lmt='+lmt+'&end=20500101&cb='+cbName+'&_='+Date.now();
+      script.src = 'https://'+host+'/api/qt/stock/kline/get?secid='+secid+'&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f53&klt='+(klt||101)+'&fqt='+fqt+'&lmt='+lmt+'&end=20500101&cb='+cbName+'&_='+Date.now();
       document.head.appendChild(script);
     };
     tryNext();

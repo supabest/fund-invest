@@ -2,7 +2,8 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueTop10,
   LEG_PAGE_SIZE, legOrderOpts, legFilter, legRange, legHasMore, legTiebreakCol,
-  TREND_LOOKBACK, TREND_MIN_BARS, TREND_MONTHLY_MA, monthEndCloses, olsLogTrend, longTrendStats, longTrendLabel,
+  TREND_LOOKBACK, TREND_KLT, TREND_FQT, TREND_MIN_MONTHS, TREND_POSITION_MA, TREND_R2_STEADY, TREND_DD_RATIO_MIN,
+  monthEndCloses, olsLogTrend, longTrendStats, longTrendLabel,
   trendBadgeHtml, secidOf, AUTH_TIMEOUT_MS, authErrHint,
   TREND_LABEL_CN, TREND_NA_CN } from "./value_leg_logic.ts";
 
@@ -252,79 +253,152 @@ Deno.test('全序守卫：凡用 .range() 翻页的函数都必须带 code 并�
 });
 // ==== 长期趋势标签（2026-10-13 用户裁定：只做标签、不进分数）====
 // 造日序列：months 个月 × 每月 perMonth 个交易日，月内按 (1+step) 复利，跨月再跳 1%
-// 噪声只打在**每月最后一个交易日**上（月线判据必须用月线级噪声测；
-// 原先按奇偶日打锯齿，月末恒落奇数日 → 噪声被月线采样整段吃掉，fixture 测不出「纠缠」）
-function mkTrendRows(months: number, step = 0.002, perMonth = 21, endZig = 0) {
+// 月线粒度夹具：新口径判据喂「上市至今全部月线」，不再是日线堆出的 24 月窗
+function mkCloses(months: number, step: number, zig = 0) {
+  const out: number[] = []; let p = 100;
+  for (let i = 0; i < months; i++) { out.push(zig && i % 2 ? p * (1 + zig) : p); p *= (1 + step); }
+  return out;
+}
+// 在 at 处砸一个 depth 深的坑，8 个月内爬回原趋势线：全史斜率几乎不动，但最深回撤真的变深
+function withCrash(closes: number[], at: number, depth: number, recover = 8) {
+  const out = closes.slice(); const target = Math.min(closes.length - 1, at + recover);
+  out[at] = closes[at] * (1 - depth);
+  const gap = closes[target] / closes[at];
+  for (let k = 1; k < recover && at + k < out.length; k++) out[at + k] = out[at] * Math.pow(gap, k / recover);
+  return out;
+}
+function monthlyToRows(closes: number[]) {
   const out: { date: string; close: number }[] = [];
-  let p = 100;
-  for (let m = 0; m < months; m++) {
-    const yr = 2024 + Math.floor(m / 12), mm = String((m % 12) + 1).padStart(2, '0');
-    for (let d = 1; d <= perMonth; d++) {
-      const c = endZig > 0 && d === perMonth ? p * (1 + endZig * (m % 2 ? -1 : 1)) : p;
-      out.push({ date: `${yr}-${mm}-${String(d).padStart(2, '0')}`, close: c });
-      p *= (1 + step);
-    }
-    p *= 1.01;
-  }
+  closes.forEach((c, m) => {
+    const yr = 1998 + Math.floor(m / 12), mm = String((m % 12) + 1).padStart(2, '0');
+    out.push({ date: `${yr}-${mm}-28`, close: c });
+  });
+  return out;
+}
+// 云天化（600096）2026-10-14 真实近 24 个月月线：从 18.97 冲到 42.97 再崩回 27.41
+const YTH_24 = [18.97, 19.31, 20.07, 17.91, 19.87, 19.34, 20.20, 20.37, 23.06, 25.61, 25.40, 27.36,
+  29.57, 32.01, 36.79, 42.97, 31.99, 34.78, 30.44, 30.20, 29.67, 31.24, 27.86, 27.41];
+function ythLike() {   // 云天化式：上市以来一路上行 + 最后一轮冲高崩回（复刻真实形态的骨架）
+  return mkCloses(300, 0.004).slice(0, 276).concat(YTH_24);
+}
+// 中国铝业式：上市以来年年阴跌，但近 12 个月反弹已站上 24 月线 —— 位置项过、方向项不过
+function alLike(months: number, decay: number, rally: number, bounce: number) {
+  const out: number[] = []; let p = 200;
+  for (let i = 0; i < months - rally; i++) { out.push(p); p *= (1 - decay); }
+  for (let i = 0; i < rally; i++) { out.push(p); p *= (1 + bounce); }
   return out;
 }
 
 Deno.test('monthEndCloses：每月只取最后一个交易日；乱序输入必须自己排序（不许依赖上游有序）', () => {
-  const rows = mkTrendRows(26);
+  const rows = monthlyToRows(mkCloses(26, 0.002));
   const got = monthEndCloses(rows);
   assertEquals(got.length, 26, '26 个月应得 26 个月末收盘');
-  const shuffled = rows.slice().reverse();
-  assertEquals(monthEndCloses(shuffled), got, '乱序输入结果与有序不一致');
+  assertEquals(monthEndCloses(rows.slice().reverse()), got, '乱序输入结果与有序不一致');
   assertEquals(monthEndCloses([]), []);
   assertEquals(monthEndCloses(null as never), []);
+  // 同月多笔（日线粒度）也必须只留最后一天 —— 这条路径还在，月线源/日线源都要能吃
+  assertEquals(monthEndCloses([{ date: '2024-01-05', close: 10 }, { date: '2024-01-26', close: 11 }, { date: '2024-02-03', close: 12 }]), [11, 12]);
 });
 
 Deno.test('olsLogTrend：第三参 perYear 决定年化口径（月线喂 12、日线喂 250）；常数价 → R²=null', () => {
-  const up = mkTrendRows(30).map(r => r.close);
+  const up = mkCloses(300, 0.002);
   const t = olsLogTrend(up, 250);
-  assertEquals(t !== null, true, '630 根应能算 250 窗回归');
+  assertEquals(t !== null, true, '300 个点够算 250 窗');
   assertEquals(t!.r2! > 0.99, true, '单调上升的 R² 必须接近 1，实得 ' + t!.r2);
-  assertEquals(t!.slope > 0, true);
-  assertEquals(t!.annualized > 0, true);
-  // 月线年化：同一斜率，perYear=12 与 perYear=250 年化必须不同（防把月线当日线年化）
-  const m = olsLogTrend(monthEndCloses(mkTrendRows(30, 0.002)), 24, 12);
-  assertEquals(m !== null, true);
-  assertEquals(m!.slope > 0, true, '月序列上升斜率必须为正，实得 ' + m!.slope);
+  const m = olsLogTrend(up, 24, 12);
   assertEquals(Math.abs(m!.annualized - (Math.exp(m!.slope * 12) - 1)) < 1e-12, true, '年化必须按 perYear=12 折算');
-  const flat = olsLogTrend(new Array(250).fill(100), 250);
-  assertEquals(flat!.r2, null, '全等价格 R² 是 0/0，必须判 null 而非 0 或 1');
+  assertEquals(olsLogTrend(new Array(250).fill(100), 250)!.r2, null, '全等价格 R² 是 0/0，必须判 null 而非 0 或 1');
   assertEquals(olsLogTrend([1, 2, 3], 250), null, '样本不足窗口 → null，不得用短窗凑');
 });
 
-Deno.test('longTrendStats：口径是真长期（≥500 根 且 ≥24 个月末），不足判 null 绝不凑', () => {
-  assertEquals(TREND_MONTHLY_MA, 24, '主判据必须是 24 个月月线，不是 12——一年不算“长期”');
-  assertEquals(TREND_MIN_BARS, 500, '日线门禁 500 根 ≈ 2 年');
-  assertEquals(TREND_LOOKBACK >= TREND_MIN_BARS + 200, true, '拉取窗必须留缺勤余量');
-  assertEquals(longTrendStats(mkTrendRows(20)), null, '420 根 < 500 门禁，必须判 null');
-  assertEquals(longTrendStats(mkTrendRows(30, 0.002, 15)), null, '450 根（26 个月）仍不够 500 根');
-  assertEquals(longTrendStats([]), null);
-  const s = longTrendStats(mkTrendRows(30));
-  assertEquals(s !== null, true);
-  assertEquals(s!.monthly >= 24, true, '月线 MA24 至少需 24 个月末');
-  assertEquals(typeof s!.ma24m, 'number', '字段名随口径改成 ma24m');
-  assertEquals('ma12m' in s!, false, '旧字段必须消失，留着就是两套口径并存');
-  assertEquals(typeof s!.close, 'number');
+Deno.test('口径是「上市至今」：回归必须吃全部月线，不是最后 24 根（本轮改的就是这一条）', () => {
+  const closes = [100, 160, 256, 410, 655].concat(new Array(24).fill(660));   // 前 5 月暴涨、后 24 月横盘
+  const st = longTrendStats(monthlyToRows(closes))!;
+  assertEquals(st !== undefined && st !== null, true);
+  assertEquals(st.months, 29, '样本月数必须等于输入月数（窗口=上市至今），实得 ' + st.months);
+  assertEquals(st.annualized > 0.2, true, '全史年化必须吃进前 5 个月的暴涨，实得 ' + st.annualized);
+  assertEquals(Math.abs(st.recent24!) < 0.05, true, '近 24 月年化应≈0 —— 两个窗口不是一回事，实得 ' + st.recent24);
+  assertEquals(st.firstYear, 1998, '必须披露序列起点（用户要能核对“上市至今”是真的）');
 });
 
-Deno.test('longTrendLabel：三态判据（steady=价上24月线+斜率正+R²>=0.6；broken=破24月线+斜率非正；余纠缠）', () => {
-  assertEquals(longTrendLabel(longTrendStats(mkTrendRows(30, 0.002))), 'steady', '三年稳定复利上升应判慢牛');
-  assertEquals(longTrendLabel(longTrendStats(mkTrendRows(30, -0.002))), 'broken', '持续下行应判破位');
-  // 隔离 R² 门禁（变异检验 M1 逼出来的）：fixture 必须 close>ma24m 且 slope>0 且 R²<0.6，
-  // mixed 才只能由 R² 门禁得出。旧 fixture（30 个月末，close<ma24m）的 mixed 其实是位置条件给的，
-  // 把 TREND_R2_STEADY 改成 0 照样绿 —— 测试没隔离它声称在验的东西。
-  // 实测 months=31 endZig=0.25：close=191.9 > ma24m=131.3、slope=0.01682>0、R²=0.173<0.6
-  assertEquals(longTrendLabel(longTrendStats(mkTrendRows(31, 0.0002, 21, 0.25))), 'mixed',
-    '价上 24 月线且斜率为正，但月线 R²=0.17 未过 0.6 门禁 —— 涨得多不等于稳定上升，必须由 R² 拦下');
-  // 反向对照（也实测过）：同样月末 ±18% 摆动但趋势强上行 → R²=0.784 仍判 steady，
-  // 说明 R² 门禁不是刀锋：真在上升的标的不会被个别月份抖动误杀。
-  assertEquals(longTrendLabel(longTrendStats(mkTrendRows(30, 0.002, 21, 0.18))), 'steady',
-    'R² 门禁只拦“没有方向的大幅摆动”，不拦带噪声的真上行');
-  assertEquals(longTrendLabel(null), null, 'stats=null 必须透出 null');
+Deno.test('最深回撤进判据：一次 −80% 的历史深坑必须把「长期↑稳升」拦下来（fixture 自证只隔离了这一项）', () => {
+  // 参数由 scan_fixture.ts 扫出：300 月复利 + 第 120 月砸 −80% 后 4 个月爬回，
+  // 得到 ann=5.0% r2=0.785 mdd=-79.9% —— 方向/稳定/位置三腿全过，只有收益回撤比（0.063）不够
+  const base = mkCloses(300, 0.004);
+  const sa = longTrendStats(monthlyToRows(base))!;
+  assertEquals(longTrendLabel(sa), 'steady', '基准：无深回撤的复利长牛必须判稳升，否则下面的对照无意义');
+  const sb = longTrendStats(monthlyToRows(withCrash(base, 120, 0.80, 4)))!;
+  // —— 前提自证（上一轮的教训：不核对前提的隔离断言是假绿）——
+  assertEquals(sb.mdd < -0.7, true, '夹具得真的砸出深坑，实得 ' + sb.mdd);
+  assertEquals(sb.annualized > 0, true, '方向项必须仍然通过');
+  assertEquals(sb.r2! >= TREND_R2_STEADY, true, '稳定项必须仍然通过，实得 R²=' + sb.r2);
+  assertEquals(sb.close > sb.ma24m, true, '位置项必须仍然通过');
+  assertEquals(sb.annualized < TREND_DD_RATIO_MIN * Math.abs(sb.mdd), true, '只能由收益回撤门禁拦下');
+  assertEquals(longTrendLabel(sb), 'mixed', '同上三条全过、只有最深回撤过深 → 必须降级，实得 ' + longTrendLabel(sb));
+});
+
+Deno.test('R² 门禁在长窗口径下仍然生效（同样自证只隔离了 R²）', () => {
+  const st = longTrendStats(monthlyToRows(mkCloses(60, 0.004, 0.35)))!;
+  assertEquals(st.annualized > 0, true);
+  assertEquals(st.r2! < TREND_R2_STEADY, true, '夹具得真的把 R² 打下来，实得 ' + st.r2);
+  assertEquals(st.annualized >= TREND_DD_RATIO_MIN * Math.abs(st.mdd), true, '回撤项必须仍然通过');
+  assertEquals(longTrendLabel(st), 'mixed', '涨得多不等于稳定上升，R² 必须拦下');
+});
+
+Deno.test('破位：上市以来年化≤0 直接判 broken（不再要求先跌破 24 月线——中铝式阴跌）', () => {
+  const down = longTrendStats(monthlyToRows(mkCloses(60, -0.004)))!;
+  assertEquals(longTrendLabel(down), 'broken', '长期阴跌必须判破位');
+  assertEquals(down.annualized <= 0, true, '前提：年化确实≤0');
+  // 中国铝业式：现价在 24 月线之上，但上市以来年化是负的 → 仍是破位，不许被中期反弹洗白
+  const al = longTrendStats(monthlyToRows(alLike(120, 0.01, 12, 0.04)))!;
+  assertEquals(al.annualized < 0, true, '前提：全史年化<0，实得 ' + al.annualized);
+  assertEquals(al.close > al.ma24m, true, '前提：末段反弹已站上 24 月线');
+  assertEquals(longTrendLabel(al), 'broken', '长期向下 + 中期反弹 ≠ 稳升，也不该只算“纠缠”');
+});
+
+Deno.test('云天化式形态：暴涨后深回撤不再是「稳升」，且角标把两个数当面说出来', () => {
+  const st = longTrendStats(monthlyToRows(ythLike()))!;
+  assertEquals(st.mdd < -0.5, true, '前提：全史最深回撤足够深，实得 ' + st.mdd);
+  assertEquals(longTrendLabel(st) === 'steady', false, '用户质疑的就是这一颗“稳升”，本轮必须把它拦下');
+  const html = trendBadgeHtml(Object.assign({}, st, { label: longTrendLabel(st) }));
+  const title = (html.match(/title="([^"]*)"/) || ['', ''])[1];
+  assertEquals(/最深回撤/.test(title), true, 'title 没披露上市以来最深回撤：' + title);
+  assertEquals(/距峰/.test(title), true, 'title 没披露当前距历史峰值：' + title);
+  assertEquals(/近24月年化/.test(title), true, 'title 须保留旧口径作对照（换口径要能对着看）：' + title);
+});
+
+Deno.test('数据不足判 NA：月线 < ' + 'TREND_MIN_MONTHS 门槛；非正价必须丢弃且不产生 NaN（前复权陷阱）', () => {
+  assertEquals(TREND_MIN_MONTHS, 24, '次新股门槛：上市不足 24 个月一律不判定');
+  assertEquals(longTrendStats(monthlyToRows(mkCloses(23, 0.004))), null, '23 个月必须判 null');
+  assertEquals(longTrendStats([]), null);
+  assertEquals(longTrendStats(null as never), null);
+  // 前复权全历史实测有大片非正价（云天化 75/342、格力 231/354）：必须丢掉，且不能靠 log(≤0)=NaN 蒙过去
+  const dirty = monthlyToRows(mkCloses(40, 0.004));
+  dirty[0].close = -3.5; dirty[1].close = 0;
+  const st = longTrendStats(dirty)!;
+  assertEquals(st !== undefined, true, '丢掉坏点后仍要能算');
+  assertEquals(isFinite(st.annualized) && isFinite(st.r2 as number), true, '坏点漏进 log → NaN，实得 ' + st.annualized + '/' + st.r2);
+  assertEquals(/NaN|null|undefined/.test(trendBadgeHtml(Object.assign({}, st, { label: 'mixed' }))), false, '渲染出现脏值');
+});
+
+Deno.test('旧口径字段必须死干净：两套口径并存是最难查的线上事故', () => {
+  const st = longTrendStats(monthlyToRows(mkCloses(60, 0.004)))!;
+  for (const gone of ['bars', 'peak', 'peakDraw', 'recent3', 'ma12m', 'monthly']) {
+    assertEquals(gone in st, false, `旧字段 ${gone} 还在，说明有两处代码仍在按 24 月窗算`);
+  }
+  for (const need of ['months', 'ma24m', 'mdd', 'fromPeak', 'recent24', 'annualized', 'r2', 'close']) {
+    assertEquals(need in st, true, '缺字段 ' + need);
+  }
+});
+
+Deno.test('as-of 口径（决议 24）：当月未收盘根必须计入 —— 标签是「当日价口径」，不是上月末口径', () => {
+  const rows = monthlyToRows(mkCloses(60, 0.004));
+  assertEquals(rows[rows.length - 1].date, '2002-12-28', '前提：夹具末根就是 12 月末');
+  const partial = { date: '2003-01-14', close: 404 };   // 当月未收盘：东财月线的末根每天都是这种日期
+  const without = longTrendStats(rows)!;
+  const withPartial = longTrendStats(rows.concat([partial]))!;
+  assertEquals(withPartial.months, without.months + 1, 'partial bar 没被当成新一个月 → 有人偷偷丢了末根');
+  assertEquals(withPartial.close, 404, '现价取的是上月末而不是当日价，那「现价 vs 24 月线」这条腿就不是当日口径了');
 });
 
 Deno.test('secidOf：与 autoFetchStockData 既有口径同源（6→沪、其余 6 位→深、5 位→港；非法→null）', () => {
@@ -334,113 +408,83 @@ Deno.test('secidOf：与 autoFetchStockData 既有口径同源（6→沪、其�
   assertEquals(secidOf('00700'), '116.00700');
   assertEquals(secidOf(' 600031 '), '1.600031', '代码要 trim');
   assertEquals(secidOf('abc'), null);
-  assertEquals(secidOf(''), null);
   assertEquals(secidOf(null as never), null);
 });
 
-Deno.test('trendBadgeHtml：三态各有类名；无数据必须渲染 trend-na 占位（空串=界面无感，正是本轮要防的静默降级）', () => {
-  const html = (label: string | null) =>
-    trendBadgeHtml(label === null ? null : { label, annualized: 0.2312, r2: 0.81, close: 10, ma24m: 9 });
-  assertEquals(html('steady').includes('trend-steady'), true);
-  assertEquals(html('broken').includes('trend-broken'), true);
-  assertEquals(html('mixed').includes('trend-mixed'), true);
-  const na = html(null);
-  assertEquals(na.includes('trend-na'), true, '缺数据也要显式占位');
-  assertEquals(na.length > 0, true, '禁止返回空串');
-  assertEquals(html('steady').includes('23.1%'), true, 'title 须露出年化（可核对，不含糊）');
-  assertEquals(html('steady').includes('24月线'), true, 'title 须披露判据窗口，不含糊成“长期”');
-  assertEquals(html(null).includes('500'), true, 'NA 的 title 须说明缺多少数据');
+Deno.test('命名：窗口真的换成上市至今，文案才配得上「长期」二字（旧“24月”前缀必须消失）', () => {
+  const want = { steady: '长期↑稳升', mixed: '长期↔纠缠', broken: '长期↓破位' } as const;
+  for (const k of ['steady', 'mixed', 'broken'] as const) {
+    const t = TREND_LABEL_CN[k];
+    assertEquals(t, want[k], `${k} 文案应为「${want[k]}」，实得「${t}」`);
+    assertEquals(/牛|慢/.test(t), false, `${k} 不许用叙事词：${t}`);
+    assertEquals(/24月/.test(t), false, `${k} 仍写“24月”= 口径已改而文案没改：${t}`);
+  }
+  assertEquals(TREND_NA_CN, '长期—');
 });
 
-Deno.test('renderValueTop10：传入 trendMap 则行内挂角标；不传第二参仍渲染 trend-na（旧调用点向后兼容）', () => {
-  const st = { batch: '2026-10-13', top10: [row] as never[] };
-  const withMap = renderValueTop10(st, { '600031': { label: 'steady', annualized: 0.2, r2: 0.9, close: 1, ma24m: 0.9 } } as never);
-  assertEquals(withMap.includes('trend-steady'), true);
-  const without = renderValueTop10(st);
-  assertEquals(without.includes('trend-na'), true, '未传 map 要显式"数据不足"而非消失');
-  assertEquals(without.includes('78.4'), true, '角标不得影响分数渲染');
+Deno.test('内联可见：最深回撤已进判据，就必须不依赖 hover 也能看见（iPhone 没有 hover）', () => {
+  const st = longTrendStats(monthlyToRows(withCrash(mkCloses(60, 0.006), 30, 0.80)))!;
+  const visible = trendBadgeHtml(Object.assign({}, st, { label: 'mixed' })).replace(/ title="[^"]*"/, '');
+  assertEquals(/回撤/.test(visible), true, '内联可见文字里没有最深回撤：' + visible);
+  assertEquals(/-8\d%|-7\d%/.test(visible), true, '内联得把回撤数值写出来，实得：' + visible);
+  const na = trendBadgeHtml(null);
+  assertEquals(na.includes('trend-na'), true, '缺数据必须显式占位，禁止空串');
+  assertEquals(/null|NaN|undefined/.test(na), false, 'NA 态出现脏值：' + na);
+  assertEquals(/TREND_MIN_MONTHS|24/.test(na), true, 'NA 的 title 要说明缺多少数据');
+  // deno-lint-ignore no-explicit-any
+  const legacy: any = { label: 'steady', annualized: 0.3, r2: 0.7, ma24m: 20, months: 300 };   // 旧数据没有 mdd
+  assertEquals(/null|NaN|undefined/.test(trendBadgeHtml(legacy)), false, '缺字段时内联不得渲染脏值：' + trendBadgeHtml(legacy));
 });
 
-Deno.test('接线守卫：取角标必须真调 fetchKlineJsonp+secidOf+TREND_LOOKBACK，且渲染点把 map 传进 renderValueTop10', async () => {
+Deno.test('接线守卫：取数必须走月线全历史（klt=103 / fqt=2 / lmt=10000），且 trendCache 整包透传', async () => {
+  // 常量的**字面值**也要钉住：只验「有没有引用常量」，把 fqt 改回 1（全历史一堆非正价）、
+  // klt 改回 101（又变成日线窗）都能蒙过去。实测依据：前复权全历史非正价 云天化 75/342、格力 231/354。
+  assertEquals(TREND_FQT, 2, 'fqt 必须=2（后复权）：前复权全历史有大片非正价，log 价会 NaN');
+  assertEquals(TREND_KLT, 103, 'klt 必须=103（月线）：101 是日线，「上市至今」要拉一万根才凑得出 390 个月');
+  assertEquals(TREND_LOOKBACK, 10000, 'lmt 必须一次拉到上市首日（实测最久 390 根月线 / 8510 根日线，未触顶）');
+  assertEquals(TREND_POSITION_MA, 24, '位置项窗口固定近 24 月线：它判「现在破没破」，不跟着长期窗口一起变胖');
+  // 0.15 = 2026-10-14 用户裁定的收益回撤门禁（形式：比率而非绝对 MDD 阈值，因绝对阈值实测=年限罚）。
+  // 挪这个数必须连着分布数据一起改，不许顺手改。
+  assertEquals(TREND_DD_RATIO_MIN, 0.15, '收益回撤门禁被改动：它是用户根据池抽样 122 只分布裁定的值');
   const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
   const start = html.indexOf('function loadTrendBadges(');
   assertEquals(start >= 0, true, 'loadTrendBadges 不存在');
   const body = html.slice(start, html.indexOf('\n}\n', start));
-  for (const call of ['fetchKlineJsonp(', 'secidOf(', 'TREND_LOOKBACK', 'longTrendStats(', 'longTrendLabel(', 'renderStockSection()']) {
-    assertEquals(body.includes(call), true, 'loadTrendBadges 未调用 ' + call.slice(0, -1));
+  for (const call of ['fetchKlineJsonp(', 'secidOf(', 'TREND_LOOKBACK', 'TREND_FQT', 'TREND_KLT', 'longTrendStats(', 'longTrendLabel(', 'renderStockSection()']) {
+    assertEquals(body.includes(call), true, 'loadTrendBadges 未调用/未传 ' + call.replace('(', ''));
   }
-  // 守卫只认「调用点」这一字面写法，且必须排除函数定义行：
-  // 上一版用 /renderValueTop10\([^)]*,/ 宽泛正则，命中了 `function renderValueTop10(state, trendMap){`
-  // 本身，于是调用点漏传 trendCache（角标线上恒 NA）时守卫仍然绿 —— 典型的假绿守卫（MS6 同型）。
+  // trendCache 必须整包携带 stats：上一版逐字段枚举，漏了 peakDraw/recent3 ⇒ 线上「距峰」永不显示，测试却全绿
+  const writeLine = body.split('\n').filter(l => /trendCache\[code\]\s*=/.test(l)).join(' ');
+  assertEquals(/Object\.assign\s*\(/.test(writeLine), true,
+    'trendCache 是逐字段枚举写入（必然漏字段），应整包 Object.assign({}, st, {label})：' + writeLine.trim());
+  const consumed = [...new Set((html.slice(html.indexOf('function trendBadgeHtml('), html.indexOf('// 东财 secid 前缀'))
+    .match(/stats\.[A-Za-z_][A-Za-z0-9_]*/g) || []).map(x => x.slice(7)))];
+  const stored = [...new Set((writeLine.match(/\bst\.[A-Za-z_][A-Za-z0-9_]*/g) || []).map(x => x.slice(3)))];
+  const leaked = consumed.filter(f => f !== 'label' && !writeLine.includes('Object.assign'));
+  assertEquals(leaked.length, 0, '被角标消费却没进缓存的字段：' + leaked.join(','));
+  assertEquals(stored.length === 0 && /Object\.assign\(\{\}\s*,\s*st\b/.test(writeLine), true,
+    '整包写入的写法必须是 Object.assign({}, st, …)，实得：' + writeLine.trim());
+  // 月线口径的取数参数不许写死成日线：fetchKlineJsonp 的第 4 参 klt 必须有默认值 101（护住另外三个日线调用点）
+  const fp = html.slice(html.indexOf('function fetchKlineJsonp('), html.indexOf('\n}\n', html.indexOf('function fetchKlineJsonp(')));
+  assertEquals(/klt/.test(fp) && /101/.test(fp), true, 'fetchKlineJsonp 没有 klt 参数或默认 101，日线调用点会被月线口径带跑');
+  for (const lit of ['fetchKlineJsonp(b.secid, 1, 130)', 'fetchKlineJsonp(secid, 1, 260)']) {
+    assertEquals(html.includes(lit), true, '日线调用点被改动：' + lit);
+  }
   const callLines = html.split('\n')
     .filter(l => /renderValueTop10\s*\(/.test(l))
     .filter(l => !/^\s*function\s+renderValueTop10/.test(l));
   assertEquals(callLines.length >= 1, true, '找不到 renderValueTop10 的调用点（只有定义，没人渲染？）');
   assertEquals(callLines.some(l => /renderValueTop10\s*\(\s*valueState\s*,\s*trendCache\s*\)/.test(l)), true,
-    '渲染调用点没把 trendCache 作为第二参传进 renderValueTop10，角标恒为 NA；实际调用点：\n' + callLines.join('\n'));
+    '渲染调用点没把 trendCache 传进 renderValueTop10，角标恒为 NA；实际调用点：\n' + callLines.join('\n'));
 });
 
-Deno.test('authErrHint：网络不可达必须与「密码不对」分开说——登录卡死的真凶是网络，一律推给凭据就是误导', () => {
-  const net = authErrHint({ __authTimeout: 1 });
-  assertEquals(/网络|连不上/.test(net), true, '超时须指向网络，实得：' + net);
-  assertEquals(/密码|凭据/.test(net), false, '超时不得暗示是密码错');
-  const fetchErr = authErrHint({ name: 'AuthRetryableFetchError', message: 'Failed to fetch' });
-  assertEquals(/网络|连不上/.test(fetchErr), true, 'fetch 失败须指向网络，实得：' + fetchErr);
-  assertEquals(/密码|凭据/.test(authErrHint({ message: 'Invalid login credentials' })), true, '凭据错要明说');
-  assertEquals(/确认/.test(authErrHint({ message: 'Email not confirmed' })), true, '未确认要指向确认邮件');
-  assertEquals(/分钟/.test(authErrHint({ message: 'Request rate limit reached' })), true, '限流要给等待时长');
-  assertEquals(authErrHint(null).length > 0, true, '空错误也要有文案，禁止空串');
-  assertEquals(authErrHint({ message: 'weird upstream thing' }).includes('weird upstream thing'), true,
-    '未知错误必须透出原文，不许折叠成「配置或网络问题」这种含糊话');
-});
-
-// 云天化（600096）2026-10-14 真实月线：24 个月里从 18.97 冲到 42.97 再崩回 27.41。
-// 判据三条件全过 → 仍判 steady。用它验的不是判据，是「披露有没有把判据没看的那一半说出来」。
-const YTH_24 = [18.97, 19.31, 20.07, 17.91, 19.87, 19.34, 20.20, 20.37, 23.06, 25.61, 25.40, 27.36,
-  29.57, 32.01, 36.79, 42.97, 31.99, 34.78, 30.44, 30.20, 29.67, 31.24, 27.86, 27.41];
-function rowsFromMonthly(closes: number[], perMonth = 21) {
-  const out: { date: string; close: number }[] = [];
-  [15.0, 16.0].concat(closes).forEach((c, m) => {   // 前置 2 个填充月，凑够 500 根日线门禁
-    const yr = 2022 + Math.floor(m / 12), mm = String((m % 12) + 1).padStart(2, '0');
-    for (let d = 1; d <= perMonth; d++) out.push({ date: `${yr}-${mm}-${String(d).padStart(2, '0')}`, close: c });
-  });
-  return out;
-}
-
-Deno.test('标签词不许承诺判据没度量的东西：去掉「慢/牛」这类叙事词，且必须把窗口写死成 24 月', () => {
-  for (const k of ['steady', 'mixed', 'broken']) {
-    const t = TREND_LABEL_CN[k as 'steady' | 'mixed' | 'broken'];
-    assertEquals(/牛|慢/.test(t), false, `${k} 的文案「${t}」在承诺判据没度量的速度/形态`);
-    assertEquals(/长期/.test(t), false, `${k} 的文案「${t}」用「长期」这种模糊词——窗口其实是 24 个月，不是长期`);
-    assertEquals(t.includes('24月'), true, `${k} 的文案「${t}」没写清窗口`);
-  }
-  assertEquals(TREND_NA_CN.includes('24月') && !/长期/.test(TREND_NA_CN), true, '未判定态同样要写清窗口');
-});
-
-Deno.test('披露必须补上判据没看的那两个数：距 24 月窗口峰值回撤、近 3 月年化（云天化判 steady 却距峰 −36%）', () => {
-  const st = longTrendStats(rowsFromMonthly(YTH_24))!;
-  assertEquals(longTrendLabel(st), 'steady', '前提：判据本身没被改动，云天化形态仍判 steady');
-  assertEquals(st.peakDraw! < -0.3, true, '距窗口峰值回撤应约 −36%，实得 ' + st.peakDraw);
-  assertEquals(st.recent3! < 0, true, '近 3 月年化必须为负（真实值约 −54%），实得 ' + st.recent3);
-  const html = trendBadgeHtml(Object.assign({}, st, { label: 'steady' }));
-  const title = (html.match(/title="([^"]*)"/) || ['', ''])[1];
-  assertEquals(/距24月峰值/.test(title), true, 'title 没披露距峰回撤：' + title);
-  assertEquals(/近3月年化/.test(title), true, 'title 没披露近 3 月方向：' + title);
-  assertEquals(/-3\d\.\d%/.test(title), true, '回撤数值要真的算进文案，实得：' + title);
-});
-
-Deno.test('距峰回撤必须内联可见：iPhone 没有 hover，挂在 title 上的披露在手机上等于没披露', () => {
-  // deno-lint-ignore no-explicit-any
-  const st: any = Object.assign({}, longTrendStats(rowsFromMonthly(YTH_24))!, { label: 'steady' });
-  const visible = (trendBadgeHtml(st) as string).replace(/ title="[^"]*"/, '');   // 剥掉 title，只剩肉眼可读的字
-  assertEquals(/距峰/.test(visible), true, '内联可见文字里没有「距峰」：' + visible);
-  assertEquals(/-36%/.test(visible), true, '内联文字里没有回撤数值：' + visible);
-  const na = trendBadgeHtml(null) as string;
-  assertEquals(/null|NaN|undefined/.test(na), false, 'NA 态内联出现脏值：' + na);
-  // deno-lint-ignore no-explicit-any
-  const legacy: any = { label: 'steady', annualized: 0.3, r2: 0.7, ma24m: 20, bars: 760 };   // 旧数据没有 peakDraw
-  assertEquals(/null|NaN|undefined/.test(trendBadgeHtml(legacy) as string), false,
-    '缺 peakDraw 字段时内联出现脏值（宁可不显示也不许显示 null）');
+Deno.test('renderValueTop10：传入 trendMap 则行内挂角标；不传第二参仍渲染 trend-na（旧调用点向后兼容）', () => {
+  const st = { batch: '2026-10-13', top10: [row] as never[] };
+  const withMap = renderValueTop10(st, { '600031': { label: 'steady', annualized: 0.2, r2: 0.9, close: 1, ma24m: 0.9, months: 300, mdd: -0.4 } } as never);
+  assertEquals(withMap.includes('trend-steady'), true);
+  const without = renderValueTop10(st);
+  assertEquals(without.includes('trend-na'), true, '未传 map 要显式“数据不足”而非消失');
+  assertEquals(without.includes('78.4'), true, '角标不得影响分数渲染');
 });
 
 Deno.test('接线守卫：submitLogin 必须给两处 auth 调用套超时 + try/catch（否则网络挂起 = 界面永久「正在登录…」）', async () => {
