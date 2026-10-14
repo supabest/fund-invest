@@ -3,7 +3,7 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueTop10,
   LEG_PAGE_SIZE, legOrderOpts, legFilter, legRange, legHasMore, legTiebreakCol,
   TREND_LOOKBACK, TREND_KLT, TREND_FQT, TREND_MIN_MONTHS, TREND_POSITION_MA, TREND_R2_STEADY, TREND_DD_RATIO_MIN,
-  monthEndCloses, olsLogTrend, longTrendStats, longTrendLabel,
+  monthEndCloses, olsLogTrend, longTrendStats, longTrendLabel, brokenLegOf,
   trendBadgeHtml, secidOf, AUTH_TIMEOUT_MS, authErrHint,
   TREND_LABEL_CN, TREND_NA_CN } from "./value_leg_logic.ts";
 
@@ -365,6 +365,60 @@ Deno.test('云天化式形态：暴涨后深回撤不再是「稳升」，且角
   assertEquals(/最深回撤/.test(title), true, 'title 没披露上市以来最深回撤：' + title);
   assertEquals(/距峰/.test(title), true, 'title 没披露当前距历史峰值：' + title);
   assertEquals(/近24月年化/.test(title), true, 'title 须保留旧口径作对照（换口径要能对着看）：' + title);
+});
+
+// 拆腿夹具：长期上行 + 末段 24 月阴跌 → 全史年化仍>0，但现价破 24 月线且近端也在跌（珀莱雅/泸州老窖式）
+function tailDown(months: number, step: number, tailN: number, tailStep: number) {
+  const out = mkCloses(months - tailN, step);
+  let p = out[out.length - 1];
+  for (let i = 0; i < tailN; i++) { out.push(p); p *= (1 + tailStep); }
+  return out;
+}
+function withLabel(closes: number[]) {
+  const st = longTrendStats(monthlyToRows(closes))!;
+  return Object.assign({}, st, { label: longTrendLabel(st) });
+}
+
+Deno.test('破位拆腿（2026-10-14 取证后用户裁定：只披露、不进分数、标签一字未动）：两条腿必须能被分开说清', () => {
+  const down = withLabel(mkCloses(60, -0.004));
+  assertEquals(down.annualized <= 0, true, '前提：阴跌式夹具年化≤0');
+  assertEquals(down.label, 'broken', '前提：仍判破位');
+  assertEquals(brokenLegOf(down as never), 'annualized');
+  const al = withLabel(alLike(120, 0.01, 12, 0.04));            // 中铝式：全史年化负，但已站上 24 月线
+  assertEquals(al.annualized < 0, true, '前提：全史年化<0，实得 ' + al.annualized);
+  assertEquals(al.close > al.ma24m, true, '前提：中期反弹已站上 24 月线');
+  assertEquals(al.label, 'broken', '前提：本轮没改判据，它仍判破位');
+  assertEquals(brokenLegOf(al as never), 'annualized',
+    '起点污染那一类（2007 顶部上市→全史年化负）必须与「正在走弱」分开显示，否则用户只看到一颗笼统的破位');
+  const rec = withLabel(tailDown(300, 0.004, 24, -0.02));       // 珀莱雅式：年化>0 但破线且近端在跌
+  assertEquals(rec.annualized > 0, true, '前提：长期年化仍>0，实得 ' + rec.annualized);
+  assertEquals(rec.close < rec.ma24m, true, '前提：现价已破 24 月线');
+  assertEquals((rec.recent24 as number) <= 0, true, '前提：近 24 月年化≤0，实得 ' + rec.recent24);
+  assertEquals(rec.label, 'broken', '前提：仍判破位');
+  assertEquals(brokenLegOf(rec as never), 'recent');
+  for (const closes of [mkCloses(60, 0.004), mkCloses(60, 0.004, 0.35)]) {
+    const st = withLabel(closes);
+    assertEquals(st.label === 'broken', false, '夹具得真的不是破位，实得 ' + st.label);
+    assertEquals(brokenLegOf(st as never), null, '非破位不得带破位归因');
+  }
+  assertEquals(brokenLegOf(null as never), null);
+  assertEquals(brokenLegOf({ label: 'broken' } as never), null, '缺 annualized 时不许把「未知」说成某条腿');
+});
+
+Deno.test('拆腿要进内联、不是只挂 title：iPhone 无 hover，「为什么破位」必须当面可读', () => {
+  const visible = (h: string) => h.replace(/ title="[^"]*"/g, '');
+  const htmlA = visible(trendBadgeHtml(withLabel(alLike(120, 0.01, 12, 0.04)) as never));
+  assertEquals(/破位因·上市以来年化/.test(htmlA), true, '年化腿的内联缺失：' + htmlA);
+  const htmlR = visible(trendBadgeHtml(withLabel(tailDown(300, 0.004, 24, -0.02)) as never));
+  assertEquals(/破位因·破24月线/.test(htmlR), true, '近端腿的内联缺失：' + htmlR);
+  assertEquals(/近24月年化\s*-?\d/.test(htmlR), true, '近端腿必须把近 24 月的数值当面写出来：' + htmlR);
+  assertEquals(/破位因·上市以来年化/.test(htmlR), false, '两条腿的文案串了：' + htmlR);
+  assertEquals(/破位因/.test(visible(trendBadgeHtml(withLabel(mkCloses(60, 0.004)) as never))), false, '稳升不许带破位归因');
+  // deno-lint-ignore no-explicit-any
+  const legacy: any = { label: 'broken', annualized: -0.038, r2: 0.15, close: 1, ma24m: 20, months: 231, mdd: -0.94 };
+  assertEquals(/null|NaN|undefined/.test(trendBadgeHtml(legacy)), false, '旧缓存缺字段时内联不得出脏值：' + trendBadgeHtml(legacy));
+  const titleR = (trendBadgeHtml(withLabel(tailDown(300, 0.004, 24, -0.02)) as never).match(/title="([^"]*)"/) || ['', ''])[1];
+  assertEquals(/破位归因/.test(titleR), true, '桌面 hover 也要给同一条归因：' + titleR);
 });
 
 Deno.test('数据不足判 NA：月线 < ' + 'TREND_MIN_MONTHS 门槛；非正价必须丢弃且不产生 NaN（前复权陷阱）', () => {

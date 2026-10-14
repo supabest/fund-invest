@@ -170,6 +170,7 @@
   .trend-broken{background:rgba(200,80,70,.14); color:var(--brick); border-color:rgba(200,80,70,.3);}
   .trend-na{background:transparent; color:var(--muted); border-style:dashed; border-color:rgba(255,255,255,.15);}
   .trend-draw{font-size:10px; color:var(--muted); margin-left:5px; white-space:nowrap; opacity:.85;} /* 内联披露：iPhone 无 hover，只挂 title 等于没说 */
+  .trend-why{font-size:10px; color:var(--muted); margin-left:5px; white-space:nowrap; opacity:.85;} /* 破位拆腿：同一条纪律——「为什么破位」不许只活在 hover 里 */
   .score-pill-warn{color:var(--gold);}
   .score-detail{background:var(--panel-2); border-radius:10px; padding:12px; margin-bottom:14px;}
   .score-detail .score-summary{font-size:11.5px; color:var(--muted); margin-top:8px; line-height:1.8;}
@@ -1070,11 +1071,29 @@ function longTrendLabel(s){
   return 'mixed';
 }
 
+// 破位拆腿（2026-10-14 前视取证后用户裁定：只披露、不进分数、标签一字未动）
+// 分支顺序必须与 longTrendLabel 的两个 if 逐字对齐，否则「页面说的腿」和「判据用的腿」会分成两套。
+// 取证结论：年化≤0 这条腿历史上是跑赢组（12 月中位超额 +2.3%~+5.9%），它里面装着中国铝业式「顶部上市起点污染」
+// （2007-04 上市 → 全史年化 −3.8% → 永久破位，但现价在 24 月线上方、近 24 月年化 +27.9%）；
+// 只有「破 24 月线且近端在跌」这条腿四个窗口全带负号（−1~−3pp/年）。所以拆开来当面说清，但不据此排除。
+var BROKEN_LEG_CN = {
+  annualized: { tag: '破位因·上市以来年化', key: 'annualized',
+    why: '破位归因：上市以来年化≤0（该腿含顶部上市的起点污染，本轮裁定不据此排除）' },
+  recent: { tag: '破位因·破24月线 近24月年化', key: 'recent24',
+    why: '破位归因：现价破 24 月线且近 24 月年化≤0（取证里唯一稳定跑输的腿）' },
+};
+function brokenLegOf(s){
+  if(!s || s.label !== 'broken') return null;
+  if(!isFinite(Number(s.annualized))) return null;   // 旧缓存缺字段：宁可不归因，也不把「未知」说成某条腿
+  return Number(s.annualized) <= 0 ? 'annualized' : 'recent';
+}
+
 // 角标：三态各有类名；未判定/取数失败一律渲染 trend-na 显式占位（空串=界面无感，正是本轮要防的静默降级）
 // 后复权口径下绝对价不是行情价，所以 title 只报比率与样本，不再报「24月线 26.77」这种会误导的数
 function trendBadgeHtml(stats){
   var known = { steady: 1, mixed: 1, broken: 1 };
   var label = (stats && known[stats.label]) ? stats.label : null;
+  var leg = brokenLegOf(stats);                 // 只有 label==='broken' 才可能拿到腿；其余一律 null
   var num = function(v, d){ return (v === null || v === undefined || !isFinite(Number(v))) ? 'NA' : Number(v).toFixed(d); };
   var pctv = function(v){ return (v === null || v === undefined || !isFinite(Number(v))) ? 'NA' : (Number(v) * 100).toFixed(1) + '%'; };
   var title = label
@@ -1082,6 +1101,7 @@ function trendBadgeHtml(stats){
       + ' · 月线拟合R² ' + num(stats.r2, 2)
       + ' · 最深回撤 ' + pctv(stats.mdd) + ' · 距峰 ' + pctv(stats.fromPeak)
       + ' · 近24月年化 ' + pctv(stats.recent24)
+      + (leg ? ' · ' + BROKEN_LEG_CN[leg].why : '')
       + ' · 样本 ' + num(stats.months, 0) + ' 个月' + (stats.firstYear ? '（' + stats.firstYear + ' 年起，后复权含分红）' : '（起点未知，后复权含分红）')
       + '（纯展示标签，不参与评分与排序）'
     : '长期趋势未判定（月线需满 ' + TREND_MIN_MONTHS + ' 根；次新股/长期停牌/取数失败均归此类）';
@@ -1093,7 +1113,13 @@ function trendBadgeHtml(stats){
     ? '<span class="trend-draw" title="上市以来最深峰谷回撤，已纳入判据">回撤 '
       + (Number(stats.mdd) * 100).toFixed(0) + '%</span>'
     : '';
-  return badge + ddv;
+  // 拆腿同样要当面可读（理由与「回撤」那条一样：iPhone 无 hover）。数值缺失时整段不渲染——宁可不说，也不许说成 null。
+  var legVal = leg ? Number(stats[BROKEN_LEG_CN[leg].key]) : NaN;
+  var why = (leg && isFinite(legVal))
+    ? '<span class="trend-why" title="' + escapeHtml(BROKEN_LEG_CN[leg].why) + '">'
+      + BROKEN_LEG_CN[leg].tag + ' ' + (legVal * 100).toFixed(1) + '%</span>'
+    : '';
+  return badge + why + ddv;
 }
 
 // 东财 secid 前缀：与 autoFetchStockData 既有口径同源，不另立第二套（6→沪 1.、其余 6 位→深 0.、5 位→港 116.）

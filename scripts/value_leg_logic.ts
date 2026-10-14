@@ -3,7 +3,7 @@ const MARKER = /\/\/ ==== VALUE_PURE_BEGIN ====([\s\S]*?)\/\/ ==== VALUE_PURE_EN
 const SHIM = `function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[m])); }\n`;
 const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter', 'legRange', 'legHasMore', 'legTiebreakCol', 'valueFmtPct', 'valueTierLabel', 'valuePillHtml', 'valueGateHtml', 'renderValueTop10', 'SWAP_GAP', 'divergeLists', 'swapSuggest', 'renderDivergeBoard',
   'TREND_LOOKBACK', 'TREND_KLT', 'TREND_FQT', 'TREND_MIN_MONTHS', 'TREND_POSITION_MA', 'TREND_R2_STEADY', 'TREND_DD_RATIO_MIN', 'monthEndCloses', 'olsLogTrend',
-  'longTrendStats', 'longTrendLabel', 'trendBadgeHtml', 'secidOf',
+  'longTrendStats', 'longTrendLabel', 'brokenLegOf', 'trendBadgeHtml', 'secidOf',
   'AUTH_TIMEOUT_MS', 'authErrHint',
   'TREND_LABEL_CN', 'TREND_NA_CN'];
 
@@ -47,6 +47,8 @@ export type TrendStats = { close: number; ma24m: number; months: number; firstYe
   r2: number | null; annualized: number; mdd: number; fromPeak: number; ddRatio: number | null; recent24: number | null };
 export const longTrendStats = NS.longTrendStats as (rows: { date: string; close: number }[] | null) => TrendStats | null;
 export const longTrendLabel = NS.longTrendLabel as (s: TrendStats | null) => 'steady' | 'mixed' | 'broken' | null;
+export type BrokenLeg = 'annualized' | 'recent' | null;
+export const brokenLegOf = NS.brokenLegOf as (s: (TrendStats & { label?: string }) | null) => BrokenLeg;
 export const trendBadgeHtml = NS.trendBadgeHtml as (stats: Record<string, unknown> | null) => string;
 export const secidOf = NS.secidOf as (code: string | null) => string | null;
 export const AUTH_TIMEOUT_MS = NS.AUTH_TIMEOUT_MS as number;
