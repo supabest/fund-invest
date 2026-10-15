@@ -6,6 +6,8 @@ const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter
   'longTrendStats', 'longTrendLabel', 'brokenLegOf', 'trendBadgeHtml',
   'trendNaWhy', 'trendStaleHtml', 'trendStaleDays', 'fetchStatBump', 'trendPick', 'secidOf',
   'AUTH_TIMEOUT_MS', 'authErrHint',
+  'EM_VAL_MIN_ROWS', 'valPctSupported', 'emValUrl', 'valuationPctFromRows', 'valPctCaliber', 'valPctNaWhy',
+  'valPctNeedFetch', 'valPctApply', 'valPctHtml', 'valPctMerge', 'valPctLockNote',
   'TREND_LABEL_CN', 'TREND_NA_CN'];
 
 async function load(): Promise<Record<string, unknown>> {
@@ -63,3 +65,21 @@ export const AUTH_TIMEOUT_MS = NS.AUTH_TIMEOUT_MS as number;
 export const TREND_LABEL_CN = NS.TREND_LABEL_CN as Record<'steady' | 'mixed' | 'broken', string>;
 export const TREND_NA_CN = NS.TREND_NA_CN as string;
 export const authErrHint = NS.authErrHint as (e: { name?: string; message?: string; __authTimeout?: number } | null) => string;
+
+// ---- 估值百分位（2026-10-16 用户裁定 A）----
+export const EM_VAL_MIN_ROWS = NS.EM_VAL_MIN_ROWS as number;
+export const valPctSupported = NS.valPctSupported as (code: string | null) => boolean;
+export const emValUrl = NS.emValUrl as (code: string) => string;
+export type ValPctMeta = { metric: 'PE' | 'PB' | null; pct: number | null; n: number; total: number; dropped: number;
+  from: string | null; to: string | null; cur: number | null; na: string | null; fetchedAt?: string | null };
+// deno-lint-ignore no-explicit-any
+export const valuationPctFromRows = NS.valuationPctFromRows as (rows: any[] | null, code?: string | null) => ValPctMeta;
+export const valPctCaliber = NS.valPctCaliber as (o: ValPctMeta | null) => string;
+export const valPctNaWhy = NS.valPctNaWhy as (o: ValPctMeta | null) => string;
+export const valPctNeedFetch = NS.valPctNeedFetch as (meta: ValPctMeta | null, today: string | null) => boolean;
+// deno-lint-ignore no-explicit-any
+export const valPctApply = NS.valPctApply as (item: any, meta: ValPctMeta) => { write: boolean; value: number | null; note: string };
+export const valPctHtml = NS.valPctHtml as (meta: ValPctMeta | null, today?: string | null) => string;
+// deno-lint-ignore no-explicit-any
+export const valPctMerge = NS.valPctMerge as (prev: Record<string, any> | null, fresh: Record<string, any>) => Record<string, any> | null;
+export const valPctLockNote = NS.valPctLockNote as (used: number | string | null, meta: ValPctMeta | null) => string;

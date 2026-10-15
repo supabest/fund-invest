@@ -1,12 +1,14 @@
 // scripts/value_leg_logic_test.ts
-import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { assertEquals, assertMatch } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueTop10,
   LEG_PAGE_SIZE, legOrderOpts, legFilter, legRange, legHasMore, legTiebreakCol,
   TREND_LOOKBACK, TREND_KLT, TREND_FQT, TREND_MIN_MONTHS, TREND_POSITION_MA, TREND_R2_STEADY, TREND_DD_RATIO_MIN,
   monthEndCloses, olsLogTrend, longTrendStats, longTrendLabel, brokenLegOf,
   trendBadgeHtml, secidOf, AUTH_TIMEOUT_MS, authErrHint,
   TREND_LABEL_CN, TREND_NA_CN,
-  trendNaWhy, trendStaleHtml, trendStaleDays, fetchStatBump, trendPick } from "./value_leg_logic.ts";
+  trendNaWhy, trendStaleHtml, trendStaleDays, fetchStatBump, trendPick,
+  EM_VAL_MIN_ROWS, valPctSupported, emValUrl, valuationPctFromRows, valPctCaliber, valPctNaWhy,
+  valPctNeedFetch, valPctApply, valPctHtml, valPctMerge, valPctLockNote } from "./value_leg_logic.ts";
 
 const row = { code:'600031', name:'潍柴', vq:78.4, tier:'qualified', confidence:'A', vetoed:false,
   owner_yield:6.2, margin_of_safety:4.35, cn10y:1.85, roic_med:18.0, v_moat:80, v_cash:70, v_safety:75, v_health:66,
@@ -667,4 +669,189 @@ Deno.test('持久化接线守卫：成功才写穿 localStorage；回灌必须�
   assertEquals(catchAt >= 0, true, '失败分支形状变了，守卫需要重写');
   assertEquals(/trendStorePut\(|trendStoreSave\(/.test(body.slice(catchAt)), false,
     '失败分支里写了 localStorage —— 失败不得覆盖已有陈旧条目');
+});
+
+// ===================== 估值百分位自动取数（2026-10-16 用户裁定 A）=====================
+// 口径不是设计选择，是 2026-10-15 抽样对账（18 只等距样本）实测出来的四个结论：
+// ① 跨源当期值无争议（东财 vs 腾讯 ΔPE 相对中位 0.01%）；② 5 年窗口 vs 上市至今有 4/10 跨档（Δ最大 24.0pp）；
+// ③ 历史负 PE 让 含负/仅正 两套分位差到 11.3pp 且语义反转（浙能 66.0→59.8 跨档）；
+// ④ 用行业指数分位代理个股：中位误差 19.2pp、64% 跨档、11% 根本没有对应指数。
+// 所以这里只允许「个股自身 + 上市至今（接口地板 2018-01-02）+ 仅正值参与」这一套口径，且必须当面写出来。
+const valDay = (i: number) => { const d = new Date(Date.UTC(2025, 0, 1)); d.setUTCDate(d.getUTCDate() + i); return d.toISOString().slice(0, 10) + ' 00:00:00'; };
+// 120 期真实形态：60 期低于尾部、56 期高于尾部，再叠 4 期具象样本（含 1 期亏损）。
+// 分母必须 ≥EM_VAL_MIN_ROWS —— 否则「样本不足」守卫会先于算式把结果吃掉，那就不是在测算式了。
+const VAL_ROWS = [
+  ...Array.from({ length: 60 }, (_, i) => ({ TRADE_DATE: valDay(i), PE_TTM: 5, PB_MRQ: 0.5 })),
+  ...Array.from({ length: 56 }, (_, i) => ({ TRADE_DATE: valDay(60 + i), PE_TTM: 50, PB_MRQ: 50 })),
+  { TRADE_DATE: '2026-10-12 00:00:00', PE_TTM: -5, PB_MRQ: 4.0 },   // 亏损期：不得进分母
+  { TRADE_DATE: '2026-10-13 00:00:00', PE_TTM: 30, PB_MRQ: 3.0 },
+  { TRADE_DATE: '2026-10-14 00:00:00', PE_TTM: 20, PB_MRQ: 2.0 },
+  { TRADE_DATE: '2026-10-15 00:00:00', PE_TTM: 10, PB_MRQ: 1.0 },
+];
+
+Deno.test('emValUrl：只裁三列、pageSize=5000（老股恒定 2129 期，一页取完 → 无 PostgREST 式截断）', () => {
+  const u = emValUrl('000338');
+  assertEquals(u.includes('RPT_VALUEANALYSIS_DET'), true);
+  assertEquals(u.includes('columns=TRADE_DATE,PE_TTM,PB_MRQ'), true,
+    '必须裁列：全列实测 1.23MB/只，裁三列 160KB —— 持仓 20 首屏差 24MB 与 3.2MB');
+  assertEquals(/columns=[^&]*TOTAL_MARKET/.test(u), false, '夹带无关列就是在给首屏加体积');
+  assertEquals(u.includes('pageSize=5000'), true);
+  assertEquals(u.includes('sortColumns=TRADE_DATE') && /sortTypes=-1/.test(u), true);
+  assertEquals(decodeURIComponent(u).includes('SECURITY_CODE="000338"'), true);
+});
+
+Deno.test('分位公式：(低于 + 0.5×并列)/有效数×100，与仓内既有口径（V1 spec §10）同式', () => {
+  const m = valuationPctFromRows(VAL_ROWS, '000001');
+  assertEquals(m.na, null);
+  assertEquals(m.metric, 'PE');
+  assertEquals(m.n, 119, '负 PE 那期不得进分母');
+  assertEquals(m.dropped, 1, '剔了几期必须当面可查，否则读者无法复算');
+  assertEquals(m.pct, 50.8, '(60 低于 + 0.5×1 并列)/119×100 —— 并列只记半票');
+});
+
+Deno.test('并列的 0.5 票：全序列同值时必须是 50.0，既不是 0 也不是 100', () => {
+  const flat = Array.from({ length: 120 }, (_, i) => ({ TRADE_DATE: valDay(i), PE_TTM: 10, PB_MRQ: 1 }));
+  assertEquals(valuationPctFromRows(flat, '000001').pct, 50);
+});
+
+Deno.test('响应行序不可信：乱序输入必须给同一个分位（GS 键序教训的同型守卫）', () => {
+  const a = valuationPctFromRows(VAL_ROWS, '000001');
+  const b = valuationPctFromRows(VAL_ROWS.slice().reverse(), '000001');
+  assertEquals(b.pct, a.pct);
+  assertEquals(b.from, '2025-01-01');
+  assertEquals(b.to, '2026-10-15');
+});
+
+Deno.test('当期亏损 → 改判 PB 分位，PE 那条一律不出现（博睿/之江实测 PE 为负、分位无意义）', () => {
+  const rows = VAL_ROWS.map(r => ({ ...r, PE_TTM: r.TRADE_DATE.indexOf('2026-10-15') >= 0 ? -22.98 : r.PE_TTM }));
+  const m = valuationPctFromRows(rows, '688229');
+  assertEquals(m.metric, 'PB');
+  assertEquals(m.na, null, 'PB 可用就不是未判定 —— 归成 NA 等于把能算的数扔掉');
+  // 换指标 = 换分母：PB 120 期全正 → n=120、dropped=0（PE 那条的 1 期负值不再相关）；cur=1.0 → (60+0.5×1)/120
+  assertEquals(m.n, 120);
+  assertEquals(m.dropped, 0);
+  assertEquals(m.pct, 50.4);
+  assertEquals(valPctCaliber(m).includes('当期亏损'), true, '改判 PB 必须说明为什么换了指标');
+});
+
+Deno.test('PE 与 PB 当期都不可用 → pct=null，绝不落 0（0 会被 pctTier 读成「低估区·双倍」）', () => {
+  const m = valuationPctFromRows(VAL_ROWS.map(r => ({ ...r, PE_TTM: -1, PB_MRQ: null })), '688229');
+  assertEquals(m.na, 'no_current');
+  assertEquals(m.pct, null);
+});
+
+Deno.test('NA 分口径三态关键词互斥：接口空响应 ≠ 样本不足 ≠ 非 A 股（trendNaWhy 同纪律）', () => {
+  const failed = valuationPctFromRows([], '000338');
+  const short = valuationPctFromRows(
+    Array.from({ length: EM_VAL_MIN_ROWS - 1 }, (_, i) => ({ TRADE_DATE: '2026-01-0' + (1 + (i % 9)) + ' 00:00:00', PE_TTM: 10 + i, PB_MRQ: 1 })), '688545');
+  const notA = valuationPctFromRows(VAL_ROWS, '00700');
+  assertEquals([failed.na, short.na, notA.na], ['failed', 'short', 'not_a_share']);
+  const wF = valPctNaWhy(failed), wS = valPctNaWhy(short), wN = valPctNaWhy(notA);
+  assertEquals(wF.includes('样本不足'), false); assertEquals(wS.includes('样本不足'), true);
+  assertEquals(wS.includes('未取到'), false);   assertEquals(wF.includes('未取到'), true);
+  assertEquals(wN.includes('沪深 A 股'), true);
+  assertEquals(wN.includes('未取到'), false, '把「平台本来就没这标的」报成「取数失败」，人会去反复重试');
+  assertEquals(short.pct, null);
+});
+
+Deno.test('valPctSupported：只认 6 位 A 股代码；港股 5 位/北交所/ETF 实测返回空表（00700、510300 已验证）', () => {
+  assertEquals([valPctSupported('000338'), valPctSupported('688545')], [true, true]);
+  assertEquals([valPctSupported('00700'), valPctSupported('510300'), valPctSupported(''), valPctSupported(null)], [false, false, false, false]);
+});
+
+Deno.test('口径标签：把窗口、期数、剔除数、数据日期一次说全（同一只股两次快照必须可比）', () => {
+  const m = valuationPctFromRows(VAL_ROWS, '000001');
+  const t = valPctCaliber(m);
+  assertEquals(t.includes('PE-TTM'), true);
+  assertEquals(t.includes('119 期'), true);
+  assertEquals(t.includes('2025-01-01') && t.includes('2026-10-15'), true);
+  assertEquals(t.includes('剔除 1 期非正'), true);
+});
+
+Deno.test('当日缓存裁决：今日已取到就不重取；未判定/失败必须重取；跨日必须重取', () => {
+  const ok = { ...valuationPctFromRows(VAL_ROWS, '000001'), fetchedAt: '2026-10-16' };
+  assertEquals(valPctNeedFetch(ok, '2026-10-16'), false);
+  assertEquals(valPctNeedFetch(ok, '2026-10-17'), true, '分位是日频数，隔天不重取就是在拿昨天冒充今天');
+  assertEquals(valPctNeedFetch({ ...ok, na: 'failed' }, '2026-10-16'), true);
+  assertEquals(valPctNeedFetch(null, '2026-10-16'), true);
+  assertEquals(valPctNeedFetch({ ...ok, fetchedAt: null }, '2026-10-16'), true, '缺 fetchedAt 的旧条目一律重取，宁多一次请求');
+});
+
+Deno.test('失败不得擦掉上次成功的分位：valPctMerge 返回 null 表示保留旧条目（trendPick 同纪律）', () => {
+  const good = { ...valuationPctFromRows(VAL_ROWS, '000001'), fetchedAt: '2026-10-16' };
+  const failed = { metric: null, pct: null, n: 0, total: 0, dropped: 0, from: null, to: null, cur: null, na: 'failed', fetchedAt: '2026-10-17' };
+  assertEquals(valPctMerge(good, failed), null, '一次网络抖动就把可用分位降级成 NA，是本轮明确要防的静默失败');
+  assertEquals(valPctMerge(good, good)?.pct, 50.8);
+  assertEquals(valPctMerge(null, failed)?.na, 'failed', '本来就没有旧值时，NA 也得落地 —— 不落地就是界面无感');
+  assertEquals(valPctMerge(null, good)?.pct, 50.8);
+});
+
+Deno.test('人工值优先：手填过分位就不覆盖，只在提示里报自动值（自动读取不得悄悄改用户的输入）', () => {
+  const fresh = { ...valuationPctFromRows(VAL_ROWS, '000001'), fetchedAt: '2026-10-16' };
+  assertEquals(valPctApply({ valuationPercentile: '' }, fresh), { write: true, value: 50.8, note: '' });
+  assertEquals(valPctApply({ valuationPercentile: '50.8', valPctAuto: 50.8 }, fresh), { write: true, value: 50.8, note: '' },
+    '上次是自动填的就该继续由自动刷新接管，否则首屏缓存从此永久冻结');
+  const locked = valPctApply({ valuationPercentile: '5', valPctAuto: 50.8 }, fresh);
+  assertEquals(locked.write, false, '手填 5 被自动 50.8 冲掉 = 悄悄改用户输入');
+  assertEquals(locked.value, 5, '不覆盖时回读人工值，卡片与信号必须看到同一个数');
+  assertEquals(locked.note.includes('50.8'), true, '不覆盖也要把自动算得的数披露出来');
+});
+
+Deno.test('接线守卫：取数→合并→写回→渲染 四跳齐全，且 meta 整包 Object.assign（禁逐字段枚举）', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const bodyOf = (name: string) => {
+    const at = html.indexOf('function ' + name + '(');
+    assertEquals(at >= 0, true, '找不到 ' + name + '，接线守卫需要重写');
+    return html.slice(at, html.indexOf('\n}\n', at));
+  };
+  // 第一跳：URL 与算分位必须同源，否则裁列/pageSize 会在某一跳漂移
+  const io = bodyOf('fetchValuationPct');
+  assertEquals(/emValUrl\(/.test(io), true, '取数没用统一 URL 构造函数');
+  assertEquals(/valuationPctFromRows\(/.test(io), true, '取到响应却没算分位');
+  assertEquals(/AbortSignal\.timeout\(/.test(io), true, '没有硬超时：东财挂起会把整批首屏一起拖住（auth 那轮 15s 教训）');
+  // 第二跳：写回。dom.md 记过的「内联小字从未渲染」就是逐字段枚举造成的
+  const mg = bodyOf('refreshValuationPct');
+  assertEquals(/fetchValuationPct\(/.test(mg), true, '合并层没真去取数');
+  assertEquals(/valPctNeedFetch\(/.test(mg), true, '没走当日缓存判定 —— 每次 focus 重入都会重打 3.2MB');
+  assertEquals(/valPctMerge\(/.test(mg), true, '失败没裁决就写回 —— 一次网络抖动就会把上次成功的分位擦成 NA');
+  assertEquals(/Object\.assign/.test(mg), true, 'meta 逐字段枚举写回 = 字段流向对不上账');
+  // 合并裁决必须真的 gate 住写回：写成 Object.assign({}, fresh) 一样能过上一条，却把「失败不擦好值」退化成一句空话
+  assertEquals(/Object\.assign\(\{\},\s*keep\s*\)/.test(mg), true,
+    '写回的不是 valPctMerge 留下的那一份 —— 一次网络抖动就能把上次成功的分位擦成 NA');
+  assertEquals(/valPctApply\(/.test(mg), true, '没经人工优先裁决就写 valuationPercentile，会悄悄冲掉用户手填值');
+  assertEquals(/\.valuationPercentile\s*=/.test(mg), true, '算了分位却没写进消费字段，双信号与抄底仲裁都看不见');
+  // 分位没动但 fetchedAt 换了，同样得算「有变化」，否则这次写回永不落盘、下一次打开页面又是整批 160KB/只
+  assertEquals(/changed:\s*changed\s*\|\|\s*metaChanged/.test(mg), true,
+    'changed 只统计字段变化、丢掉了缓存刷新 —— 当日缓存从此形同虚设，同一天反复打开就反复重打东财');
+  // 第三、四跳：两个入口 + 渲染
+  assertEquals(/refreshValuationPct\(/.test(bodyOf('autoRefreshStocks')), true, '首屏批量没带估值分位：页面打开自动刷新的既有约定落空');
+  assertEquals(/refreshValuationPct\(/.test(bodyOf('autoFetchStockData')), true, '单只「自动获取行情」没顺手取分位');
+  assertEquals(/valPctHtml\(/.test(bodyOf('dualSignalHtml')), true,
+    '卡片不渲染口径标签 = 同一只股两次快照跳档时，无从判断是估值变了还是口径变了');
+  // 取过数却没分位（NA 三态）时，「两项数据全无」的老早退会把占位一起吞掉 —— 界面无感正是 dom.md 记过的那类缺陷
+  assertEquals(/dd===null\)[\s\S]{0,200}?return chip/.test(bodyOf('dualSignalHtml')), true,
+    '无分位无回撤必须退回「只渲染 NA 占位」，静默返回空串等于把「不适用」和「没取过」都说成没话说');
+  assertEquals(/valPctLockNote\(/.test(bodyOf('dualSignalHtml')), true,
+    '手工值与自动值同时出现在卡片上却没人裁决归属 = 读者把「暂停」归因到那个没在用的数上');
+});
+
+Deno.test('valPctHtml：有值渲染口径 chip；未判定渲染显式占位；跨日必须标陈旧（空串=界面无感，正是本仓库记过的静默降级）', () => {
+  const ok = { ...valuationPctFromRows(VAL_ROWS, '000001'), fetchedAt: '2026-10-16' };
+  assertMatch(valPctHtml(ok, '2026-10-16'), /PE分位 50\.8/);
+  assertEquals(valPctHtml(null, '2026-10-16'), '', '没取过就不显示，别在卡片上加噪音');
+  assertMatch(valPctHtml({ ...ok, na: 'failed' }, '2026-10-16'), /估值分位未取到/);
+  assertMatch(valPctHtml({ ...ok, fetchedAt: '2026-10-13' }, '2026-10-16'), /3 天前/,
+    '三天的分位冒充今天的分位 —— 百分位是日频数，陈旧必须当面说');
+});
+
+Deno.test('自动值与在用值不一致时必须当面说清谁在驱动信号（本地 DOM 实测：手填 85 时 chip 仍显示 PE分位 39.8，读者会把「暂停」归因到 39.8 上）', () => {
+  const auto = { ...valuationPctFromRows(VAL_ROWS, '000001'), fetchedAt: '2026-10-16' };   // 自动算得 50.8
+  assertEquals(valPctLockNote(50.8, auto), '', '两个数一致 = 没话要说，别在卡片上长字');
+  const lock = valPctLockNote(85, auto);
+  assertMatch(lock, /85/, '手工在用的数必须出现');
+  assertMatch(lock, /50\.8/, '自动算得的数也要出现，否则无从对照');
+  assertMatch(lock, /为准/, '得说清是谁在驱动信号 —— 只摆两个数等于没裁决');
+  assertEquals(valPctLockNote(null, auto), '', '没填分位时主文案已经说「未填估值百分位」，这里不重复');
+  assertEquals(valPctLockNote(85, { ...auto, na: 'failed' }), '', 'NA 没有自动值可比，不许造「自动算得 null」这种脏话');
+  assertEquals(valPctLockNote(85, null), '', '从没取过数 = 不存在第二口径，没什么要说');
 });

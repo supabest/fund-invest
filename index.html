@@ -91,6 +91,10 @@
   .dual-strip{display:flex; align-items:center; gap:8px; padding:0 16px 6px 16px; flex-wrap:wrap;}
   .dual-tag{font-size:11px; color:var(--muted); border:1px dashed var(--line-strong); border-radius:4px; padding:2px 6px; white-space:nowrap;}
   .dual-amt{font-size:12px; color:var(--muted);}
+  /* 估值分位口径：数值旁边必须跟着「谁的历史、多长样本、什么口径」，否则同一只股两次快照跳档无从判断 */
+  .valpct-chip{font-size:11px; color:var(--jade); background:var(--jade-dim); border-radius:12px; padding:2px 8px; white-space:nowrap; cursor:help;}
+  .valpct-na{font-size:11px; color:var(--gold); border:1px dashed rgba(255,255,255,.18); border-radius:12px; padding:1px 7px; white-space:nowrap; cursor:help;}
+  .valpct-stale{font-size:10px; color:var(--gold); margin-left:5px; white-space:nowrap; opacity:.8; font-style:normal;} /* 旧值当面声明截止日：与 .trend-stale 同一条纪律 */
 
   .fund-body{border-top:1px solid var(--line); padding:16px; display:none;}
   .fund-body.open{display:block;}
@@ -302,6 +306,9 @@
     .dual-tag{font-size:12.5px;}
     .dual-amt{font-size:13.5px;}
     .dual-strip .signal-pill{font-size:13px;}
+    .valpct-chip{font-size:12.5px;}
+    .valpct-na{font-size:12.5px;}
+    .valpct-stale{font-size:11.5px;}
     .fund-body{padding:20px;}
     .field label{font-size:13px;}
     .field input, .field select{font-size:15px; padding:10px 12px;}
@@ -1227,6 +1234,130 @@ function authErrHint(e){
   if(/email_address_invalid|is invalid/i.test(m)) return '邮箱无效：请使用真实存在的邮箱（QQ/163/Gmail 等），不能随便编一个域名';
   return '登录失败：' + (m || name || '未知错误');   // 未知一律透出原文，不许折叠成「配置或网络问题」这种含糊话
 }
+// ---- 估值百分位自动取数（2026-10-16 用户裁定 A：个股自身 · 上市至今 · 仅正值参与）----
+// 口径不是设计偏好，是 2026-10-15 抽样对账（池内等距抽 18 只）实测出来的四个结论：
+// ① 跨源当期值没有争议：东财估值历史 vs 腾讯实时，ΔPE 相对中位 0.01%、最大 0.10%；
+// ② 窗口会翻档：滚动 5 年 vs 上市至今，非科创样本 4/10 跨档，Δ最大 24.0pp（三一 39.8→15.7、平安 30.6→53.8）；
+// ③ 历史负 PE 既翻档又反转语义：浙能 含负 66.0(减半) vs 仅正 59.8(正常)；世纪华通 11.3 vs 0.0 —— 只有后者
+//    才诚实说出「这是 8.8 年最低」；
+// ④ 拿行业指数分位代理个股被否掉：中位误差 19.2pp、64% 跨档，且 11% 的标的在蛋卷 63 条指数里没有对应行业。
+// 所以这里只允许一套口径，而且必须把口径当面写出来 —— 同一只股两次快照可比的前提，是读者能看出参数没变。
+const EM_VAL_MIN_ROWS = 120;   // 抽样实测最浅 416 期（兴福电子 2025-01 上市），这条只挡上市不满半年的极端次新
+// 只有沪深 A 股才有「该股自身」的估值序列：港股 5 位、ETF（51…）、北交所（83/43/87…）实测接口一律回空表（code 9201）
+function valPctSupported(code){
+  var c = String(code === null || code === undefined ? '' : code).trim();
+  return /^(00|30|60|68)\d{4}$/.test(c);
+}
+// 只裁三列：全列实测 1.23MB/只，裁列 160KB（持仓 20 只首屏差 24MB 与 3.2MB）。pageSize=5000 > 最老样本 2129 期
+// → 一页取完，不存在 PostgREST 式 1000 行静默截断。数据源可达性已在部署页 DOM 级实测：ACAO:*，200 / 2129 行 / 334ms
+function emValUrl(code){
+  return 'https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_VALUEANALYSIS_DET'
+    + '&columns=TRADE_DATE,PE_TTM,PB_MRQ&pageNumber=1&pageSize=5000'
+    + '&sortTypes=-1&sortColumns=TRADE_DATE&source=WEB&client=WEB'
+    + '&filter=' + encodeURIComponent('(SECURITY_CODE="' + String(code).trim() + '")');
+}
+function valPctNum(v){ var x = Number(v); return isFinite(x) ? x : null; }
+function valPctHas(o){ return !!(o && o.pct !== null && o.pct !== undefined); }
+function valuationPctFromRows(rows, code){
+  var out = { metric: null, pct: null, n: 0, total: 0, dropped: 0, from: null, to: null, cur: null, na: null };
+  if(code !== undefined && code !== null && !valPctSupported(code)){ out.na = 'not_a_share'; return out; }
+  var list = (rows && rows.length) ? rows.slice() : [];
+  out.total = list.length;
+  if(!list.length){ out.na = 'failed'; return out; }          // 空响应与网络故障都归这一类，不猜具体原因
+  // 响应键序不可信（GS 宽表撞过的同类坑）：一律按 TRADE_DATE 重排，绝不依赖服务端返回顺序
+  list.sort(function(a, b){
+    var x = String(a && a.TRADE_DATE), y = String(b && b.TRADE_DATE);
+    return x < y ? -1 : x > y ? 1 : 0;
+  });
+  out.from = String(list[0].TRADE_DATE).slice(0, 10);
+  out.to = String(list[list.length - 1].TRADE_DATE).slice(0, 10);
+  if(list.length < EM_VAL_MIN_ROWS){ out.na = 'short'; return out; }
+  var last = list[list.length - 1];
+  var cands = [['PE', 'PE_TTM'], ['PB', 'PB_MRQ']];
+  for(var i = 0; i < cands.length; i++){
+    var key = cands[i][1], cur = valPctNum(last[key]);
+    if(cur === null || cur <= 0) continue;                     // 当期亏损/缺值 → 换下一个指标，绝不是归 0
+    var pos = [];
+    for(var j = 0; j < list.length; j++){ var v = valPctNum(list[j][key]); if(v !== null && v > 0) pos.push(v); }
+    if(!pos.length) continue;
+    var below = 0, ties = 0;
+    for(var k = 0; k < pos.length; k++){ if(pos[k] < cur) below++; else if(pos[k] === cur) ties++; }
+    out.metric = cands[i][0]; out.n = pos.length; out.dropped = list.length - pos.length;
+    out.cur = cur;
+    out.pct = Math.round((below + 0.5 * ties) / pos.length * 1000) / 10;   // 并列各记半票，与 V1 spec §10 同式
+    return out;
+  }
+  out.na = 'no_current';                                       // PE 与 PB 当期都不可用：显式 NA，绝不落 0
+  return out;
+}
+function valPctCaliber(o){
+  if(!o || !o.metric) return '';
+  var name = (o.metric === 'PE' ? 'PE-TTM' : 'PB(MRQ)') + ' 分位';
+  var why = o.metric === 'PB' ? '当期亏损，PE 不适用 · ' : '';
+  var t = why + name + ' · 全样本 ' + o.n + ' 期（' + o.from + '→' + o.to + '）';
+  if(o.dropped > 0) t += ' · 剔除 ' + o.dropped + ' 期非正';
+  return t;
+}
+// NA 三态关键词必须互斥（trendNaWhy 同纪律）：把「平台本来没这标的」报成「取数失败」，人会去反复重试却永远查不到真因
+const VAL_NA_WHY = {
+  failed: '估值分位未取到（接口空响应或网络故障，属本机网络，稍后重开页面自动重取）',
+  short: '估值分位未判定：样本不足（需满 ' + EM_VAL_MIN_ROWS + ' 期；次新股属此类，重取也不会变）',
+  not_a_share: '估值分位不适用：该口径只覆盖沪深 A 股个股（港股/ETF/北交所没有个股估值序列，不会自动出现）',
+  no_current: '估值分位未判定：当期 PE 与 PB 均不可用',
+};
+const VAL_NA_CN = {
+  failed: '估值分位未取到', short: '估值分位样本不足', not_a_share: '估值分位不适用', no_current: '估值分位不可判',
+};
+function valPctNaWhy(o){
+  if(!o || !o.na || !VAL_NA_WHY[o.na]) return '';
+  return VAL_NA_WHY[o.na] + (o.na === 'short' && o.total ? '（实际 ' + o.total + ' 期）' : '');
+}
+// 当日缓存裁决：取到过且没跨日就不重打；未判定不占缓存（这次没取到，下次还得试）
+function valPctNeedFetch(meta, today){
+  if(!meta) return true;
+  if(meta.na || !valPctHas(meta)) return true;
+  var f = String(meta.fetchedAt === null || meta.fetchedAt === undefined ? '' : meta.fetchedAt);
+  return f !== String(today === null || today === undefined ? '' : today);
+}
+// 失败不得擦掉上次成功的分位（trendPick 同纪律）：返回 null = 保留 prev 什么都不写。
+// 但本来就没有旧值时 NA 必须落地 —— 不落地就是界面无感，正是本仓库记过的静默降级。
+function valPctMerge(prev, fresh){
+  if(valPctHas(prev) && !valPctHas(fresh)) return null;
+  return fresh;
+}
+// 人工值优先：手填过分位就不覆盖，只在提示里报自动值。判定「这是不是自动填的」靠 valPctAuto 回读，
+// 不新增第二套状态：上次是自动值 → 继续由自动刷新接管；被人改过 → 锁定。
+function valPctApply(item, meta){
+  var raw = String(item && item.valuationPercentile !== null && item.valuationPercentile !== undefined
+    ? item.valuationPercentile : '').trim();
+  var fresh = valPctHas(meta) ? Math.round(Number(meta.pct) * 10) / 10 : null;
+  if(fresh === null) return { write: false, value: raw === '' ? null : Number(raw), note: valPctNaWhy(meta) };
+  if(raw === '') return { write: true, value: fresh, note: '' };
+  var auto = Math.round(Number(item && item.valPctAuto) * 10) / 10;
+  if(isFinite(auto) && Math.abs(Number(raw) - auto) < 0.05) return { write: true, value: fresh, note: '' };
+  return { write: false, value: Number(raw), note: '估值分位已手工锁定为 ' + Number(raw) + '，未覆盖（自动算得 ' + fresh + '）' };
+}
+// 口径标签：有值渲染 chip + 陈旧截止日；未判定渲染显式占位；从没取过则不渲染（卡片别长噪音）
+function valPctHtml(meta, today){
+  if(!meta) return '';
+  if(meta.na) return '<span class="valpct-na" title="' + valPctNaWhy(meta) + '">' + (VAL_NA_CN[meta.na] || '估值分位未判定') + '</span>';
+  var label = (meta.metric === 'PE' ? 'PE' : 'PB') + '分位 ' + Number(meta.pct).toFixed(1);
+  var d = trendStaleDays(meta.fetchedAt, today);
+  var stale = (isFinite(d) && d > 0)
+    ? '<i class="valpct-stale">截至 ' + String(meta.fetchedAt).slice(5) + '·' + d + ' 天前</i>' : '';
+  return '<span class="valpct-chip" title="' + valPctCaliber(meta) + '">' + label + '</span>' + stale;
+}
+// 自动值与在用值不一致 = 这个数被人手工锁定过。必须当面说清「信号吃的是哪个」：
+// 本地 DOM 实测到手填 85 时 chip 仍显示「PE分位 39.8」，读者会把「综合·暂停」归因到 39.8（那明明落在正常档）。
+function valPctLockNote(used, meta){
+  if(!meta || meta.na || !valPctHas(meta)) return '';                 // 与 valPctHtml 同一条优先：NA 占位说话时不许再报「自动算得 X」
+  var u = (used === null || used === undefined || used === '' || !isFinite(Number(used))) ? null : Number(used);
+  if(u === null) return '';                                         // 未填：主文案已说「未填估值百分位」，不重复
+  var a = Math.round(Number(meta.pct) * 10) / 10;
+  if(Math.abs(u - a) < 0.05) return '';                             // 一致 = 没话要说，卡片别长字
+  return '估值分位以手工值 ' + u.toFixed(1) + ' 为准（自动算得 ' + a + '，两者不一致 → 信号吃的是前者）';
+}
+
 // ==== VALUE_PURE_END ====
 
 // ---- 长期趋势角标取数编排（非纯逻辑：外网 JSONP + 全局缓存 + 重渲染）----
@@ -2452,20 +2583,26 @@ function dualPillClass(label){
   }
 }
 // 卡片上的对照信号条：百分位/回撤两项数据全无时不显示，避免噪音
+// 例外：取过数却没分位（NA 三态）必须当面说出来——整条静默返回空串正是本仓库记过的「界面无感」缺陷
 function dualSignalHtml(item, price, baseAmount){
   const pct = (item.valuationPercentile==='' || item.valuationPercentile===undefined || item.valuationPercentile===null)
     ? null : parseFloat(item.valuationPercentile);
   const dd = drawdownFrom(parseFloat(item.high52w)||0, price);
-  if((pct===null || isNaN(pct)) && dd===null) return '';
+  // 口径 chip 只在自动取数写过 meta 的股票上出现（基金无 valPctMeta → 空串，卡片零噪音）
+  const chip = valPctHtml(item && item.valPctMeta, fmtDateCN(new Date()));
+  if((pct===null || isNaN(pct)) && dd===null){
+    return chip ? '<div class="dual-strip"><span class="dual-tag">估值分位</span>'+chip+'</div>' : '';
+  }
   const d = dualSignal(isNaN(pct)?null:pct, dd);
   const pctPill = d.pctTier ? '<span class="signal-pill '+dualPillClass(d.pctTier.label)+'">百分位·'+d.pctTier.label+'</span>' : '';
   const ddPill = dd!==null
     ? '<span class="signal-pill '+(d.addPct>0?'pill-double':(d.vetoed?'pill-pause':'pill-normal'))+'">回撤'+dd.toFixed(1)+'%'+(d.addPct>0?'·加仓+'+d.addPct+'%':(d.vetoed?'·禁加仓':''))+'</span>'
     : '';
   const amtTxt = (baseAmount>0) ? '<span class="dual-amt">双信号建议 '+fmtMoney(baseAmount*d.total)+'/期（×'+d.total.toFixed(2)+'）</span>' : '';
+  const lock = valPctLockNote(isNaN(pct)?null:pct, item && item.valPctMeta);
   return '<div class="dual-strip"><span class="dual-tag">双信号对照</span>'+pctPill+ddPill
-    + '<span class="signal-pill '+dualPillClass(d.label)+'">综合·'+d.label+'</span>'+amtTxt+'</div>'
-    + '<div class="signal-reason" style="padding-top:0;">' + d.reasons.join('；') + '</div>';
+    + '<span class="signal-pill '+dualPillClass(d.label)+'">综合·'+d.label+'</span>'+amtTxt+chip+'</div>'
+    + '<div class="signal-reason" style="padding-top:0;">' + d.reasons.join('；') + (lock?'；'+lock:'') + '</div>';
 }
 
 function evalFundSignal(f){
@@ -2896,6 +3033,53 @@ function bindStockBody(id){
   body.querySelector('[data-action="fetchStock"]').addEventListener('click', ()=> autoFetchStockData(id));
 }
 
+// 估值分位取数：浏览器直连东财估值分析接口（2026-10-15 在本页 DOM 级实测：ACAO:*，2129 期 / 160KB / 158-234ms 每只）。
+// 绝不用 push2 做批量 —— 本轮实测连打 18 次即被 WAF 掐（主域与 1/2/8/44 备用子域同断，浏览器侧同样 Failed to fetch）。
+const EM_VAL_TIMEOUT_MS = 15000;   // 硬超时：无超时的 fetch 在挂起时既不 reject 也不 resolve，会把整批首屏拖死（auth 那轮同型缺陷）
+const EM_VAL_THROTTLE_MS = 250;    // 首屏批量串行节流：实测 160KB/只，并发打同一域正是被 WAF 掐的触发条件
+async function fetchValuationPct(code){
+  if(!valPctSupported(code)) return valuationPctFromRows(null, code);   // 非沪深 A 股：不发请求，直接给「不适用」
+  const r = await fetch(emValUrl(code), { signal: AbortSignal.timeout(EM_VAL_TIMEOUT_MS) });
+  if(!r.ok) throw new Error('EM val http ' + r.status);
+  const j = await r.json();
+  const rows = (j && j.result && j.result.data) || [];                  // success:false / 返回数据为空 → 空表 → na='failed'
+  const m = valuationPctFromRows(rows, code);
+  m.fetchedAt = fmtDateCN(new Date());                                  // 取数日 ≠ 数据日（asOf/to）：两者都要落，陈旧才判得出来
+  return m;
+}
+// 写回的唯一入口：缓存裁决 → 取数 → 合并 → 人工优先 → 落字段。单只按钮与首屏批量都只走这里，口径不会有第二套。
+async function refreshValuationPct(target, opts){
+  const o = opts || {};
+  const today = fmtDateCN(new Date());
+  if(!o.force && !valPctNeedFetch(target.valPctMeta, today)) return { changed: false, cached: true, note: '' };
+  let fresh;
+  try{
+    fresh = await fetchValuationPct(target.code);
+  }catch(e){
+    fresh = { metric:null, pct:null, n:0, total:0, dropped:0, from:null, to:null, cur:null, na:'failed', fetchedAt: today };
+  }
+  const prevMeta = target.valPctMeta;                                  // 合并前的那一份，用来判「缓存有没有真的换」
+  const keep = valPctMerge(prevMeta, fresh);                            // null = 本轮没取到，保留上次成功的分位
+  if(keep) target.valPctMeta = Object.assign({}, keep);
+  // 分位没动但 fetchedAt 换了 = 缓存刷到新的一天。不报「有变化」就永远不会落盘，下次打开又是整批 160KB/只 ——
+  // 当日缓存由此形同虚设（实测：同一天第二次进页面确实重打了东财两次）。
+  const metaChanged = !!keep && JSON.stringify(prevMeta || null) !== JSON.stringify(target.valPctMeta || null);
+  const applied = valPctApply(target, keep || target.valPctMeta);
+  let changed = false;
+  if(applied.write && applied.value !== null){
+    if(String(target.valuationPercentile) !== String(applied.value)) changed = true;
+    target.valuationPercentile = applied.value;
+    target.valPctAuto = applied.value;                  // 记住「这是自动填的」，下次才敢继续覆盖；被人改过就锁定
+    const input = document.getElementById('sbody-' + target.id);
+    const el = input ? input.querySelector('[data-sk="valuationPercentile"]') : null;
+    if(el) el.value = applied.value;
+  }
+  if(!applied.write && applied.note && applied.value !== null && String(target.valuationPercentile) !== String(applied.value)){
+    target.valuationPercentile = applied.value; changed = true;   // 回读人工值，卡片与信号必须看到同一个数
+  }
+  return { changed: changed || metaChanged, cached: false, note: applied.note };
+}
+
 // 股票行情自动获取：K线 JSONP 多线路轮换（浏览器直连），填名称/现价/均线并静默存档
 function autoFetchStockData(id){
   const s = stocks.find(x=>x.id===id);
@@ -2941,7 +3125,15 @@ function autoFetchStockData(id){
       if(titleEl) titleEl.textContent = target.name || '未命名股票';
       const hInput = body ? body.querySelector('[data-sk="high52w"]') : null;
       if(hInput && high52w!==null) hInput.value = high52w.toFixed(3);
-      setStatus('已获取 '+jname+' '+cur.date+' 收盘价 '+cur.close.toFixed(2)+(ma60?'，MA60='+ma60.toFixed(2):'')+(ma120?'，MA120='+ma120.toFixed(2):'')+(high52w?'，52周高点='+high52w.toFixed(2):'')+'。点击「保存」后卡片同步。', 'var(--jade)');
+      setStatus('行情已获取，正在取估值分位…');
+      // K线与估值分位是两条独立请求：分位挂了不能把已拿到的行情吞掉，所以拼在同一句话里分别口径
+      const klineTxt = '已获取 '+jname+' '+cur.date+' 收盘价 '+cur.close.toFixed(2)+(ma60?'，MA60='+ma60.toFixed(2):'')+(ma120?'，MA120='+ma120.toFixed(2):'')+(high52w?'，52周高点='+high52w.toFixed(2):'');
+      refreshValuationPct(target, {force:true}).then(function(v){
+        if(v.changed) saveStocks();
+        var m = target.valPctMeta;
+        var vTxt = (!m || m.na) ? (valPctNaWhy(m) || '未取到（接口无响应）') : (m.pct + ' · ' + valPctCaliber(m));
+        setStatus(klineTxt + '。估值分位：' + vTxt + (v.note ? '（' + v.note + '）' : '') + '。点击「保存」后卡片同步。', 'var(--jade)');
+      });
   }).catch(()=>{
     setStatus('多线路均获取失败（网络波动）。行情也会由每日定时任务自动更新，稍后打开即为最新。', 'var(--brick)');
   });
@@ -3368,7 +3560,20 @@ async function autoRefreshStocks(){
       updated++;
     }catch(e){}
   }
-  return updated;
+  // 估值分位单独一遍循环：上面那两次 continue（K 线没动 / 表单正打开）都不构成「今天不取分位」的理由 ——
+  // 分位只受自己的当日缓存约束（valPctNeedFetch 在 refreshValuationPct 里裁决），跨日才重取。
+  // 串行 + 250ms 节流是本轮实测换来的：并发打东财正是 push2 被 WAF 掐的那条路（连打 18 次即断）。
+  let valUpdated = 0;
+  for(const s of targets){
+    const body = document.getElementById('sbody-'+s.id);
+    if(body && body.classList.contains('open')) continue;   // 正在编辑的表单不许被自动写值
+    try{
+      const v = await refreshValuationPct(s, {});
+      if(v.changed) valUpdated++;
+      if(!v.cached) await new Promise(function(r){ setTimeout(r, EM_VAL_THROTTLE_MS); });   // 命中当日缓存的不占节流
+    }catch(e){}
+  }
+  return { prices: updated, valuations: valUpdated };
 }
 let autoRefreshRunning = false;
 let autoRefreshAt = 0;
@@ -3376,17 +3581,17 @@ async function autoRefreshAll(force){
   if(autoRefreshRunning) return;
   if(!force && Date.now()-autoRefreshAt < 60000) return; // 限频：60秒内不重复跑（focus 重入保护）
   autoRefreshRunning = true; autoRefreshAt = Date.now();
-  let fN = 0, sN = 0;
+  let fN = 0, sN = 0, vN = 0;
   try{ fN = await autoRefreshFunds(); }catch(e){}
-  try{ sN = await autoRefreshStocks(); }catch(e){}
+  try{ const r = await autoRefreshStocks(); sN = r.prices; vN = r.valuations; }catch(e){}
   loadSectorRotation().catch(()=>{}); // 修复轮2（评审 I1 ②）：仍在刷新序列末尾触发（不新起定时器），但改为 fire-and-forget —— 卡片结果非 saveFunds/Toast 所需，不再把 autoRefreshRunning 锁在≤ 10 个串行 RT 上；同时在飞请求由 sectorReqGuard 序号守卫防竞态
   autoRefreshRunning = false;
-  if(fN + sN > 0){
+  if(fN + sN + vN > 0){
     await saveFunds();
-    if(sN>0) await saveStocks();
+    if(sN + vN > 0) await saveStocks();
     render();
     ensureBenchmarkData();
-    showToast('已自动获取 '+fN+' 只基金净值、'+sN+' 只股票行情（均线与连续天数按完整历史回算）');
+    showToast('已自动获取 '+fN+' 只基金净值、'+sN+' 只股票行情'+(vN>0?'、'+vN+' 只估值分位':'')+'（均线与连续天数按完整历史回算）');
   }
 }
 
