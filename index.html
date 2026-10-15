@@ -171,6 +171,8 @@
   .trend-na{background:transparent; color:var(--muted); border-style:dashed; border-color:rgba(255,255,255,.15);}
   .trend-draw{font-size:10px; color:var(--muted); margin-left:5px; white-space:nowrap; opacity:.85;} /* 内联披露：iPhone 无 hover，只挂 title 等于没说 */
   .trend-why{font-size:10px; color:var(--muted); margin-left:5px; white-space:nowrap; opacity:.85;} /* 破位拆腿：同一条纪律——「为什么破位」不许只活在 hover 里 */
+  .trend-err{font-size:10px; color:var(--gold); margin-left:5px; white-space:nowrap;} /* NA 分口径：断网要看得见，不能和次新股共用一个哑光灰 */
+  .trend-stale{font-size:10px; color:var(--gold); margin-left:5px; white-space:nowrap; opacity:.8;} /* 退回旧值必须当面声明截止日 */
   .score-pill-warn{color:var(--gold);}
   .score-detail{background:var(--panel-2); border-radius:10px; padding:12px; margin-bottom:14px;}
   .score-detail .score-summary{font-size:11.5px; color:var(--muted); margin-top:8px; line-height:1.8;}
@@ -1053,6 +1055,7 @@ function longTrendStats(rows){
   return { close: close,
     ma24m: win.reduce(function(a, b){ return a + b; }, 0) / win.length,
     months: monthly.length, firstYear: arr.length ? parseInt(String(arr[0].date).slice(0, 4), 10) : null,
+    asOf: arr.length ? String(arr[arr.length - 1].date) : null,   // 角标口径的截止日期：缓存回灌时靠它自报「截至哪天」
     slope: t.slope, r2: t.r2, annualized: t.annualized,
     mdd: dd.mdd, fromPeak: dd.fromPeak,
     ddRatio: dd.mdd < 0 ? t.annualized / Math.abs(dd.mdd) : null,
@@ -1088,6 +1091,78 @@ function brokenLegOf(s){
   return Number(s.annualized) <= 0 ? 'annualized' : 'recent';
 }
 
+// ---- NA 分口径（2026-10-15 用户裁定「先第一步」）----
+// 截图里 10 只全「长期—」，用户分不清「本机出口 IP 连不上东财历史 K 线」（重开页面就好）和
+// 「次新股月线不满 24 根」（永远不会有标签）。两种口径的关键词必须互斥，
+// 测试是在**含 title 的整段 HTML** 上断言对方关键词不出现的，改文案前先想清楚这条。
+var TREND_NA_WHY = {
+  failed: { tag: '取数失败',
+    title: '长期趋势未判定：历史 K 线取数失败（东财 push2his 连不上或被限流，属本机网络，稍后重开页面自动重取）' },
+  short: { tag: '数据不足',
+    title: '长期趋势未判定：月线样本不足（需满 ' + TREND_MIN_MONTHS + ' 根；次新股/长期停牌属此类，重取也不会变）' },
+  unknown: { tag: '', title: '长期趋势未判定（月线需满 ' + TREND_MIN_MONTHS + ' 根方可判定，尚未取到，页面会自动重取）' },
+};
+function trendNaKey(stats){
+  if(!stats) return 'unknown';                                   // 还没取数：不猜原因
+  if(TREND_LABEL_CN[stats.label]) return null;                    // 有标签 = 不是 NA
+  if(stats.failed) return 'failed';
+  if(stats.short) return 'short';
+  return 'unknown';
+}
+function trendNaWhy(stats){
+  var k = trendNaKey(stats);
+  return (k && k !== 'unknown') ? '<span class="trend-err">' + TREND_NA_WHY[k].tag + '</span>' : '';
+}
+function trendNaTitle(stats){
+  var k = trendNaKey(stats);
+  var key = (k === 'failed' || k === 'short') ? k : 'unknown';
+  var t = TREND_NA_WHY[key].title;
+  if(key === 'short'){
+    var m = Number(stats && stats.monthly);
+    if(isFinite(m)) t += '（实际 ' + m + ' 根）';
+  }
+  return t;
+}
+
+// 陈旧标注：决议 24 定的是「当日价口径」，所以拿昨天的缓存冒充今天的标签必须当面说出来。
+// 同一天（staleDays=0）不算冒充 → 不标注；缺 asOf/staleDays 的旧条目一律不标注，界面上出现 null 比不标注更糟。
+function trendStaleDays(asOf, today){
+  var a = String(asOf === null || asOf === undefined ? '' : asOf);
+  var b = String(today === null || today === undefined ? '' : today);
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(a) || !/^\d{4}-\d{2}-\d{2}$/.test(b)) return null;
+  var ta = Date.parse(a + 'T00:00:00Z'), tb = Date.parse(b + 'T00:00:00Z');   // UTC：避开时区/夏令时把 15 天漂移成 14/16
+  if(!isFinite(ta) || !isFinite(tb)) return null;
+  var d = Math.round((tb - ta) / 86400000);
+  return d > 0 ? d : 0;                                                          // 本机时钟被回拨也不出负数
+}
+function trendStaleHtml(stats){
+  if(!stats || !stats.stale) return '';
+  var d = Number(stats.staleDays), asOf = String(stats.asOf || '');
+  if(!isFinite(d) || d <= 0 || !/^\d{4}-\d{2}-\d{2}$/.test(asOf)) return '';
+  return '<span class="trend-stale" title="本次重取没成功，这里退回上次成功的月线口径（正常应为当日价口径）">'
+    + '截至 ' + asOf.slice(5) + '·' + d + ' 天前</span>';
+}
+
+// 按日记账取数成败：只累加、不猜、不动其他日期，返回新对象由调用方持久化。
+// 用途单一——「这种情况不能经常发生」是观感，第二步（上备用源）值不值先要有一周的实测数。
+function fetchStatBump(stat, day, ok){
+  var d = String(day || '');
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(d)) return stat || {};
+  var out = Object.assign({}, stat || {});
+  var cur = out[d] || {};
+  out[d] = { ok: (Number(cur.ok) || 0) + (ok ? 1 : 0), fail: (Number(cur.fail) || 0) + (ok ? 0 : 1) };
+  return out;
+}
+
+// 缓存写入的唯一裁决：prev=当前条目（可能是 localStorage 回灌来的陈旧好值），fresh=本轮新条目。
+// 返回 null 表示「保留 prev，什么都不写」—— 本轮取数失败或样本不足，都不构成把上次成功的数擦掉的理由：
+// 一个「截至 10-14·1 天前」的稳升标签是可用的旧事实，而 NA 占位是什么都没说。真取到标签时（fresh 带 label）照换。
+function trendPick(prev, fresh){
+  var known = { steady: 1, mixed: 1, broken: 1 };
+  if(prev && known[prev.label] && !(fresh && known[fresh.label])) return null;
+  return fresh;
+}
+
 // 角标：三态各有类名；未判定/取数失败一律渲染 trend-na 显式占位（空串=界面无感，正是本轮要防的静默降级）
 // 后复权口径下绝对价不是行情价，所以 title 只报比率与样本，不再报「24月线 26.77」这种会误导的数
 function trendBadgeHtml(stats){
@@ -1103,8 +1178,9 @@ function trendBadgeHtml(stats){
       + ' · 近24月年化 ' + pctv(stats.recent24)
       + (leg ? ' · ' + BROKEN_LEG_CN[leg].why : '')
       + ' · 样本 ' + num(stats.months, 0) + ' 个月' + (stats.firstYear ? '（' + stats.firstYear + ' 年起，后复权含分红）' : '（起点未知，后复权含分红）')
+      + (stats.asOf ? ' · 截止 ' + stats.asOf : '')
       + '（纯展示标签，不参与评分与排序）'
-    : '长期趋势未判定（月线需满 ' + TREND_MIN_MONTHS + ' 根；次新股/长期停牌/取数失败均归此类）';
+    : trendNaTitle(stats);
   var badge = '<span class="trend-badge ' + (label ? 'trend-' + label : 'trend-na') + '" title="'
     + escapeHtml(title) + '">' + (label ? TREND_LABEL_CN[label] : TREND_NA_CN) + '</span>';
   // 最深回撤已经进了判据，就必须不依赖 hover 可见：手机上没有 hover，挂 title 的判据输入等于没说。
@@ -1119,7 +1195,10 @@ function trendBadgeHtml(stats){
     ? '<span class="trend-why" title="' + escapeHtml(BROKEN_LEG_CN[leg].why) + '">'
       + BROKEN_LEG_CN[leg].tag + ' ' + (legVal * 100).toFixed(1) + '%</span>'
     : '';
-  return badge + why + ddv;
+  // NA 归因与陈旧声明同样只能从数据里长出来：没取到数（null）时两者都是空串，界面上不许猜一个原因。
+  var na = label ? '' : trendNaWhy(stats);
+  var stale = trendStaleHtml(stats);
+  return badge + na + stale + why + ddv;
 }
 
 // 东财 secid 前缀：与 autoFetchStockData 既有口径同源，不另立第二套（6→沪 1.、其余 6 位→深 0.、5 位→港 116.）
@@ -1152,28 +1231,84 @@ function authErrHint(e){
 
 // ---- 长期趋势角标取数编排（非纯逻辑：外网 JSONP + 全局缓存 + 重渲染）----
 // 只给「价值 Top10」补标签：榜单本身 ≤10 行，外网请求天然封顶；不进 cron、不落库、不写任何表。
-var trendCache = {};        // code -> longTrendStats 整包 + label | {failed:1}；进程内缓存，刷新页面重取
+var trendCache = {};        // code -> longTrendStats 整包 + label | {short:1, monthly:n} | {failed:1}；自 localStorage 回灌的条目带 stale:1
+var TREND_STORE_KEY = 'dinvest_trend_cache';            // 上次成功的月线口径：断网/限流时退回它，至少不整页 NA
+var TREND_FETCH_STAT_KEY = 'dinvest_trend_fetch_stat';  // 按日 ok/fail 计数，攒一周再裁定要不要上备用源（第二步）
+function trendStoreGet(){
+  try{ var raw = localStorage.getItem(TREND_STORE_KEY); var o = raw ? JSON.parse(raw) : null;
+       return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; }catch(e){ return {}; }
+}
+function trendFetchStatGet(){
+  try{ var raw = localStorage.getItem(TREND_FETCH_STAT_KEY); var o = raw ? JSON.parse(raw) : null;
+       return (o && typeof o === 'object' && !Array.isArray(o)) ? o : {}; }catch(e){ return {}; }
+}
+function bumpFetchStat(ok){
+  try{ localStorage.setItem(TREND_FETCH_STAT_KEY, JSON.stringify(fetchStatBump(trendFetchStatGet(), fmtDateCN(new Date()), ok))); }catch(e){}
+}
+// 写穿只给成功的那一条：失败/样本不足都算不上「新事实」，写进去就是把上次成功的口径擦掉。
+function trendStorePut(code, entry){
+  try{ var o = trendStoreGet(); o[String(code)] = entry; localStorage.setItem(TREND_STORE_KEY, JSON.stringify(o)); }catch(e){}
+}
+var trendStoreHydrated = false;
+// 回灌一律标 stale：决议 24 是「当日价口径」，昨天存的数必须自称是昨天的，同时被 todo 拉去重取（缓存不许冻结）。
+function trendHydrate(){
+  if(trendStoreHydrated) return;
+  trendStoreHydrated = true;
+  var today = fmtDateCN(new Date());
+  var o = trendStoreGet();
+  Object.keys(o).forEach(function(code){
+    var e = o[code];
+    if(!e || !TREND_LABEL_CN[e.label]) return;   // NA/失败条目没有可退的值，回灌它等于把哑弹搬回来
+    var d = trendStaleDays(e.asOf, today);
+    if(d === null) return;                        // 缺 asOf 的旧条目无法声明截止日 → 宁可不回灌
+    trendCache[code] = Object.assign({}, e, { stale: 1, staleDays: d });
+  });
+}
+// 失败/不足都不许覆盖上次成功的数：宁可显示「截至 X · N 天前」，也不退化成整页 NA。
+// 裁决本身在纯块里（trendPick），这里只负责「保留」= 不写。
 function loadTrendBadges(){
+  trendHydrate();
   var list = (valueState && valueState.top10 ? valueState.top10 : [])
     .filter(function(r){ return r && r.tier === 'qualified' && r.confidence === 'A' && r.vq !== null && r.vq !== undefined; })
     .sort(function(a, b){ return b.vq - a.vq; }).slice(0, 10);
-  var todo = list.filter(function(r){ return !trendCache[String(r.code)]; });
+  var todo = list.filter(function(r){ var c = trendCache[String(r.code)]; return !c || c.stale; });
   if(!todo.length) return Promise.resolve(0);
+  // 取数与落缓存分两段：这一段只负责把结果收集回来，一律交给 .then 里的 apply 判定成败口径，
+  // 免得上次那种「catch 里顺手写 failed」把已有的陈旧好值覆盖掉。
   return Promise.all(todo.map(function(r){
     var code = String(r.code), secid = secidOf(code);
-    if(!secid){ trendCache[code] = { failed: 1 }; return Promise.resolve(); }
+    if(!secid) return Promise.resolve({ code: code, err: 'bad-code' });
     return fetchKlineJsonp(secid, TREND_FQT, TREND_LOOKBACK, TREND_KLT).then(function(j){
       var rows = ((j && j.data && j.data.klines) || []).map(function(kl){
         var parts = String(kl).split(',');
         return { date: parts[0], close: parseFloat(parts[1]) };
       });
-      var st = longTrendStats(rows);
-      // 整包透传，不逐字段枚举：上一版枚举了 6 个字段，把 peakDraw/recent3 漏在缓存里
-      // ⇒ 角标只渲染出词、距峰永不显示，而单元/端到端测试全绿（它们都绕过了 trendCache 这一跳）。
-      trendCache[code] = st ? Object.assign({}, st, { label: longTrendLabel(st) })
-                            : { failed: 1, monthly: monthEndCloses(rows).length };
-    }).catch(function(){ trendCache[code] = { failed: 1 }; });
-  })).then(function(){ if(document.getElementById('stockList')) renderStockSection(); return todo.length; });
+      return { code: code, rows: rows };
+    }).catch(function(){ return { code: code, err: 'net' }; });
+  })).then(function(res){
+    var okCount = 0, failCount = 0;
+    res.forEach(function(x){
+      var code = String(x.code), st = x.err ? null : longTrendStats(x.rows);
+      // 记的是「这条请求成没成」：次新股只回 10 根照样是成功，把它混进 fail 就等于把网络账算成了样本账。
+      bumpFetchStat(!x.err);
+      if(x.err) failCount++; else okCount++;
+      if(st){
+        // 整包透传，不逐字段枚举：上一版枚举了 6 个字段，把 peakDraw/recent3 漏在缓存里
+        // ⇒ 角标只渲染出词、距峰永不显示，而单元/端到端测试全绿（它们都绕过了 trendCache 这一跳）。
+        trendCache[code] = Object.assign({}, st, { label: longTrendLabel(st) });
+        trendStorePut(code, trendCache[code]);
+      } else {
+        var fresh = x.err ? { failed: 1 } : { short: 1, monthly: monthEndCloses(x.rows).length };
+        var keep = trendPick(trendCache[code], fresh);
+        if(keep) trendCache[code] = keep;
+      }
+    });
+    // 失败时开一句口：整批 NA 在界面上是沉默的，控制台这句至少留下「到底是网络还是次新股」的账
+    if(failCount) console.info('[trend] ' + fmtDateCN(new Date()) + ' 历史K线取数 成功=' + okCount + ' 失败=' + failCount
+      + '（失败的那只退回 localStorage 里上次成功的数并标注截止日；按日累计键=' + TREND_FETCH_STAT_KEY + '）');
+    if(document.getElementById('stockList')) renderStockSection();
+    return todo.length;
+  });
 }
 
 // ==== RESEARCH_PURE_BEGIN ====

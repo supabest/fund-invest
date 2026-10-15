@@ -3,7 +3,8 @@ const MARKER = /\/\/ ==== VALUE_PURE_BEGIN ====([\s\S]*?)\/\/ ==== VALUE_PURE_EN
 const SHIM = `function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[m])); }\n`;
 const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter', 'legRange', 'legHasMore', 'legTiebreakCol', 'valueFmtPct', 'valueTierLabel', 'valuePillHtml', 'valueGateHtml', 'renderValueTop10', 'SWAP_GAP', 'divergeLists', 'swapSuggest', 'renderDivergeBoard',
   'TREND_LOOKBACK', 'TREND_KLT', 'TREND_FQT', 'TREND_MIN_MONTHS', 'TREND_POSITION_MA', 'TREND_R2_STEADY', 'TREND_DD_RATIO_MIN', 'monthEndCloses', 'olsLogTrend',
-  'longTrendStats', 'longTrendLabel', 'brokenLegOf', 'trendBadgeHtml', 'secidOf',
+  'longTrendStats', 'longTrendLabel', 'brokenLegOf', 'trendBadgeHtml',
+  'trendNaWhy', 'trendStaleHtml', 'trendStaleDays', 'fetchStatBump', 'trendPick', 'secidOf',
   'AUTH_TIMEOUT_MS', 'authErrHint',
   'TREND_LABEL_CN', 'TREND_NA_CN'];
 
@@ -43,13 +44,20 @@ export const TREND_R2_STEADY = NS.TREND_R2_STEADY as number;
 export const TREND_DD_RATIO_MIN = NS.TREND_DD_RATIO_MIN as number;   // 2026-10-14 用户裁定的收益回撤门禁
 export const monthEndCloses = NS.monthEndCloses as (rows: { date: string; close: number }[] | null) => number[];
 export const olsLogTrend = NS.olsLogTrend as (closes: number[], w: number, perYear?: number) => { slope: number; r2: number | null; annualized: number; n: number } | null;
-export type TrendStats = { close: number; ma24m: number; months: number; firstYear: number | null; slope: number;
+export type TrendStats = { close: number; ma24m: number; months: number; firstYear: number | null; asOf: string | null; slope: number;
   r2: number | null; annualized: number; mdd: number; fromPeak: number; ddRatio: number | null; recent24: number | null };
 export const longTrendStats = NS.longTrendStats as (rows: { date: string; close: number }[] | null) => TrendStats | null;
 export const longTrendLabel = NS.longTrendLabel as (s: TrendStats | null) => 'steady' | 'mixed' | 'broken' | null;
 export type BrokenLeg = 'annualized' | 'recent' | null;
 export const brokenLegOf = NS.brokenLegOf as (s: (TrendStats & { label?: string }) | null) => BrokenLeg;
 export const trendBadgeHtml = NS.trendBadgeHtml as (stats: Record<string, unknown> | null) => string;
+export const trendNaWhy = NS.trendNaWhy as (stats: Record<string, unknown> | null) => string;
+export const trendStaleHtml = NS.trendStaleHtml as (stats: Record<string, unknown> | null) => string;
+export const trendStaleDays = NS.trendStaleDays as (asOf: string | null, today: string | null) => number | null;
+export type FetchStat = Record<string, { ok: number; fail: number }>;
+export const fetchStatBump = NS.fetchStatBump as (stat: FetchStat | null, day: string, ok: boolean) => FetchStat;
+// deno-lint-ignore no-explicit-any
+export const trendPick = NS.trendPick as (prev: Record<string, any> | null, fresh: Record<string, any>) => Record<string, any> | null;
 export const secidOf = NS.secidOf as (code: string | null) => string | null;
 export const AUTH_TIMEOUT_MS = NS.AUTH_TIMEOUT_MS as number;
 export const TREND_LABEL_CN = NS.TREND_LABEL_CN as Record<'steady' | 'mixed' | 'broken', string>;

@@ -5,7 +5,8 @@ import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueT
   TREND_LOOKBACK, TREND_KLT, TREND_FQT, TREND_MIN_MONTHS, TREND_POSITION_MA, TREND_R2_STEADY, TREND_DD_RATIO_MIN,
   monthEndCloses, olsLogTrend, longTrendStats, longTrendLabel, brokenLegOf,
   trendBadgeHtml, secidOf, AUTH_TIMEOUT_MS, authErrHint,
-  TREND_LABEL_CN, TREND_NA_CN } from "./value_leg_logic.ts";
+  TREND_LABEL_CN, TREND_NA_CN,
+  trendNaWhy, trendStaleHtml, trendStaleDays, fetchStatBump, trendPick } from "./value_leg_logic.ts";
 
 const row = { code:'600031', name:'潍柴', vq:78.4, tier:'qualified', confidence:'A', vetoed:false,
   owner_yield:6.2, margin_of_safety:4.35, cn10y:1.85, roic_med:18.0, v_moat:80, v_cash:70, v_safety:75, v_health:66,
@@ -568,3 +569,102 @@ Deno.test('边界守卫（用户裁定"只做标签不进分数"的可执行化�
   assertEquals(polluted, [], '长期趋势被接进了分数计算：\n' + polluted.join('\n'));
 });
 
+// ==== 2026-10-15 第一步（用户裁定「先第一步」）：NA 分口径 / 陈旧标注 / 失败计数 ====
+
+Deno.test('as-of 溯源：longTrendStats 必须自带 asOf（最后一根月线的日期）——陈旧回退全靠它声明截止日', () => {
+  const rows = monthlyToRows(mkCloses(30, 0.004));
+  assertEquals(longTrendStats(rows)!.asOf, rows[rows.length - 1].date, 'asOf 不是最后一根月线的日期');
+  assertEquals(longTrendStats(rows.slice().reverse())!.asOf, rows[rows.length - 1].date, '乱序输入把 asOf 带到了中间的月份');
+});
+
+
+Deno.test('缓存裁决 trendPick：本轮失败不许擦掉上次成功的数（回灌来的陈旧好值也是好值）', () => {
+  const staleGood = { label: 'steady', annualized: 0.2, months: 300, asOf: '2026-10-14', stale: 1, staleDays: 1 } as never;
+  assertEquals(trendPick(staleGood, { failed: 1 } as never), null, '取数失败会把上次成功的数擦掉');
+  assertEquals(trendPick(staleGood, { short: 1, monthly: 3 } as never), null, '样本不足会把稳升说成没数据（源截断时的致命误报）');
+  assertEquals(trendPick(null, { failed: 1 } as never), { failed: 1 } as never, '本来没值时必须如实标失败，不许留空占位');
+  assertEquals((trendPick({ failed: 1 } as never, { label: 'mixed' } as never) as never as { label: string }).label, 'mixed',
+    '新取到的标签不得被旧的 NA 占位挡住');
+});
+
+const stripTitle = (h: string) => h.replace(/ title="[^"]*"/g, '');
+
+Deno.test('NA 必须分两种口径：取数失败 ≠ 数据不足（截图里 10/10 全「长期—」，用户分不清是网络还是次新股）', () => {
+  const fail = trendBadgeHtml({ failed: 1 } as never);
+  assertEquals(/取数失败/.test(stripTitle(fail)), true, '取数失败没在内联说清（title 不算，iPhone 无 hover）：' + fail);
+  const short = trendBadgeHtml({ short: 1, monthly: 10 } as never);
+  assertEquals(/不足/.test(stripTitle(short)), true, '样本不足没在内联说清：' + short);
+  assertEquals(/取数失败/.test(short), false, '样本不足被说成了网络故障：' + short);
+  assertEquals(/不足/.test(fail), false, '网络故障被说成了数据不足：' + fail);
+  assertEquals(/长期—/.test(fail) && /长期—/.test(short), true, '角标本体一字不动（TREND_NA_CN 由命名测试钉住）');
+  const ok = trendBadgeHtml(withLabel(mkCloses(60, 0.004)) as never);
+  assertEquals(/取数失败|不足/.test(stripTitle(ok)), false, '有标签时不许挂 NA 归因：' + ok);
+  assertEquals(/取数失败|不足/.test(trendBadgeHtml(null as never)), false, '还没取数（null）时不猜原因');
+});
+
+Deno.test('陈旧缓存必须当面标注截至哪天（决议 24 是「当日价口径」，不许拿上月缓存冒充）', () => {
+  const fresh = withLabel(mkCloses(60, 0.004));
+  assertEquals(/天前/.test(trendBadgeHtml(fresh as never)), false, '新鲜数据挂了陈旧标注：' + trendBadgeHtml(fresh as never));
+  const stale = Object.assign({}, fresh, { asOf: '2026-09-30', stale: 1, staleDays: 15 });
+  const h = stripTitle(trendBadgeHtml(stale as never));
+  assertEquals(/09-30/.test(h), true, '陈旧标注没写截止日期：' + h);
+  assertEquals(/15\s*天前/.test(h), true, '陈旧标注没写几天前：' + h);
+  const legacy = Object.assign({}, fresh, { stale: 1 });   // 旧条目缺 asOf/staleDays
+  assertEquals(/null|NaN|undefined/.test(trendBadgeHtml(legacy as never)), false,
+    '缺字段的陈旧条目不得出脏值：' + trendBadgeHtml(legacy as never));
+  const sameDay = Object.assign({}, fresh, { asOf: '2026-10-15', stale: 1, staleDays: 0 });   // 今天早些时候存的
+  assertEquals(/天前/.test(trendBadgeHtml(sameDay as never)), false,
+    '当天存的缓存就是当日价，标「0 天前」是每行挂一句废话：' + trendBadgeHtml(sameDay as never));
+});
+
+Deno.test('trendStaleDays：同一天=0、跨月跨年正确、时钟回拨不出负、非法输入=null（NaN 进界面就是脏值）', () => {
+  assertEquals(trendStaleDays('2026-10-15', '2026-10-15'), 0);
+  assertEquals(trendStaleDays('2026-09-30', '2026-10-15'), 15);
+  assertEquals(trendStaleDays('2025-12-31', '2026-01-01'), 1);
+  assertEquals(trendStaleDays('2026-10-15', '2026-10-14'), 0);
+  assertEquals(trendStaleDays(null, '2026-10-15'), null);
+  assertEquals(trendStaleDays('x', 'y'), null);
+});
+
+Deno.test('trendNaWhy / trendStaleHtml：口径词由数据决定，缺字段一律空串（宁可不说不许说错）', () => {
+  assertEquals(/取数失败/.test(trendNaWhy({ failed: 1 } as never)), true);
+  assertEquals(/不足/.test(trendNaWhy({ short: 1 } as never)), true);
+  assertEquals(trendNaWhy(null), '');
+  assertEquals(trendNaWhy({ label: 'steady' } as never), '');
+  assertEquals(trendStaleHtml({ stale: 1, staleDays: 3, asOf: '2026-10-12' } as never).indexOf('3') >= 0, true);
+  assertEquals(trendStaleHtml({ stale: 1 } as never), '');
+  assertEquals(trendStaleHtml({ staleDays: 3, asOf: '2026-10-12' } as never), '');
+});
+
+Deno.test('取数失败计数只记账不猜：按日累加 ok/fail，不动其他日（一周后拿它判断到底多频繁）', () => {
+  let s = fetchStatBump({}, '2026-10-15', false);
+  s = fetchStatBump(s, '2026-10-15', false);
+  s = fetchStatBump(s, '2026-10-15', true);
+  s = fetchStatBump(s, '2026-10-14', true);
+  assertEquals(s['2026-10-15'], { ok: 1, fail: 2 });
+  assertEquals(s['2026-10-14'], { ok: 1, fail: 0 });
+});
+
+Deno.test('持久化接线守卫：成功才写穿 localStorage；回灌必须标 stale；stale 必须重取；失败不得覆盖已有陈旧条目', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const start = html.indexOf('function loadTrendBadges(');
+  assertEquals(start >= 0, true, '找不到 loadTrendBadges');
+  const body = html.slice(start, html.indexOf('\n}\n', start));
+  assertEquals(/localStorage\./.test(html.slice(html.indexOf('var trendCache'))), true,
+    'trendCache 附近没有 localStorage 读写 —— 第一步要求刷新后仍记得上次成功的数');
+  assertEquals(/trendStorePut\(|trendStoreSave\(/.test(body), true, 'loadTrendBadges 成功分支没写穿 localStorage');
+  assertEquals(/trendStorePut\(\s*code\s*,\s*trendCache\[code\]\s*\)/.test(body), true,
+    '写穿的不是刚进 trendCache 的那一份 —— 内存与 localStorage 内容分叉，刷新后看到的是另一个数');
+  assertEquals(/bumpFetchStat\(!x\.err\)/.test(body), true,
+    '按日计数没记在「这条请求成没成」上：把次新股的样本不足算成网络故障，第二步就会被这份账带跑');
+  // 必须把搜索范围收到 trendHydrate 自己身上：整页 html 上找 `stale: 1` 会被 trendCache 那行注释命中（M20 实测假绿）
+  const hyStart = html.indexOf('function trendHydrate(');
+  assertEquals(hyStart >= 0, true, '找不到 trendHydrate，回灌入口改名了？守卫需要重写');
+  const hy = html.slice(hyStart, html.indexOf('\n}\n', hyStart));
+  assertEquals(/stale:\s*1/.test(hy), true, '回灌条目没标 stale —— 不标就是拿旧口径冒充当日价，且缓存从此永久冻结不再重取');
+  assertEquals(/\.stale/.test(body), true, 'todo 判定没把 stale 纳入重取范围 —— 缓存一旦落地就永久冻结');
+  const catchAt = body.indexOf('failed: 1');
+  assertEquals(catchAt >= 0, true, '失败分支形状变了，守卫需要重写');
+  assertEquals(/trendStorePut\(|trendStoreSave\(/.test(body.slice(catchAt)), false,
+    '失败分支里写了 localStorage —— 失败不得覆盖已有陈旧条目');
+});
