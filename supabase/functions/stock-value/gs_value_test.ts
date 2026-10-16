@@ -1,6 +1,7 @@
 // supabase/functions/stock-value/gs_value_test.ts
 import { assertEquals, assertMatch, assertThrows } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import { annualCols, assertCols, assertPeriod, mergeValueTables, buildVQ3, yearAnchors, windowCols, type GsTable } from './gs_value.ts';
+import { roicStats, vetoesOf } from './value_engine.ts';
 
 // std@0.224.0 的 assertThrows 第二参数只接受 string / ErrorClass，**无 RegExp 重载**：写
 // `assertThrows(fn, /re/)` 会撞 TS2769 使整个测试文件跑不起来，而且运行时静默忽略消息匹配
@@ -192,7 +193,49 @@ Deno.test('windowCols：名称与日期戳之间的英文别名必须进窗口�
 Deno.test('真形态（roic 别名）五表合并：不炸批，当期 ROIC / 三年窗口 / 期次戳全部照绑', () => {
   const { rows, stamps } = mergeValueTables(aliasify(fx('vq1_sample.json')), fx('vq2_sample.json'),
     aliasify(fx('vq3_sample.json')), fx('vq4_sample.json'), fx('vq5_legacy_sample.json'), NOW);
-  assertEquals(stamps.roic_period, '20260630');
-  assertEquals(rows.map(r => r.roic), [18.4, 6.1, null]);
+  // 决议 27（2026-10-15 用户裁定「1」）：当期 ROIC 锤到 q3 最近一根**年报**列，期次戳同步改绑。
+  // 原断言 [18.4, 6.1, null] / '20260630' 把「中报累计冒充当期」锁成了正确行为，此处是改正，不是回归。
+  assertEquals(stamps.roic_period, '20251231');
+  assertEquals(rows.map(r => r.roic), [18.9, 6.2, null]);
   assertEquals(rows.map(r => r.roic3), [[17.1, 18.0, 18.9], [7.0, 6.5, 6.2], [null, null, null]]);
 });
+
+// ===== 决议 27：当期 ROIC 与 q3/q5 同一先例——锤 1231 年报列 =====
+// 【缺陷形状】中报季 GS 的 q1 绝对值列回 `投入资本回报率[yyyy0630]`：**期内累计、非年化**。
+// 三条独立铁证（2026-10-15 取证）：① 生产表 5026 行 extras.stamps.roic_period 全部 = 20260630；
+// ② 同批内 roic_cur/roic_min3 比值中位数 0.477、75.5% 的行低于自身最差年报；
+// ③ 东财逐期序列（潍柴 2025 全年 8.176 / 2024 8.779 …）证明该指标是期内累计口径。
+// 而否决4 拿它与**年化**阈值 ROIC_GATE=8 比（value_engine.ts:63）⇒ 中报季 `med<8 && cur<8` 退化成单条件
+// `med<8`，本该留在观察里的「单低」被错杀成 tier=vetoed。q3 三年窗（:169）与 q5 ROE（:181-184）早已锤死
+// 1231，q1 当期列是不对称的漏项。measured blast radius：2218/5026 = 44.1% 行带「无护城河证据」。
+const mergeRoic = (q1Roic: (string | null)[], roic3: (string | null)[]) => {
+  const t1 = { ...fx('vq1_sample.json'), '投入资本回报率[20260630]': q1Roic } as GsTable;
+  const t3 = {
+    ...fx('vq3_sample.json'),
+    '投入资本回报率[20231231]': [roic3[0], '7.0', null],
+    '投入资本回报率[20241231]': [roic3[1], '6.5', null],
+    '投入资本回报率[20251231]': [roic3[2], '6.2', null],
+  } as GsTable;
+  return mergeValueTables(t1, fx('vq2_sample.json'), t3, fx('vq4_sample.json'), fx('vq5_sample.json'), NOW);
+};
+
+Deno.test('中报累计不得冒充当期：med<8 而最近年报≥8 仍是「单低」，不触发否决4（旧绑定 cur=6.5 会错杀）', () => {
+  const r = mergeRoic(['6.5', '6.1', null], ['5', '6', '12']).rows.find(x => x.code === '600031.SH')!;
+  assertEquals(r.roic, 12);                                    // 绑 q3 最近年报，不是 q1 的 0630 累计 6.5
+  assertEquals(roicStats(r.roic3).med, 6);                     // med<8 成立：这一档该叫 unqualified
+  assertEquals(vetoesOf(r, roicStats(r.roic3).med).includes('无护城河证据'), false);
+});
+
+Deno.test('反向同样成立：q1 中报累计看着达标（≥8）也救不了「最近年报<8」⇒ 双低照旧否决（旧绑定漏杀）', () => {
+  const r = mergeRoic(['9.9', '6.1', null], ['12', '6', '5']).rows.find(x => x.code === '600031.SH')!;
+  assertEquals(r.roic, 5);
+  assertEquals(vetoesOf(r, roicStats(r.roic3).med).includes('无护城河证据'), true);
+});
+
+Deno.test('最新年报缺失 → 当期 ROIC = NA → 否决4 不判定（宁缺一个判定，不做一个错判定；同 q5 ROE 分支口径）', () => {
+  const r = mergeRoic(['6.5', '6.1', null], ['6', '7', null]).rows.find(x => x.code === '600031.SH')!;
+  assertEquals(r.roic, null);                                  // 缺的正是 roic3 末根（2025 年报）
+  assertEquals(roicStats(r.roic3).med, 6.5);                   // 前两期仍算得出 med，但 cur 为 NA
+  assertEquals(vetoesOf(r, roicStats(r.roic3).med).includes('无护城河证据'), false);
+});
+

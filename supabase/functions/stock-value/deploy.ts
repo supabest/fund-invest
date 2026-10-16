@@ -396,6 +396,7 @@ function assertPeriod(t: GsTable, names: string[], now: Date): string {
 
 interface ValueRaw {
   code: string; name: string; ths: string[]; isFin: boolean; isST: boolean;
+  // `roic` = 当期 ROIC = 最近一期**年报**值（恒等于 roic3[2]，见 mergeValueTables 内决议 27 注），非中报累计。
   roic: number | null; roic3: (number | null)[];
   fcff: number | null; cash: number | null; debt: number | null; gw: number | null;
   pe: number | null; pb: number | null; mktcap: number | null;
@@ -412,8 +413,6 @@ function mergeValueTables(
   assertCols(t1, 'q1'); assertCols(t2, 'q2'); assertCols(t3, 'q3'); assertCols(t4, 'q4');
   if (t5) assertCols(t5, 'q5');
   const stamp2 = assertPeriod(t2, ['货币资金', '带息债务', '企业自由现金流量fcff', '商誉占净资产比例'], now);
-  // 当期 ROIC 的戳同受 spec §8 时点纪律约束：原先只把 stampOf(K.roic) 直存 extras、从不校验，漂到任意期次都照落。
-  const stamp1 = assertPeriod(t1, ['投入资本回报率'], now);
   const codes = t1['股票代码'] as string[];
   if ((t3['股票代码'] as string[]).length !== codes.length) throw new Error('GS q3 row count differs from q1');
   const roic3Keys = windowCols(t3, '投入资本回报率');          // 已按戳升序 = 时间升序；与 V1.1 的 windowColsByPrefix 同口径
@@ -427,9 +426,15 @@ function mergeValueTables(
     throw new Error(`GS q3 expected 3 annual columns (${wantYears}@1231), got ${roic3Keys.map(stampOf).join(',')}`);
   const idx = (t: GsTable | null) => new Map(((t?.['股票代码'] as string[] | undefined) ?? []).map((c, i) => [c, i]));
   const i2 = idx(t2), i3 = idx(t3), i4 = idx(t4), i5 = t5 ? idx(t5) : null;
+  // 【为什么当期 ROIC 不取 q1 那根（决议 27，2026-10-15 用户裁定「1」）】q1 的绝对值列随报告期漂移，中报季回
+  // `投入资本回报率[yyyy0630]` = **期内累计、非年化**（铁证：生产 5026 行 roic_period 全为 20260630，且 roic_cur
+  // 与自身最差年报的比值中位数 0.477、75.5% 的行低于自己最差年报）。否决4 拿它与**年化**阈值 ROIC_GATE=8 比
+  // （value_engine.ts:63），于是 `med<8 && cur<8` 在中报季退化成单条件 `med<8`：「单低」（该留观察）被错杀成
+  // tier=vetoed。改绑 q3 最近一根年报列 = 与上面 :169 和下面 q5 ROE 同一先例，代价是这条腿在中报季滞后半年
+  // ——陈旧但正确，且「双双<8」重新是两个独立条件。q1 仍照旧提问、REQUIRED.q1 仍把关该列存在，只是不再绑值。
+  const roicCurKey = roic3Keys[2];
   const K = {
     name: colByPrefix(t1, '股票简称')!, ths: colByPrefix(t1, '所属同花顺行业')!, mkt: colByPrefix(t1, '股票市场类型')!,
-    roic: colByPrefix(t1, '投入资本回报率')!,
     fcff: colByPrefix(t2, '企业自由现金流量fcff')!, cash: colByPrefix(t2, '货币资金')!,
     debt: colByPrefix(t2, '带息债务')!, gw: colByPrefix(t2, '商誉占净资产比例')!,
     pe: colByPrefix(t4, '市盈率')!, pb: colByPrefix(t4, '市净率')!, mc: colByPrefix(t4, '总市值')!,
@@ -454,7 +459,7 @@ function mergeValueTables(
       code, name, ths: str(t1[K.ths]?.[i]).split('-'),
       isST: /ST|退/.test(name) || !mkt.includes('全部A股(非ST)'),
       isFin: !!mkt && !mkt.includes('全部A股(非金融)'),
-      roic: at(t1, K.roic, i),
+      roic: at(t3, roicCurKey, j3),
       roic3: roic3Keys.map(k => at(t3, k, j3)),
       fcff: at(t2, K.fcff, j2), cash: at(t2, K.cash, j2), debt: at(t2, K.debt, j2),
       gw: at(t2, K.gw, j2),                                    // 空值语义①：商誉空 → 0（在引擎侧落地）
@@ -468,7 +473,9 @@ function mergeValueTables(
       roe: !t5 || roeCur === null ? null : at(t5, roeCur, j5),    // 批次缺席 / 行缺席 → NA（否决4 不判定，不得归 0）
     };
   });
-  const stamps: Record<string, string> = { fin_period: stamp2, val_period: stampOf(K.pe), roic_period: stamp1 };
+  const stamps: Record<string, string> = {
+    fin_period: stamp2, val_period: stampOf(K.pe), roic_period: stampOf(roicCurKey),
+  };
   if (dyCur) stamps.div_period = stampOf(dyCur);   // spec §8：q5 绑的是哪一期必须可见
   if (roeCur) stamps.roe_period = stampOf(roeCur); // 首夜若它不是 1231 结尾，ROE 就是非年化累计值 → 否决4 需重新裁定
   return { rows, stamps };
