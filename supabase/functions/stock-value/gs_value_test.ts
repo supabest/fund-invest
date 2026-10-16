@@ -232,10 +232,19 @@ Deno.test('反向同样成立：q1 中报累计看着达标（≥8）也救不�
   assertEquals(vetoesOf(r, roicStats(r.roic3).med).includes('无护城河证据'), true);
 });
 
-Deno.test('最新年报缺失 → 当期 ROIC = NA → 否决4 不判定（宁缺一个判定，不做一个错判定；同 q5 ROE 分支口径）', () => {
+/**
+ * 2026-10-16 用户裁定「补兜底（缺失即视为不达标）」**推翻**了本条初版取向（当时写的是
+ * 「宁缺一个判定，不做一个错判定」）。推翻依据是实测blast radius：换到年报口径后生产有
+ * **411 行** `roic_cur` 由有值变 None，它们在 med 已<8 的前提下从「会判」静默退化成「漏杀」，
+ * 与否决3 那条「多杀不是漏杀」的 fail-loudly 取向相反。保留的约束：med 达标时不因缺数据惩罚。
+ */
+Deno.test('最新年报缺失 → 当期 ROIC = NA → 否决4 **视为不达标**（med<8 时缺失计入，2026-10-16 裁定）', () => {
   const r = mergeRoic(['6.5', '6.1', null], ['6', '7', null]).rows.find(x => x.code === '600031.SH')!;
   assertEquals(r.roic, null);                                  // 缺的正是 roic3 末根（2025 年报）
   assertEquals(roicStats(r.roic3).med, 6.5);                   // 前两期仍算得出 med，但 cur 为 NA
-  assertEquals(vetoesOf(r, roicStats(r.roic3).med).includes('无护城河证据'), false);
+  assertEquals(vetoesOf(r, roicStats(r.roic3).med).includes('无护城河证据'), true);
+  // med 达标（≥8）时不得因 cur 缺失而否决——本条把「只在第二条腿缺数据时从严」钉成可测边界
+  const ok = mergeRoic(['9.9', '6.1', null], ['12', '13', null]).rows.find(x => x.code === '600031.SH')!;
+  assertEquals(vetoesOf(ok, roicStats(ok.roic3).med).includes('无护城河证据'), false);
 });
 

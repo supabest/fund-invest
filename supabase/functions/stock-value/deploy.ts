@@ -61,7 +61,11 @@ function vetoesOf(r: ValueRaw, roicMed: number | null, fin?: { roe: number | nul
   // 否决4 附注：金融股 roic 天然 NA（P-1）→ 改用 ROE 对标；无 roe 输入则不判定
   const med = r.isFin ? fin?.roe ?? null : roicMed;
   const cur = r.isFin ? fin?.roe ?? null : r.roic;
-  if (med !== null && cur !== null && med < ROIC_GATE && cur < ROIC_GATE) out.push('无护城河证据');
+  // 2026-10-16 用户裁定「缺失即视为不达标」：原先 `cur !== null` 是硬前提，换到年报口径后 411 行
+  // roic_cur 由有值变 None ⇒ 这条腿静默不判，方向是「漏杀」，与否决3 那条「多杀不是漏杀」的
+  // fail-loudly 取向相反。现仅当 med 已<8 时才把 cur 缺失计入（med 达标不因缺数据惩罚）；
+  // 金融股 med/cur 同为 ROE，无 roe 输入 ⇒ med 即 null，Task 5 裁定 2「不判定」原样保留。
+  if (med !== null && med < ROIC_GATE && (cur === null || cur < ROIC_GATE)) out.push('无护城河证据');
   return out;
 }
 

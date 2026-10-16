@@ -53,6 +53,17 @@ Deno.test('金融股否决4 走 ROE 对标：roic 天然 NA 不得整类误杀�
   assertEquals(vetoesOf(fin, null, undefined).includes('无护城河证据'), false);  // 无 roe 输入 → 不判定，不算触发
 });
 
+// 2026-10-16 用户裁定「补兜底（缺失即视为不达标）」：换到年报口径后 411 行 roic_cur 由有值变 None，
+// 而 `cur !== null` 这个硬前提把它们从「会判」静默降级成「漏杀」——方向与 spec §4 的 fail-loudly 相反。
+Deno.test('否决4 缺失兜底：非金融当期 ROIC 缺失 = 不达标（仅在 med 已<8 时生效，不放宽 med 腿）', () => {
+  assertEquals(vetoesOf(mk({ roic: null }), 5), ['无护城河证据']);   // med<8 且 cur 缺 → 视为双双<8
+  assertEquals(vetoesOf(mk({ roic: null }), 15), []);               // med 达标 → 不因缺失惩罚
+  assertEquals(vetoesOf(mk({ roic: 10 }), 5), []);                  // cur 有值且达标 → 仍不否决
+  assertEquals(vetoesOf(mk({ roic: 5 }), 5), ['无护城河证据']);      // 原语义不变
+  // 金融股保留 Task 5 裁定 2：med/cur 同为 ROE，无 roe 输入 ⇒ med 也是 null ⇒ 本条天然不触发
+  assertEquals(vetoesOf(mk({ isFin: true, roic: null, roic3: [null, null, null] }), null, undefined), []);
+});
+
 Deno.test('门禁判定：否决 > oy≤0 > roic_med 不达标 > mos 不足（too_rich 不是卖出）', () => {
   const kind = (o: Partial<ValueRaw>, cn: number | null = 1.85) => {
     const x = gateOf(mk(o), cn);
