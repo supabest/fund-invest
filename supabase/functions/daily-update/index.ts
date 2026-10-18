@@ -1,11 +1,15 @@
 // daily-update: 每日自动更新基金净值/均线、股票收盘行情与参考指数行情（pg_cron 经 HTTP 调用）
 // v4: + 分析报告（每只基金/股票：信号→状态→趋势→下一步操作），修正报告条目与状态表
+// v5 (2026-10-18): 信号双端一致性整改——基金档位改「均线偏离 + 估值百分位」两腿合成、优先级顺序对齐页面
+//   （QDII → 手动暂停/恢复 → 主题上限 → 常规）、参考指数「不参考」空串恢复豁免语义；
+//   双端一致性由 scripts/signal_parity_test.ts 穷举矩阵守护（改这里必须同步改 index.html 的 SIGNAL_PURE 块）。
+//   本改动未部署前邮件仍按旧口径发送。
 // 触发方式: POST /functions/v1/daily-update，Authorization: Bearer <DAILY_UPDATE_TOKEN>
 // 可选 body: {"force":true} 无变化也发送报告
 const GOAL_DEFAULT = 200000;
-const DEFAULT_TIERS = [{ ret: 20, sell: 10 }, { ret: 40, sell: 20 }, { ret: 60, sell: 30 }, { ret: 80, sell: 50 }];
-const DEFAULT_CAPS: Record<string, number> = { '机器人/先进制造': 10, '电力/新能源': 15, '全球资源': 20, '日本股票': 15, '美国股票': 30, '均衡配置': 10 };
-const BENCH: Record<string, { secid: string; name: string; th: number[] }> = {
+export const DEFAULT_TIERS = [{ ret: 20, sell: 10 }, { ret: 40, sell: 20 }, { ret: 60, sell: 30 }, { ret: 80, sell: 50 }];
+export const DEFAULT_CAPS: Record<string, number> = { '机器人/先进制造': 10, '电力/新能源': 15, '全球资源': 20, '日本股票': 15, '美国股票': 30, '均衡配置': 10 };
+export const BENCH: Record<string, { secid: string; name: string; th: number[] }> = {
   HS300: { secid: '1.000300', name: '沪深300', th: [-8, -3, 3, 8] },
   NDX: { secid: '100.NDX', name: '纳斯达克', th: [-8, -3, 3, 8] },
   SPX: { secid: '100.SPX', name: '标普500', th: [-8, -3, 3, 8] },
@@ -16,7 +20,7 @@ const BENCH: Record<string, { secid: string; name: string; th: number[] }> = {
 };
 const KLINE_HOSTS = ['push2his.eastmoney.com', '1.push2his.eastmoney.com', '23.push2his.eastmoney.com', '33.push2his.eastmoney.com', '44.push2his.eastmoney.com', '92.push2his.eastmoney.com', '98.push2his.eastmoney.com', '99.push2his.eastmoney.com'];
 
-function marketLevel(dev: number | null, th: number[]) {
+export function marketLevel(dev: number | null, th: number[]) {
   if (dev === null) return { level: 'neutral', label: '中性', coef: 1 };
   if (dev <= th[0]) return { level: 'deep-low', label: '深度低位', coef: 1.5 };
   if (dev <= th[1]) return { level: 'low', label: '低位', coef: 1.25 };
@@ -25,11 +29,23 @@ function marketLevel(dev: number | null, th: number[]) {
   return { level: 'neutral', label: '中性', coef: 1 };
 }
 
-function computeReturn(price: number, f: any): number | null {
+export function computeReturn(price: number, f: any): number | null {
   const cb = (f.costBasis && f.costBasis > 0) ? f.costBasis
     : ((f.costTotal && f.costTotal > 0 && f.currentNav > 0 && f.marketValue > 0) ? f.costTotal / (f.marketValue / f.currentNav) : 0);
   if (!cb) return null;
   return (price - cb) / cb * 100;
+}
+
+// 均线与「较双均线平均偏离」：提到模块级以便与页面 computeDeviation 做双端一致性比对（scripts/signal_parity_test.ts）。
+// 口径与页面一致：均线为 0/缺失时该腿不参与，两腿全缺返回 null（不是 0）。
+export function ma(closes: number[], n: number): number | null {
+  return closes.length >= n ? closes.slice(-n).reduce((a, b) => a + b, 0) / n : null;
+}
+export function avgDev(close: number, ma60: number | null, ma120: number | null): number | null {
+  const devs: number[] = [];
+  if (ma60) devs.push((close - ma60) / ma60 * 100);
+  if (ma120) devs.push((close - ma120) / ma120 * 100);
+  return devs.length ? devs.reduce((a, b) => a + b, 0) / devs.length : null;
 }
 function stockReturn(f: any, close: number): number | null {
   const cost = parseFloat(f.cost) || 0;
@@ -45,28 +61,55 @@ interface SignalResult {
   resumeReady?: boolean;
 }
 
-function baseSignalLabel(dev: number | null): SignalResult {
-  if (dev === null) return { label: '中性(缺数据)', multiplier: 1 };
-  let score = 0;
-  if (dev <= -15) score += 2;
-  else if (dev <= -5) score += 1;
-  else if (dev >= 10) score -= 2;
-  else if (dev >= 3) score -= 1;
-  if (score >= 3) return { label: '双倍', multiplier: 2 };
-  if (score >= 1) return { label: '加强', multiplier: 1.5 };
-  if (score >= -1) return { label: '正常', multiplier: 1 };
-  if (score >= -3) return { label: '减半', multiplier: 0.5 };
-  return { label: '暂停', multiplier: 0 };
+// 估值百分位读取：与页面 baseSignal 同口径（''/undefined/null → 无此腿；NaN → 无此腿）
+function readPct(f: any): number | null {
+  const raw = f.valuationPercentile;
+  if (raw === '' || raw === undefined || raw === null) return null;
+  const n = parseFloat(raw);
+  return isNaN(n) ? null : n;
 }
 
-// 复刻页面 evalFundSignal：QDII溢价 → 手动暂停/恢复 → 主题上限(金额锚定) → 常规信号
-function evalFundSignalServer(f: any, nav: number, dev: number | null, streak: number | null, themeCaps: Record<string, number>, themeMv: number, goal: number): SignalResult {
+// 大盘参考键裁决：空串 = 用户明确选「不参考」→ 豁免系数；未填 = 默认沪深300；未知键 → 无系数可用。
+// 与页面 fundBenchKey 同款（邮件曾把「不参考」当 HS300 用系数，2026-10-18 双端一致性整改）。
+export function fundBenchKey(f: any): string {
+  if (f.benchmark === '') return '';
+  return f.benchmark || 'HS300';
+}
+
+// 常规档位：均线偏离腿 + 估值百分位腿（2026-10-18 双端一致性整改：逐格对齐页面 baseSignal）。
+// 标签词表与页面一致（双倍/加强/正常/减半/暂停）；数据缺失不在标签里造词，由报告状态行的 zone='数据不足' 披露。
+// 双端一致性由 scripts/signal_parity_test.ts 穷举矩阵守护：这里改语义必须同步改页面，或同步改测试。
+export function baseSignalLabel(dev: number | null, pct: number | null = null): SignalResult {
+  let score = 0;
+  if (dev !== null) {
+    if (dev <= -15) score += 2;
+    else if (dev <= -5) score += 1;
+    else if (dev >= 10) score -= 2;
+    else if (dev >= 3) score -= 1;
+  }
+  if (pct !== null) {
+    if (pct <= 20) score += 2;
+    else if (pct <= 40) score += 1;
+    else if (pct >= 80) score -= 2;
+    else if (pct >= 60) score -= 1;
+  }
+  if (score >= 3) return { label: '双倍', level: 'double', multiplier: 2 };
+  if (score >= 1) return { label: '加强', level: 'strong', multiplier: 1.5 };
+  if (score >= -1) return { label: '正常', level: 'normal', multiplier: 1 };
+  if (score >= -3) return { label: '减半', level: 'half', multiplier: 0.5 };
+  return { label: '暂停', level: 'pause', multiplier: 0 };
+}
+
+// 复刻页面 evalFundSignal，顺序也照页面：QDII溢价 → 手动暂停/恢复 → 主题上限(金额锚定) → 常规信号。
+// 旧版顺序（上限在手动暂停之前）会让「恢复条件已满足」的资金在邮件里仍报「仓位超限」，与页面结论相反——已整改。
+export function evalFundSignalServer(f: any, nav: number, dev: number | null, streak: number | null, themeCaps: Record<string, number>, themeMv: number, goal: number): SignalResult {
+  const pct = readPct(f);
+  // 1. QDII 溢价独立触发（页面标签为「暂停」+理由；这里保留后缀供邮件动作文案识别）
   if (f.isQDII && f.qdiiPremium !== '' && f.qdiiPremium !== undefined && !isNaN(parseFloat(f.qdiiPremium))) {
     const prem = parseFloat(f.qdiiPremium);
     if (prem >= 2) return { label: '暂停（QDII溢价）', level: 'pause', multiplier: 0 };
   }
-  const capPct = themeCaps[f.theme] ?? 100;
-  if (themeMv >= capPct / 100 * goal) return { label: '暂停（仓位超限）', level: 'pause', multiplier: 0 };
+  // 2. 手动暂停 / 恢复条件（页面排在仓位超限之前：恢复条件满足即可恢复，与主题上限无关）
   if (f.manualPause) {
     const rr = f.resumeRule || { requireDays: 3, mode: 'ma_only' };
     const need = rr.requireDays ?? 3;
@@ -79,12 +122,16 @@ function evalFundSignalServer(f: any, nav: number, dev: number | null, streak: n
     }
     const satisfied = rr.mode === 'ma_only' ? maOk : (rr.mode === 'ma_and_drawdown' ? (maOk && ddOk) : (maOk || ddOk));
     if (satisfied) {
-      const base = baseSignalLabel(dev);
+      const base = baseSignalLabel(dev, pct);
       return { label: '满足恢复条件 → 建议' + base.label, level: base.level, multiplier: base.multiplier, resumeReady: true };
     }
     return { label: '暂停中', level: 'pause', multiplier: 0 };
   }
-  return baseSignalLabel(dev);
+  // 3. 主题上限（金额锚定：市值 ≥ 上限% × 目标总额）
+  const capPct = themeCaps[f.theme] ?? 100;
+  if (themeMv >= capPct / 100 * goal) return { label: '暂停（仓位超限）', level: 'pause', multiplier: 0 };
+  // 4. 常规信号
+  return baseSignalLabel(dev, pct);
 }
 
 function fmtSigned(n: number): string {
@@ -289,13 +336,7 @@ export async function handle(
       }
     }
 
-    const ma = (closes: number[], n: number) => closes.length >= n ? closes.slice(-n).reduce((a, b) => a + b, 0) / n : null;
-    const avgDev = (close: number, ma60: number | null, ma120: number | null) => {
-      const devs: number[] = [];
-      if (ma60) devs.push((close - ma60) / ma60 * 100);
-      if (ma120) devs.push((close - ma120) / ma120 * 100);
-      return devs.length ? devs.reduce((a, b) => a + b, 0) / devs.length : null;
-    };
+    // ma / avgDev 已提到模块级并导出（见文件头），此处直接使用模块级实现，保证双端一致性可测。
 
     // 2. 先取参考指数行情与档位（基金/股票报告的建议金额需要用到系数）
     const idxLevels: Record<string, { label: string; coef: number }> = {};
@@ -363,6 +404,9 @@ export async function handle(
           const f = funds.find((x: any) => String(x.fundCode || '').trim() === code) || {};
           const fm = (f.shares > 0 && close > 0) ? f.shares * close : (parseFloat(f.marketValue) || 0);
           const themeCaps = { ...DEFAULT_CAPS, ...((st.data && st.data.themeCaps) || {}) };
+          // themeSum 与页面 themeMarketValue 的口径差异（已确认可收敛，勿当漂移修）：
+          // 这里对本只基金用「份额×最新净值」（今夜刚拉到），其余用存量 marketValue；页面用存量 marketValue 求和。
+          // 用户下次打开页面会自动刷新存量值 ⇒ 两处收敛；差值只出现在「今夜已拉净值但页面尚未再打开」的窗口内。
           const themeSum = funds.reduce((s: number, x: any) => {
             const isSelf = String(x.fundCode || '').trim() === code;
             const xm = (isSelf && f.shares > 0 && close > 0) ? fm : (parseFloat(x.marketValue) || 0);
@@ -376,18 +420,19 @@ export async function handle(
             for (const t of tiers) { if (ret >= t.ret && !(f.profitTaken || []).includes(t.ret)) newTier = t.ret; }
           }
           const label = sig.label + (newTier !== null ? '｜止盈' + newTier + '%达标' : '');
-          fundSignalRows.push({ user_id: userId, code, label, profit_tier: newTier, benchmark: f.benchmark || 'HS300', updated_at: new Date().toISOString() });
+          fundSignalRows.push({ user_id: userId, code, label, profit_tier: newTier, benchmark: fundBenchKey(f), updated_at: new Date().toISOString() });
 
           // 分析报告数据（大盘系数已知）
-          const bkey = f.benchmark || 'HS300';
-          const bl = idxLevels[bkey] || null;
-          const coef = (bl && sig.multiplier > 0) ? bl.coef : 1;
+          const bkey = fundBenchKey(f);
+          const bl = bkey ? (idxLevels[bkey] || null) : null;
+          // 与页面同款：系数只看参考档位是否就绪，不看 multiplier（暂停时 multiplier=0，金额本就为 0）
+          const coef = bl ? bl.coef : 1;
           const amount = (parseFloat(f.baseAmount) || 0) * sig.multiplier * coef;
           const taken = f.profitTaken || [];
           const nextTier = tiers.find((x: any) => !taken.includes(x.ret)) || null;
           (fundReport[userId] = fundReport[userId] || []).push({
             code, name: nameMatch ? nameMatch[1] : (f.name || ''), nav: close, navDate,
-            dev, ma60, ma120, streak, label: sig.label, multiplier: sig.multiplier,
+            dev, ma60, ma120, streak, pct: readPct(f), label: sig.label, multiplier: sig.multiplier,
             amount: Math.round(amount), benchmarkName: bl ? BENCH[bkey].name : '', benchmarkLevel: bl ? bl.label : '',
             ret, nextTier, resumeReady: !!sig.resumeReady, theme: f.theme || ''
           });
@@ -436,15 +481,14 @@ export async function handle(
           let newTier: number | null = null;
           if (ret !== null && ret > 0) { for (const t of tiers) { if (ret >= t.ret && !(s.profitTaken || []).includes(t.ret)) newTier = t.ret; } }
 
-          const label = tier.label + (newTier !== null ? '｜止盈' + newTier + '%' : '');
-          stockSignalRows.push({ user_id: userId, code, tier: tier.label, profit_tier: newTier, updated_at: new Date().toISOString() });
+          stockSignalRows.push({ user_id: userId, code, tier: tier.label + (dev === null ? '（数据不足）' : ''), profit_tier: newTier, updated_at: new Date().toISOString() });
 
           const sname = s.name || k.name || '';
           const taken = s.profitTaken || [];
           const nextTier = tiers.find((x: any) => !taken.includes(x.ret)) || null;
           (stockReport[userId] = stockReport[userId] || []).push({
             code, name: sname || code, close, date: k.date, dev, ma60, ma120, below,
-            tier: tier.label, ret, nextTier
+            tier: tier.label + (dev === null ? '（数据不足）' : ''), ret, nextTier
           });
 
           await post('stock_history', 'user_id,code,price_date', [{ user_id: userId, code, price_date: k.date, close, ma20, ma60, ma120, dev_pct: dev }]);
@@ -544,28 +588,30 @@ export async function handle(
       const fundBlock = (fundReport[userId] || []).map(r => {
         const zone = r.dev === null ? '数据不足' : (r.dev <= -15 ? '深度低位' : r.dev <= -5 ? '低位区' : r.dev < 3 ? '中性区间' : r.dev < 10 ? '偏高区' : '明显高位');
         const benchmarkStr = r.benchmarkLevel ? '｜基准 ' + r.benchmarkName + ' ' + r.benchmarkLevel : '';
-        // 下一买入档位：按偏离度边界换算成具体净值触发价
+        // 估值百分位腿（2026-10-18 起参与档位合成，必须在报告里露面，否则「为什么是减半」无法归因）
+        const pctStr = (r.pct === null || r.pct === undefined) ? '' : '｜估值分位 ' + r.pct + '%';
+        // 均线腿下一档：把偏离度边界换算成具体净值触发价（只描述均线这一腿——档位是两腿合成的）
         let buyNextStr = '';
         if (r.dev !== null && r.ma60 && r.ma120) {
           const maAvg = (r.ma60 + r.ma120) / 2;
-          if (r.dev < -15) buyNextStr = '｜已达最高买入档（双倍）';
-          else if (r.dev < -5) buyNextStr = '｜下一买入档：净值跌至 ' + (maAvg * 0.85).toFixed(4) + '（-15%）升为双倍';
-          else if (r.dev < 3) buyNextStr = '｜下一买入档：净值跌至 ' + (maAvg * 0.95).toFixed(4) + '（-5%）升为加强';
-          else buyNextStr = '｜下一买入档：净值回落至 ' + (maAvg * 1.03).toFixed(4) + '（+3%内）恢复正常';
+          if (r.dev < -15) buyNextStr = '｜均线腿已在最深档';
+          else if (r.dev < -5) buyNextStr = '｜均线腿下一档：净值跌至 ' + (maAvg * 0.85).toFixed(4) + '（-15% 档）';
+          else if (r.dev < 3) buyNextStr = '｜均线腿下一档：净值跌至 ' + (maAvg * 0.95).toFixed(4) + '（-5% 档）';
+          else buyNextStr = '｜均线腿回归中性：净值回落至 ' + (maAvg * 1.03).toFixed(4) + '（+3% 内）';
         }
-        const statusStr = '净值 ' + r.nav + '（' + r.navDate + '）｜较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (r.streak !== null ? '｜连续 ' + r.streak + ' 日站上60日线' : '') + benchmarkStr + buyNextStr;
-        const signalStr = '信号 <b>' + r.label + '</b>' + (r.multiplier > 0 && r.amount > 0 ? ' · 本期建议买入 <b>¥' + r.amount + '</b>/期' : ' · 暂停买入');
+        const statusStr = '净值 ' + r.nav + '（' + r.navDate + '）｜较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + pctStr + (r.streak !== null ? '｜连续 ' + r.streak + ' 日站上60日线' : '') + benchmarkStr + buyNextStr;
+        // 动作文案按档位标签走：档位已是「均线偏离 + 估值百分位」两腿合成，不再按 dev 单腿推断
         let actionStr: string;
         if (r.label.includes('QDII溢价')) actionStr = '溢价率过高，暂停买入，等待溢价回落';
         else if (r.label.includes('仓位超限')) actionStr = '主题仓位已达上限，停止买入该主题；浮盈可按止盈档分批兑现';
         else if (r.label === '暂停中') actionStr = '已按你的要求暂停定投，恢复条件满足时系统会提醒你';
         else if (r.resumeReady) actionStr = '恢复条件已满足，可恢复定投';
-        else if (r.dev === null) actionStr = '自动获取数据后即可分析';
-        else if (r.dev <= -15) actionStr = '加大买入，积极拉低成本';
-        else if (r.dev <= -5) actionStr = '维持或加大定投节奏';
-        else if (r.dev < 3) actionStr = '按计划定投，持有不动';
-        else if (r.dev < 10) actionStr = '放缓定投节奏，关注止盈档位';
-        else actionStr = '停止加码，浮盈分批止盈锁定收益';
+        else if (r.label === '暂停') actionStr = '停止加码，浮盈分批止盈锁定收益';
+        else if (r.label === '减半') actionStr = '放缓定投节奏，关注止盈档位';
+        else if (r.label === '双倍') actionStr = '加大买入，积极拉低成本';
+        else if (r.label === '加强') actionStr = '维持或加大定投节奏';
+        else if (r.dev === null && (r.pct === null || r.pct === undefined)) actionStr = '自动获取净值/均线数据后即可分析';
+        else actionStr = '按计划定投，持有不动';
         const profitStr = r.ret === null ? '' : ('当前收益率 ' + fmtSigned(r.ret) + (r.nextTier ? '｜下一止盈档 +' + r.nextTier.ret + '%（卖' + r.nextTier.sell + '%）' : '｜各止盈档已执行完毕'));
         return '<li style="margin:12px 0;padding:10px 12px;background:#FAF8F2;border-radius:8px;">'
           + '<b>【' + r.code + '】' + r.name + '</b>'
@@ -610,9 +656,10 @@ export async function handle(
         + (stockBlock ? '<ul style="padding-left:0;list-style:none;">' + stockBlock + '</ul>' : '<p style="color:#707C8C;">暂无股票（可在股票标签页添加）</p>')
         + '<div style="background:#F1EDE3;padding:14px;border-radius:8px;margin:16px 0;font-size:13px;">'
         + '<b>📖 信号规则速查</b>：双倍/加强 = 加大买入拉低成本｜正常 = 按计划定投｜减半/暂停 = 少买或停买<br>'
+        + '档位 = 均线偏离 + 估值百分位两腿合成，与页面同口径；QDII溢价 / 主题仓位超限 / 手动暂停可覆盖档位<br>'
         + '止盈档位达到时系统会提醒分批卖出；大盘参考指数升至高位会降低买入系数。'
         + '</div>'
-        + '<p style="color:#707C8C;font-size:12px;">本邮件由定投信号台自动发送 · 每日 20:30/22:30 自动更新</p>'
+        + '<p style="color:#707C8C;font-size:12px;">本邮件由定投信号台自动发送 · 每日 22:30（北京时间）自动更新</p>'
         + '</div>';
 
       if (items.length > 0 || isFirstRun || force) {

@@ -470,10 +470,6 @@
 </div>
 </div>
 
-<div class="modal-backdrop" id="fundModalBackdrop">
-  <div class="modal" id="fundModal"></div>
-</div>
-
 <div class="modal-backdrop" id="loginModalBackdrop">
   <div class="modal">
     <h2>登录云同步</h2>
@@ -534,7 +530,6 @@ function tierPresetFor(text){
 
 let funds = [];
 let themeCaps = {...DEFAULT_CAPS};
-let editingId = null;
 // fund id → 「自动获取」按完整历史回算出的连续站上MA60天数，保存时同步后清除
 const fetchedStreaks = {};
 
@@ -2324,6 +2319,9 @@ function loginMsg(text, color){
   m.style.color = color || 'var(--muted)';
 }
 
+// ==== SIGNAL_PURE_BEGIN ====
+// 基金/大盘信号引擎纯函数块：被 scripts/signal_parity.ts 逐字抽取，与 daily-update 的服务端实现做双端一致性比对。
+// 块内含 DOM 辅助函数（renderMktStrip 等），它们只被页面调用；抽取执行时不需要真实 DOM。
 // 大盘档位：阈值按指数波动设定（波动大的指数放宽），dev 为较双均线平均偏离
 function marketLevel(dev, th){
   th = th || [-8,-3,3,8];
@@ -2490,6 +2488,13 @@ function themeMarketValue(themeName){
 // 主题上限 = 上限% × 目标总额（冻结锚定 GOAL，按当前市值计量；超限仅停新增）
 function themeCapAmount(themeName){
   return (themeCaps[themeName] ?? 100)/100*goal;
+}
+
+// 大盘参考键裁决：空串 = 用户明确选「不参考」→ 豁免系数；未填 = 默认沪深300；未知键 → 无系数可用
+// 页面与 daily-update 必须同款（邮件曾把「不参考」当 HS300 用系数，2026-10-18 双端一致性整改）
+function fundBenchKey(f){
+  if(f.benchmark === '') return '';
+  return f.benchmark || 'HS300';
 }
 
 // Core signal engine. Returns {level, label, multiplier, reasons:[]}
@@ -2660,6 +2665,7 @@ function evalFundSignal(f){
 
   return baseSignal(f);
 }
+// ==== SIGNAL_PURE_END ====
 
 // 止盈命中判定（通用）：基金传 computeReturn(f)，股票卡自带 ret 传同口径值
 function profitAlertFromRet(ret, item){
@@ -2838,7 +2844,7 @@ function renderFundList(){
     const ret = computeReturn(f);
 
     // 大盘档位系数：按各基金自选的参考指数计算；选「不参考」（空值）则豁免
-    const bkey = f.benchmark === '' ? '' : (f.benchmark || 'HS300');
+    const bkey = fundBenchKey(f);
     const bm = (bkey && BENCHMARKS[bkey]) ? mktMap[bkey] : null;
     const mktOn = !!(bm && bm.ready);
     const coef = mktOn ? bm.coef : 1;
