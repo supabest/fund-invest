@@ -1,6 +1,8 @@
 {
-  "_comment": "仓库根命令入口。verify-bundles 是 deploy.ts 构建产物一致性门禁（部署前必跑）；说明见 README.md「构建产物与一致性校验」。",
+  "_comment": "仓库根命令入口。三道门禁：check-secrets 扫凭据泄漏（推送前）、test 跑全部单测、verify-bundles 校验 deploy.ts 构建产物（部署前）。说明见 README.md「本地校验门禁」。",
   "tasks": {
+    "test": "deno test -A scripts/ supabase/functions/",
+    "check-secrets": "deno run --allow-read --allow-run scripts/check_secrets.ts",
     "verify-bundles": "deno run --allow-read --allow-write --allow-run scripts/verify_deploy_bundles.ts"
   }
 }

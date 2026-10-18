@@ -52,8 +52,8 @@
 
 1. **环境变量是否正确保存**
    - 回到 Secrets 页面
-   - 确认 DAILY_UPDATE_TOKEN 的值是你刚才生成的：
-     `767f27fb2c6f43538a18764f48f211ce5fb140674a2cbb5c01d29e30a9dbbf0c`
+   - 确认 `DAILY_UPDATE_TOKEN` 的值与 `pg_cron` 任务里的 Bearer 一致（token 只存在这两处，不落仓库）：
+     用 Dashboard → Functions → daily-update → Secrets 查看/重建，不要在文档或脚本里粘贴明文
 
 2. **函数是否使用了最新的环境变量**
    - 有时候需要重新部署才能生效

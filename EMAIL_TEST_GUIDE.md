@@ -14,8 +14,13 @@
 
 ```
 Key: DAILY_UPDATE_TOKEN
-Value: 767f27fb2c6f43538a18764f48f211ce5fb140674a2cbb5c01d29e30a9dbbf0c
+Value: <粘贴你自己生成的随机值，例如 openssl rand -hex 32 的输出>
 ```
+
+> ⚠ 本仓库曾把真实 token 写进本文件（2026-10-18 清理并门禁化，见 `scripts/check_secrets.ts`）。
+> token 只应存在于两处：函数 Secrets 与 `pg_cron` 任务定义（`select * from cron.job` 可见）。
+> 一旦怀疑外泄：先重建 token → 更新 4 个相关函数的 Secrets（daily-update / stock-score / business-mix / stock-value）
+> → 把 `cron.job` 里所有 `Bearer <旧值>` 的任务一并改掉，最后再清理仓库文本。
 
 5. 点击 **"Add variable"**
 6. 点击右上角 **"Save changes"**
@@ -51,9 +56,12 @@ chmod +x test-email.sh
 ### 方法二：手动 curl 命令
 
 ```bash
-curl -X POST "https://sfauluwxmdginezbluvo.supabase.co/functions/v1/daily-update" \
-  -H "apikey: sb_publishable_ogx_OZOqR0tEgr24Dt1DSg_VZasrzuM" \
-  -H "Authorization: Bearer 767f27fb2c6f43538a18764f48f211ce5fb140674a2cbb5c01d29e30a9dbbf0c" \
+# 凭据只走环境变量（脚本会强制校验，不再硬编码）
+export SUPABASE_URL="https://<project-ref>.supabase.co"
+export DAILY_UPDATE_TOKEN="<函数 secret 同值>"
+curl -X POST "${SUPABASE_URL}/functions/v1/daily-update" \
+  -H "apikey: ${SUPABASE_PUBLISHABLE_KEY:-sb_publishable_ogx_OZOqR0tEgr24Dt1DSg_VZasrzuM}" \
+  -H "Authorization: Bearer ${DAILY_UPDATE_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{"force": true}' \
   --max-time 180

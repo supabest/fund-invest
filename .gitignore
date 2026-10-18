@@ -9,3 +9,4 @@ site/
 .deploy-site/
 .vercel-tmp/
 .wrangler/
+.probe-tmp/

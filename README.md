@@ -26,9 +26,22 @@
   - `business-mix` — 主营构成与行业映射
   - `stock-research` — 产业研究员（LLM 深度研究）
   - `stock-value` — 个股价值腿（VQ 质量价值评分）
-- **定时任务**：pg_cron 任务定义与数据库迁移脚本位于 `scripts/`（如 `cron_stock_score.sql`、`cron_sector_trend.sql`、`cron_business_mix.sql` 及各 `migrate_*.sql`）。
+- **定时任务**：pg_cron 任务定义与数据库迁移脚本位于 `scripts/`（`cron_daily_update.sql`、`cron_stock_score.sql`、`cron_stock_value.sql`、`cron_business_mix.sql`、`cron_sector_trend.sql`、`reschedule_sector_trend_cron.sql` 及各 `migrate_*.sql`）。cron 模板里的 Bearer 是占位符，真值只存在生产库 `cron.job`。
 
-## 构建产物与一致性校验
+## 本地校验门禁
+
+推送/部署前依次跑（根目录 `deno task`）：
+
+```bash
+deno task test              # 全部单元测试（scripts/ + supabase/functions/）
+deno task check-secrets     # 凭据泄漏扫描（git 跟踪文件；命中 exit 1，只打印脱敏预览）
+deno task verify-bundles    # deploy.ts 构建产物逐字节一致性
+```
+
+- **`test`**：`scripts/` 下的前端纯逻辑门面（`scripts/*_logic.ts` 用正则从 `index.html` 的 `*_PURE` 标记块逐字抽取执行）与 Edge Functions 单测。其中 `scripts/signal_parity_test.ts` 是**双端信号一致性门禁**：`index.html` 的 `SIGNAL_PURE` 块与 `daily-update` 的服务端信号实现做穷举矩阵比对（档位合成、优先级顺序、大盘系数、默认常量、偏离度/成本口径），任何一侧改语义都必须同步另一侧，否则红灯。
+- **`check-secrets`**：识别 64 位十六进制串 / `Bearer` 实值 / JWT / `apiKey=` 实值 / `sb_secret_`·`service_role` 明文。按设计放行的有 `sb_publishable_`（可公开，读路径靠 RLS）与 `deno.lock` 的 integrity 哈希；假阳性可在行内加 `secret-scan: allow` 注释（须写明原因）。仓库曾把真实 `DAILY_UPDATE_TOKEN` 写进 `test-email.sh`、`EMAIL_TEST_GUIDE.md`、`DASHBOARD_TEST.md`（2026-10-18 清理并加门禁）；若怀疑泄漏过真实凭据，先轮换（重建 token → 更新函数 Secrets → 改 `cron.job` 里的 Bearer），再提交文本清理。
+
+## deploy.ts 拼接产物（verify-bundles 细节）
 
 `supabase/functions/{sector-trend,stock-score,stock-research,business-mix,stock-value}/deploy.ts` 是各自目录 `build.ts` 把源模块拼接成的单文件部署产物（**不可手改**，部署推的就是它）。所有单元测试都从源模块导入，不覆盖 `deploy.ts`，因此改完源码务必重跑构建，并在部署前用仓库根命令入口校验产物与源码逐字节一致：
 
@@ -41,4 +54,4 @@ deno task verify-bundles                              # 等价于 deno run --all
 
 ## 设计文档
 
-各模块的权威设计规格见 [`docs/superpowers/specs/`](docs/superpowers/specs/)，包括股票评分（V1/V1.1）、板块轮动、产业研究员、板块景气展示等。
+各模块的权威设计规格见 [`docs/superpowers/specs/`](docs/superpowers/specs/)，包括股票评分（V1/V1.1）、板块轮动、产业研究员、板块景气展示、个股价值腿（VQ）等。实施计划与决策账（含实跑记录、被推翻的判断）见 [`docs/superpowers/plans/`](docs/superpowers/plans/)。
