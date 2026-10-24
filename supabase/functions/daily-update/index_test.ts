@@ -8,7 +8,7 @@ Deno.env.set("DAILY_UPDATE_DISABLE_SERVE", "1");
 Deno.env.set("DAILY_UPDATE_TOKEN", "test-token");
 Deno.env.set("SUPABASE_URL", "https://fake.supabase.co");
 Deno.env.set("SB_SERVICE_KEY", "svc-placeholder");
-const { handle } = await import("./index.ts");
+const { handle, holdingsSummaryHtml } = await import("./index.ts");
 
 const SB = "https://fake.supabase.co";
 const TOKEN = "test-token";
@@ -154,6 +154,90 @@ Deno.test("写库异常（signal_state upsert 失败）→ 500 且响应为约�
       true,
       "应输出一条带 [daily-update][写库] 标签、含表名的可归因失败日志行",
     );
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+// ── 持仓概览汇总块（2026-10-24 加）：纯函数 4 条 + 接线 1 条 ──
+// 加这层的起因：web 端顶部有三宫格大号「基金收益率/股票收益率」，邮件只在每张卡片第三行
+// 用小号灰字印当前收益率，没有汇总。用户要求"在明显位置显示持仓的当前收益率"。
+// 判据不动（信号/止盈/系数一字未改），只多渲染一块纯展示。
+
+Deno.test("holdingsSummaryHtml：正负号、着色、千分位金额一次说全", () => {
+  const html = holdingsSummaryHtml(
+    { mv: 128400, cost: 120250, n: 5, nCost: 5 },
+    { mv: 64900, cost: 67040, n: 4, nCost: 4 },
+    "2026-10-24",
+  );
+  assertEquals(html.includes("持仓概览"), true);
+  assertEquals(html.includes("按 2026-10-24 最新净值 / 收盘价"), true, "口径必须写在块里，别让读者猜");
+  // 基金：(128400-120250)/120250 = +6.777% → +6.8%
+  assertEquals(html.includes("+6.8%"), true);
+  assertEquals(html.includes("#3F8A68"), true, "正收益用绿");
+  assertEquals(html.includes("¥128,400"), true, "金额要带千分位");
+  assertEquals(html.includes("浮盈 +¥8,150"), true);
+  // 股票：(64900-67040)/67040 = -3.192% → -3.2%
+  assertEquals(html.includes("-3.2%"), true);
+  assertEquals(html.includes("#B14A34"), true, "负收益用红");
+  assertEquals(html.includes("浮亏 -¥2,140"), true);
+});
+
+Deno.test("holdingsSummaryHtml：成本全缺 → 收益率必须是 --，绝不拿 0 当分母", () => {
+  const html = holdingsSummaryHtml({ mv: 10000, cost: 0, n: 2, nCost: 0 }, null, "2026-10-24");
+  assertEquals(html.includes("--"), true);
+  assertEquals(html.includes("未填成本"), true, "缺成本要说清是缺，不是 0");
+  assertEquals(/NaN|Infinity/.test(html), false, "cost=0 若当分母会算出 NaN/Infinity 直接甩到用户眼前");
+  assertEquals(html.includes("股票"), false, "没有股票持仓就不渲染股票段，不留空壳");
+});
+
+Deno.test("holdingsSummaryHtml：部分缺成本 → 如实标「成本已填 3/4 只」", () => {
+  const html = holdingsSummaryHtml(null, { mv: 4000, cost: 3000, n: 4, nCost: 3 }, "2026-10-24");
+  assertEquals(html.includes("成本已填 3/4 只"), true);
+  assertEquals(html.includes("基金"), false);
+});
+
+Deno.test("holdingsSummaryHtml：两边都没持仓 → 空串（不留空壳标题）", () => {
+  assertEquals(holdingsSummaryHtml(null, null, "2026-10-24"), "");
+  assertEquals(
+    holdingsSummaryHtml({ mv: 0, cost: 0, n: 0, nCost: 0 }, { mv: 0, cost: 0, n: 0, nCost: 0 }, "2026-10-24"),
+    "",
+  );
+});
+
+Deno.test("接线：汇总块必须真出现在发出去的邮件里，且位置在日期之后、基金分析之前", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      // 500 份 × 今夜净值 1.60 = 市值 800；成本净值 1.00 → 成本 500 → 收益率 +60.0%
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: { funds: [{ fundCode: "000001", name: "测试基金", benchmark: "ZZZ", marketValue: 800, shares: 500, costBasis: 1 }] },
+      }]));
+    }
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const deps = { sendMail: async (_s: string, html: string) => { mail = html; } };
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), deps);
+    assertEquals(res.status, 200);
+    const iHead = mail.indexOf("收盘数据已自动更新");
+    const iSum = mail.indexOf("持仓概览");
+    const iFund = mail.indexOf("基金分析");
+    assertEquals(iSum > 0, true, "邮件里必须有持仓概览块（纯函数绿了不代表接上了）");
+    assertEquals(iHead < iSum && iSum < iFund, true, "位置：日期之后、基金分析之前");
+    // 卡片里本来就印着「当前收益率 +60.0%」，所以必须只在汇总块这一段里断言，否则会假绿
+    const block = mail.slice(iSum, iFund);
+    assertEquals(block.includes("+60.0%"), true, "汇总块自己必须算出 +60.0%");
+    assertEquals(block.includes("成本已填 1/1 只"), true);
+    assertEquals(/NaN|Infinity/.test(mail), false);
   } finally {
     globalThis.fetch = real;
     logs.restore();

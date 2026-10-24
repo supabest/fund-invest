@@ -4,6 +4,9 @@
 //   （QDII → 手动暂停/恢复 → 主题上限 → 常规）、参考指数「不参考」空串恢复豁免语义；
 //   双端一致性由 scripts/signal_parity_test.ts 穷举矩阵守护（改这里必须同步改 index.html 的 SIGNAL_PURE 块）。
 //   本改动未部署前邮件仍按旧口径发送。
+// v6 (2026-10-24): 邮件加「📋 持仓概览」汇总块——基金/股票各自的总市值、收益率、浮盈浮亏，
+//   位置在日期行之后、分析正文之前，对齐页面顶部三宫格。纯展示层：信号/止盈/买入系数一字未动。
+//   市值用今夜价重估（基金今晚拉到的净值、股票今收盘），成本沿用页面 effectiveCost 的每份成本口径。
 // 触发方式: POST /functions/v1/daily-update，Authorization: Bearer <DAILY_UPDATE_TOKEN>
 // 可选 body: {"force":true} 无变化也发送报告
 const GOAL_DEFAULT = 200000;
@@ -29,9 +32,20 @@ export function marketLevel(dev: number | null, th: number[]) {
   return { level: 'neutral', label: '中性', coef: 1 };
 }
 
+// 每份成本：优先「持仓成本净值」；只填「持仓总成本」时按 份额=市值/当前净值 折算（与页面 effectiveCost 同式）。
+// 提取独立函数是为了让 computeReturn 与「持仓概览」汇总用同一个成本口径；两处各算一遍迟早漂。
+export function effectiveCost(f: any): number {
+  const cb = Number(f.costBasis) || 0;
+  if (cb > 0) return cb;
+  const ct = Number(f.costTotal) || 0;
+  const nav = Number(f.currentNav) || 0;
+  const mv = Number(f.marketValue) || 0;
+  if (ct > 0 && nav > 0 && mv > 0) return ct / (mv / nav);
+  return 0;
+}
+
 export function computeReturn(price: number, f: any): number | null {
-  const cb = (f.costBasis && f.costBasis > 0) ? f.costBasis
-    : ((f.costTotal && f.costTotal > 0 && f.currentNav > 0 && f.marketValue > 0) ? f.costTotal / (f.marketValue / f.currentNav) : 0);
+  const cb = effectiveCost(f);
   if (!cb) return null;
   return (price - cb) / cb * 100;
 }
@@ -136,6 +150,67 @@ export function evalFundSignalServer(f: any, nav: number, dev: number | null, st
 
 function fmtSigned(n: number): string {
   return (n >= 0 ? '+' : '') + n.toFixed(1) + '%';
+}
+
+// ── 持仓概览（2026-10-24 加）：纯展示，不进任何判据 ──
+const C_UP = '#3F8A68';
+const C_DOWN = '#B14A34';
+const C_MUTED = '#707C8C';
+
+export interface HoldingsAgg {
+  mv: number; // 市值（今夜价重估）
+  cost: number; // 已填成本小计
+  n: number; // 持仓只数（仅计可估值的那部分）
+  nCost: number; // 其中已填成本的只数
+}
+
+function money(n: number): string {
+  return '¥' + Math.abs(Math.round(n)).toLocaleString('en-US');
+}
+
+// 成本金额：每份成本 × 份额；没填份额时按「市值 × 每份成本 ÷ 净值」折算。
+// 与页面 render() 的 mv*cost/currentNav 同式，差别只是净值取今夜刚拉到的那一个（口径见文件头 v6）。
+// 返回 0 表示成本缺失 —— 调用方据此把收益率记为 null，绝不拿 0 当分母。
+export function holdingCostOf(costPerUnit: number, shares: number, mv: number, nav: number): number {
+  const per = Number(costPerUnit) || 0;
+  if (per <= 0) return 0;
+  const sh = Number(shares) || 0;
+  if (sh > 0) return sh * per;
+  if (mv > 0 && nav > 0) return mv * per / nav;
+  return 0;
+}
+
+function holdingsRow(label: string, ag: HoldingsAgg): string {
+  const pnl = ag.cost > 0 ? ag.mv - ag.cost : null;
+  const rate = pnl === null ? null : pnl / ag.cost * 100;
+  const color = rate === null ? C_MUTED : (rate >= 0 ? C_UP : C_DOWN);
+  const rateStr = rate === null ? '--' : (rate >= 0 ? '+' : '') + rate.toFixed(1) + '%';
+  const costNote = ag.nCost === 0 ? '未填成本，收益率暂不可算' : '成本已填 ' + ag.nCost + '/' + ag.n + ' 只';
+  const pnlStr = pnl === null ? '' : (pnl >= 0 ? '浮盈 +' : '浮亏 -') + money(pnl) + ' · ';
+  return '<tr>'
+    + '<td style="padding:6px 10px 0 0;font-size:13px;color:' + C_MUTED + ';white-space:nowrap;">' + label + '</td>'
+    + '<td style="padding:6px 10px 0 0;font-size:17px;font-weight:700;color:' + color + ';white-space:nowrap;">' + rateStr + '</td>'
+    + '<td style="padding:6px 0 0;font-size:13px;color:#1B2436;white-space:nowrap;">市值 ' + money(ag.mv) + '</td>'
+    + '</tr>'
+    + '<tr><td></td><td colspan="2" style="padding:0 0 4px;font-size:12px;color:' + C_MUTED + ';">' + pnlStr + costNote + '</td></tr>';
+}
+
+// 汇总块：任一大类没持仓就整段不渲染（不留空壳），两边都没有则返回空串。
+export function holdingsSummaryHtml(
+  fund: HoldingsAgg | null,
+  stock: HoldingsAgg | null,
+  dateStr: string,
+): string {
+  const rows: string[] = [];
+  if (fund && fund.n > 0 && fund.mv > 0) rows.push(holdingsRow('基金', fund));
+  if (stock && stock.n > 0 && stock.mv > 0) rows.push(holdingsRow('股票', stock));
+  if (!rows.length) return '';
+  return '<div style="background:#F1EDE3;border-radius:8px;padding:12px 14px;margin:14px 0;">'
+    + '<div style="font-size:14px;font-weight:700;color:#1B2436;">💼 持仓概览'
+    + '<span style="font-weight:400;font-size:12px;color:' + C_MUTED + ';">（按 ' + dateStr + ' 最新净值 / 收盘价）</span></div>'
+    + '<table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">'
+    + rows.join('')
+    + '</table></div>';
 }
 
 function base64Utf8(s: string): string {
@@ -365,6 +440,7 @@ export async function handle(
     const fundSignalRows: any[] = [];
     const fundMeta: Record<string, { name: string; nav: number; navDate: string }> = {};
     const fundReport: Record<string, any[]> = {};
+    const fundHold: Record<string, HoldingsAgg> = {};
     for (const code of fundUniq) {
       try {
         const pzRes = await fetchRetry('https://fund.eastmoney.com/pingzhongdata/' + code + '.js?dt=' + Date.now(), {
@@ -403,6 +479,15 @@ export async function handle(
           const funds = (st.data && st.data.funds) || [];
           const f = funds.find((x: any) => String(x.fundCode || '').trim() === code) || {};
           const fm = (f.shares > 0 && close > 0) ? f.shares * close : (parseFloat(f.marketValue) || 0);
+          // 持仓概览累加（只计可估值的持仓：mv>0；成本缺失时 nCost 不增，收益率显示 --）
+          if (fm > 0) {
+            const fcost = holdingCostOf(effectiveCost(f), f.shares, fm, close);
+            const ag = (fundHold[userId] = fundHold[userId] || { mv: 0, cost: 0, n: 0, nCost: 0 });
+            ag.mv += fm;
+            ag.cost += fcost;
+            ag.n += 1;
+            if (fcost > 0) ag.nCost += 1;
+          }
           const themeCaps = { ...DEFAULT_CAPS, ...((st.data && st.data.themeCaps) || {}) };
           // themeSum 与页面 themeMarketValue 的口径差异（已确认可收敛，勿当漂移修）：
           // 这里对本只基金用「份额×最新净值」（今夜刚拉到），其余用存量 marketValue；页面用存量 marketValue 求和。
@@ -454,6 +539,7 @@ export async function handle(
     const stockUniq = [...new Set(stockJobs.map(j => j.code))];
     const stockSignalRows: any[] = [];
     const stockReport: Record<string, any[]> = {};
+    const stockHold: Record<string, HoldingsAgg> = {};
     for (const code of stockUniq) {
       try {
         const secid = code.length === 5 ? ('116.' + code) : (code.startsWith('6') ? ('1.' + code) : ('0.' + code));
@@ -476,6 +562,17 @@ export async function handle(
           const arr = (st.data && st.data.stocks) || [];
           const s = arr.find((x: any) => String(x.code || '').trim() === code) || {};
           const ret = stockReturn(s, close);
+          // 持仓概览累加：市值 = 份额 × 今夜收盘（没填份额就不计，避免把 0 混进收益率）
+          const sShare = Number(s.shares) || 0;
+          const sMv = (sShare > 0 && close > 0) ? sShare * close : 0;
+          if (sMv > 0) {
+            const scost = holdingCostOf(parseFloat(s.cost) || 0, sShare, sMv, close);
+            const ag = (stockHold[userId] = stockHold[userId] || { mv: 0, cost: 0, n: 0, nCost: 0 });
+            ag.mv += sMv;
+            ag.cost += scost;
+            ag.n += 1;
+            if (scost > 0) ag.nCost += 1;
+          }
           const tier = baseSignalLabel(dev);
           const tiers = (s.profitTiers && s.profitTiers.length) ? s.profitTiers : DEFAULT_TIERS;
           let newTier: number | null = null;
@@ -647,6 +744,7 @@ export async function handle(
       const html = '<div style="font-family:-apple-system,PingFang SC,Arial;max-width:600px;margin:0 auto;font-size:14px;color:#1B2436;line-height:1.7;">'
         + '<h2 style="font-size:18px;border-bottom:2px solid #A87C2E;padding-bottom:8px;">定投信号台 · ' + title + '</h2>'
         + '<p style="color:#707C8C;">' + dateStr + ' 收盘数据已自动更新</p>'
+        + holdingsSummaryHtml(fundHold[userId] || null, stockHold[userId] || null, dateStr)
         + (items.length
           ? '<h3 style="font-size:16px;margin:20px 0 12px;">📢 今日重要提醒</h3><ul style="padding-left:18px;margin:12px 0;">' + items.map(i => '<li style="margin:8px 0;">' + i + '</li>').join('') + '</ul>'
           : '<p style="color:#3F8A68;">✅ 今日无信号变化，各资产按计划执行即可。</p>')
