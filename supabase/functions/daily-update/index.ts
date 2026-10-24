@@ -10,6 +10,10 @@
 // v7 (2026-10-25): 邮件加「🟢 抄底提示」横幅——某只基金当前跌幅已跌破自己的「目标跌幅安全垫」时，
 //   在日期行后、持仓概览前逐只点名。补齐页面已有、邮件缺失的抄底提示；同样纯展示层，不进 items、不改发信条件。
 //   主信号暂停时不喊买，只报状态；判据与页面 dipAlertFund 一致（含 1e-9 踩线容差）。
+// v8 (2026-10-25): 提速整改——取数改并发池（基金/指数/股票各 3 并发），重试 3→2、超时 9s→6s，
+//   并加阶段计时日志 `[daily-update][计时] state/fundFetch/write/mail`。
+//   起因：force 触发撞上 Edge 150s 墙钟（546 @151s），而 10 只基金串行取数一旦遇上游限流就必然超时；
+//   取数是网络等待，串行纯亏墙钟，写库仍是串行（单次几十毫秒，且失败需要逐表归因）。
 // 触发方式: POST /functions/v1/daily-update，Authorization: Bearer <DAILY_UPDATE_TOKEN>
 // 可选 body: {"force":true} 无变化也发送报告
 const GOAL_DEFAULT = 200000;
@@ -250,6 +254,20 @@ export function dipBannerHtml(list: Array<{ code: string; name?: string; ret: nu
     + '<div style="font-size:13px;color:#1B2436;margin-top:4px;">' + lines.join('<br>') + '</div></div>';
 }
 
+// 并发池：限制同时在飞的请求数。取数改并发的理由见 v8 头注释——串行 + 3 次重试会把整段拖到 150s 墙钟边缘。
+// fn 自己负责吞错（返回结果对象），所以这里不需要 allSettled；单项失败不能拖倒其余项。
+async function mapPool<T>(items: T[], limit: number, fn: (x: T) => Promise<void>): Promise<void> {
+  let cursor = 0;
+  const workers = new Array(Math.max(1, Math.min(limit, items.length))).fill(0).map(async () => {
+    for (;;) {
+      const i = cursor++;
+      if (i >= items.length) return;
+      await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+}
+
 function base64Utf8(s: string): string {
   const bytes = new TextEncoder().encode(s);
   let bin = '';
@@ -373,6 +391,10 @@ export async function handle(
   const serviceKey = Deno.env.get('SB_SERVICE_KEY') || Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') || '';
   const H = { apikey: serviceKey, Authorization: 'Bearer ' + serviceKey, 'Content-Type': 'application/json' };
   const summary: any = { funds: [], stocks: [], indices: [], notifications: [], users: 0 };
+  // 阶段计时（v8）：150s 墙钟是硬上限，出问题时要能直接从日志看出钱花在哪一段，而不是靠推断。
+  const T0 = Date.now();
+  const timings: string[] = [];
+  const mark = (label: string) => timings.push(label + ' ' + (Date.now() - T0) + 'ms');
 
   const post = async (table: string, onConflict: string, rows: any[]) => {
     if (!rows.length) return;
@@ -388,7 +410,7 @@ export async function handle(
     }
   };
 
-  const fetchRetry = async (url: string, headers: any, tries = 3, timeoutMs = 9000): Promise<Response> => {
+  const fetchRetry = async (url: string, headers: any, tries = 2, timeoutMs = 6000): Promise<Response> => {
     let lastErr: any = null;
     for (let i = 0; i < tries; i++) {
       const ctrl = new AbortController();
@@ -427,6 +449,7 @@ export async function handle(
     }
     const states = await stRes.json();
     summary.users = states.length;
+    mark('state');
 
     const fundJobs: { userId: string; code: string }[] = [];
     const stockJobs: { userId: string; code: string }[] = [];
@@ -452,9 +475,18 @@ export async function handle(
 
     // 2. 先取参考指数行情与档位（基金/股票报告的建议金额需要用到系数）
     const idxLevels: Record<string, { label: string; coef: number }> = {};
-    for (const k of idxSet) {
+    // 先并发把指数 K 线拿回来（并发 3），再串行算档位 + 落库——取数是网络等待，串行纯亏墙钟。
+    const idxKeys = [...idxSet];
+    const idxKMap = new Map<string, { kk?: { date: string; close: number; closes: number[]; name: string }; err?: any }>();
+    await mapPool(idxKeys, 3, async (k) => {
+      try { idxKMap.set(k, { kk: await fetchKline(BENCH[k].secid, 1, 130) }); }
+      catch (e) { idxKMap.set(k, { err: e }); }
+    });
+    for (const k of idxKeys) {
       try {
-        const kk = await fetchKline(BENCH[k].secid, 1, 130);
+        const pre = idxKMap.get(k);
+        if (!pre || pre.kk === undefined) throw (pre && pre.err) || new Error('index fetch failed');
+        const kk = pre.kk;
         const close = kk.close;
         const ma60 = ma(kk.closes, 60);
         const ma120 = ma(kk.closes, 120);
@@ -479,12 +511,31 @@ export async function handle(
     const fundReport: Record<string, any[]> = {};
     const fundHold: Record<string, HoldingsAgg> = {};
     const fundDips: Record<string, Array<{ code: string; name: string } & FundDip>> = {};
+    // 3a. 基金净值原文并发预取（并发 5、重试 2 次 / 8s）。
+    // 原实现串行 + 3 次重试，10 只基金一旦遇上游限流，最坏 10×（9×3+退避）就越过 150s 墙钟。
+    // 并发 3/6s 实测：每只都在 6s 撞超时再重试（东财单文件 6–10s），整段仍要 57s ⇒ 提到 5 并发、8s。
+    const pzMap = new Map<string, { txt?: string; err?: string; ms: number }>();
+    await mapPool(fundUniq, 5, async (code) => {
+      const t = Date.now();
+      try {
+        const r = await fetchRetry('https://fund.eastmoney.com/pingzhongdata/' + code + '.js?dt=' + Date.now(), {
+          headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://fund.eastmoney.com/' }
+        }, 2, 8000);
+        pzMap.set(code, { txt: await r.text(), ms: Date.now() - t });
+      } catch (e) {
+        pzMap.set(code, { err: String((e as any)?.message || e), ms: Date.now() - t });
+      }
+    });
+    const pzTop = fundUniq.map(c => ({ c, ms: pzMap.get(c)?.ms || 0 })).sort((a, b) => b.ms - a.ms).slice(0, 3);
+    if (pzTop.length && pzTop[0].ms > 3000) {
+      console.log('[daily-update][计时] 最慢基金取数 ' + pzTop.map(x => x.c + ' ' + x.ms + 'ms').join(', '));
+    }
+    mark('fundFetch');
     for (const code of fundUniq) {
       try {
-        const pzRes = await fetchRetry('https://fund.eastmoney.com/pingzhongdata/' + code + '.js?dt=' + Date.now(), {
-          headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://fund.eastmoney.com/' }
-        });
-        const txt = await pzRes.text();
+        const pz = pzMap.get(code);
+        if (!pz || pz.txt === undefined) throw new Error('pingzhongdata ' + (pz ? pz.err : 'not fetched'));
+        const txt = pz.txt;
         const nameMatch = txt.match(/var fS_name\s*=\s*"([^"]*)"/);
         const trendMatch = txt.match(/var Data_netWorthTrend\s*=\s*(\[[\s\S]*?\]);/);
         if (!trendMatch) throw new Error('no trend in source');
@@ -585,10 +636,18 @@ export async function handle(
     const stockSignalRows: any[] = [];
     const stockReport: Record<string, any[]> = {};
     const stockHold: Record<string, HoldingsAgg> = {};
+    // 先并发取 K 线，再串行算信号 + 落库（理由同基金：取数才是墙钟大户）。
+    const stKMap = new Map<string, { k?: { date: string; close: number; closes: number[]; name: string }; err?: any }>();
+    await mapPool(stockUniq, 3, async (code) => {
+      const secid = code.length === 5 ? ('116.' + code) : (code.startsWith('6') ? ('1.' + code) : ('0.' + code));
+      try { stKMap.set(code, { k: await fetchKline(secid, 1, 130) }); }
+      catch (e) { stKMap.set(code, { err: e }); }
+    });
     for (const code of stockUniq) {
       try {
-        const secid = code.length === 5 ? ('116.' + code) : (code.startsWith('6') ? ('1.' + code) : ('0.' + code));
-        const k = await fetchKline(secid, 1, 130);
+        const pre = stKMap.get(code);
+        if (!pre || pre.k === undefined) throw (pre && pre.err) || new Error('kline fetch failed');
+        const k = pre.k;
         const close = k.close;
         const ma20 = ma(k.closes, 20);
         const ma60 = ma(k.closes, 60);
@@ -678,6 +737,9 @@ export async function handle(
         (stockReport[userId] = stockReport[userId] || []).push({ capAlert: '股票总仓位 ¥' + Math.round(total).toLocaleString() + ' 已超过总额上限 ¥' + Math.round(cap).toLocaleString() + '，建议暂停买入' });
       }
     }
+
+    mark('write');
+    console.log('[daily-update][计时] ' + timings.join(' | '));
 
     // 6. 分析报告 + 与昨日信号对比的变化提醒 + 邮件
     for (const userId of new Set([...Object.keys(fundReport), ...Object.keys(stockReport), ...Object.keys(invalidStocks)])) {
@@ -819,10 +881,14 @@ export async function handle(
 
     summary.ok = true;
     summary.at = new Date().toISOString();
+    mark('mail');
+    console.log('[daily-update][计时] 全链 ' + timings.join(' | '));
+    summary.timings = timings;
     return new Response(JSON.stringify(summary), { headers: { 'Content-Type': 'application/json' } });
   } catch (e) {
     logFailure('致命', 'nightly 任务异常终止', e);
-    return new Response(JSON.stringify({ ok: false, error: String((e as any)?.message || e).slice(0, 200) }), { status: 500 });
+    console.log('[daily-update][计时] 未完成 ' + timings.join(' | ') + ' | 已耗时 ' + (Date.now() - T0) + 'ms');
+    return new Response(JSON.stringify({ ok: false, error: String((e as any)?.message || e).slice(0, 200), timings }), { status: 500 });
   }
 }
 

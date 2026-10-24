@@ -333,3 +333,48 @@ Deno.test("接线：抄底横幅真进邮件，位置在日期之后、持仓概
     logs.restore();
   }
 });
+
+Deno.test("并发预取后单项失败仍隔离：坏基金不拖倒好基金，也不整链失败", async () => {
+  // 并发改造最容易引入的回归是"一个 worker 抛错把整池炸掉"，这条就是钉这个边界。
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (url.includes("pingzhongdata")) {
+      if (url.includes("000002")) {
+        // 结构合法但趋势为空：走解析分支报错，不会触发重试退避，测试不必等 3.6s
+        return Promise.resolve(new Response('var fS_name="坏基金"; var Data_netWorthTrend = [];', { status: 200 }));
+      }
+      return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    }
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: {
+          funds: [
+            { fundCode: "000001", name: "好基金", benchmark: "ZZZ", marketValue: 1000, shares: 100, costBasis: 2 },
+            { fundCode: "000002", name: "坏基金", benchmark: "ZZZ", marketValue: 500, shares: 50, costBasis: 2 },
+          ],
+        },
+      }]));
+    }
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  const deps = { sendMail: async () => {} };
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), deps);
+    assertEquals(res.status, 200);
+    const body = await res.json();
+    assertEquals(body.ok, true);
+    const byCode: Record<string, boolean> = {};
+    for (const f of body.funds) byCode[f.code] = f.ok;
+    assertEquals(byCode["000001"], true, "好基金不能因为邻居失败被带走");
+    assertEquals(byCode["000002"], false, "坏基金要如实标 ok:false");
+    assertEquals(body.funds.length, 2);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
