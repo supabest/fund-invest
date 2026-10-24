@@ -7,6 +7,9 @@
 // v6 (2026-10-24): 邮件加「📋 持仓概览」汇总块——基金/股票各自的总市值、收益率、浮盈浮亏，
 //   位置在日期行之后、分析正文之前，对齐页面顶部三宫格。纯展示层：信号/止盈/买入系数一字未动。
 //   市值用今夜价重估（基金今晚拉到的净值、股票今收盘），成本沿用页面 effectiveCost 的每份成本口径。
+// v7 (2026-10-25): 邮件加「🟢 抄底提示」横幅——某只基金当前跌幅已跌破自己的「目标跌幅安全垫」时，
+//   在日期行后、持仓概览前逐只点名。补齐页面已有、邮件缺失的抄底提示；同样纯展示层，不进 items、不改发信条件。
+//   主信号暂停时不喊买，只报状态；判据与页面 dipAlertFund 一致（含 1e-9 踩线容差）。
 // 触发方式: POST /functions/v1/daily-update，Authorization: Bearer <DAILY_UPDATE_TOKEN>
 // 可选 body: {"force":true} 无变化也发送报告
 const GOAL_DEFAULT = 200000;
@@ -211,6 +214,40 @@ export function holdingsSummaryHtml(
     + '<table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">'
     + rows.join('')
     + '</table></div>';
+}
+
+// 抄底提示：跌穿「目标跌幅安全垫」才亮（当前跌幅 ≥ 目标跌幅），与 index.html 的 dipAlertFund 同判据。
+// 两个细节沿用页面已有的决定：
+//   1) 1e-9 容差——恰好踩线时浮点退化（-19.999…）不能漏亮；
+//   2) 主信号暂停时 shout=false——只报状态，不在同一封信里既说暂停又喊加仓。
+// 与页面唯一的口径差异：这里用今夜净值算，页面用存量 currentNav（同持仓概览的收敛窗口，不当 bug 修）。
+export interface FundDip { ret: number; target: number; shout: boolean; }
+
+export function fundDipAlert(f: any, ret: number | null, sigLevel?: string): FundDip | null {
+  const raw = f && f.resumeRule ? f.resumeRule.targetDrawdown : undefined;
+  if (raw === null || raw === undefined || raw === '') return null;
+  const tdd = parseFloat(String(raw));
+  // 页面此处没挡 NaN：脏值会让 target 变 NaN、比较恒假而误亮。邮件侧按「未填」处理，宁可不喊。
+  if (!Number.isFinite(tdd) || tdd === 0) return null;
+  if (ret === null || !Number.isFinite(ret)) return null;
+  const target = -Math.abs(tdd);
+  if (ret > target + 1e-9) return null;
+  return { ret, target, shout: sigLevel !== 'pause' };
+}
+
+// 抄底横幅：每只触发基金一行；空列表返回空串，不留空壳。
+// 目标跌幅用 String() 而不是 toFixed(1)：页面回显是 -20%，邮件不能写成 -20.0% 增加噪音。
+export function dipBannerHtml(list: Array<{ code: string; name?: string; ret: number; target: number; shout: boolean }>): string {
+  if (!list.length) return '';
+  const lines = list.map(d => {
+    const who = '【' + d.code + '】' + (d.name ? d.name + ' ' : '');
+    const tail = d.shout ? '建议加仓/多投' : '主信号暂停中，暂不新增（仅状态提示）';
+    return who + '收益 ' + d.ret.toFixed(1) + '% 已跌破 ' + String(d.target) + '% 安全垫 → ' + tail;
+  });
+  return '<div style="background:#EAF3EE;border-left:3px solid ' + C_UP + ';border-radius:8px;padding:12px 14px;margin:14px 0;">'
+    + '<div style="font-size:14px;font-weight:700;color:' + C_UP + ';">🟢 抄底提示'
+    + '<span style="font-weight:400;font-size:12px;color:' + C_MUTED + ';">（当前跌幅已跌破「目标跌幅安全垫」）</span></div>'
+    + '<div style="font-size:13px;color:#1B2436;margin-top:4px;">' + lines.join('<br>') + '</div></div>';
 }
 
 function base64Utf8(s: string): string {
@@ -441,6 +478,7 @@ export async function handle(
     const fundMeta: Record<string, { name: string; nav: number; navDate: string }> = {};
     const fundReport: Record<string, any[]> = {};
     const fundHold: Record<string, HoldingsAgg> = {};
+    const fundDips: Record<string, Array<{ code: string; name: string } & FundDip>> = {};
     for (const code of fundUniq) {
       try {
         const pzRes = await fetchRetry('https://fund.eastmoney.com/pingzhongdata/' + code + '.js?dt=' + Date.now(), {
@@ -499,6 +537,13 @@ export async function handle(
           }, 0);
           const sig = evalFundSignalServer(f, close, dev, streak, themeCaps, themeSum, goal);
           const ret = computeReturn(close, f);
+          // 抄底提示：跌穿成本安全垫就点名（主信号暂停时不喊买，只报状态）
+          const dip = fundDipAlert(f, ret, sig.level);
+          if (dip) {
+            (fundDips[userId] = fundDips[userId] || []).push({
+              code, name: nameMatch ? nameMatch[1] : (f.name || ''), ...dip,
+            });
+          }
           const tiers = (f.profitTiers && f.profitTiers.length) ? f.profitTiers : DEFAULT_TIERS;
           let newTier: number | null = null;
           if (ret !== null && ret > 0) {
@@ -744,6 +789,7 @@ export async function handle(
       const html = '<div style="font-family:-apple-system,PingFang SC,Arial;max-width:600px;margin:0 auto;font-size:14px;color:#1B2436;line-height:1.7;">'
         + '<h2 style="font-size:18px;border-bottom:2px solid #A87C2E;padding-bottom:8px;">定投信号台 · ' + title + '</h2>'
         + '<p style="color:#707C8C;">' + dateStr + ' 收盘数据已自动更新</p>'
+        + dipBannerHtml(fundDips[userId] || [])
         + holdingsSummaryHtml(fundHold[userId] || null, stockHold[userId] || null, dateStr)
         + (items.length
           ? '<h3 style="font-size:16px;margin:20px 0 12px;">📢 今日重要提醒</h3><ul style="padding-left:18px;margin:12px 0;">' + items.map(i => '<li style="margin:8px 0;">' + i + '</li>').join('') + '</ul>'

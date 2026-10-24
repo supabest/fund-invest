@@ -8,7 +8,7 @@ Deno.env.set("DAILY_UPDATE_DISABLE_SERVE", "1");
 Deno.env.set("DAILY_UPDATE_TOKEN", "test-token");
 Deno.env.set("SUPABASE_URL", "https://fake.supabase.co");
 Deno.env.set("SB_SERVICE_KEY", "svc-placeholder");
-const { handle, holdingsSummaryHtml } = await import("./index.ts");
+const { handle, holdingsSummaryHtml, fundDipAlert, dipBannerHtml } = await import("./index.ts");
 
 const SB = "https://fake.supabase.co";
 const TOKEN = "test-token";
@@ -237,6 +237,96 @@ Deno.test("接线：汇总块必须真出现在发出去的邮件里，且位置
     const block = mail.slice(iSum, iFund);
     assertEquals(block.includes("+60.0%"), true, "汇总块自己必须算出 +60.0%");
     assertEquals(block.includes("成本已填 1/1 只"), true);
+    assertEquals(/NaN|Infinity/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+// ── 抄底提示（2026-10-25 加）：跌穿「目标跌幅安全垫」时在邮件顶部明显提示买入 ──
+// 与页面 dipAlertFund 同一语义：当前跌幅 ≥ 目标跌幅才亮（不是"还没跌到就喊买"）。
+// 主信号暂停时不喊买，只报状态——避免一封邮件里同时出现"暂停"和"建议加仓"。
+
+Deno.test("fundDipAlert：恰好踩线 -20% 必须亮（1e-9 容差），-19.9% 不亮", () => {
+  const f = { resumeRule: { targetDrawdown: "20" } };
+  const hit = fundDipAlert(f, -20, "normal");
+  assertEquals(hit !== null, true);
+  assertEquals(hit!.target, -20);
+  assertEquals(hit!.shout, true);
+  // 浮点退化：-19.999999 在页面口径里算踩线，不能被判成"差一点"而漏亮
+  assertEquals(fundDipAlert(f, -20 + 1e-12, "normal") !== null, true, "浮点误差不能漏亮");
+  assertEquals(fundDipAlert(f, -19.9, "normal"), null, "没跌到就不亮");
+  assertEquals(fundDipAlert(f, -35, "normal")?.ret, -35, "跌得更深当然亮");
+});
+
+Deno.test("fundDipAlert：未填安全垫 / 没填成本 / 非数字一律不亮", () => {
+  assertEquals(fundDipAlert({}, -30, "normal"), null);
+  assertEquals(fundDipAlert({ resumeRule: { targetDrawdown: "" } }, -30, "normal"), null);
+  assertEquals(fundDipAlert({ resumeRule: {} }, -30, "normal"), null);
+  assertEquals(fundDipAlert({ resumeRule: { targetDrawdown: "20" } }, null, "normal"), null, "没填成本算不出收益率，不能凭空喊买");
+  assertEquals(fundDipAlert({ resumeRule: { targetDrawdown: "abc" } }, -30, "normal"), null, "脏值不亮（页面此处是潜在 NaN 穿透点）");
+  assertEquals(fundDipAlert({ resumeRule: { targetDrawdown: "-20" } }, -25, "normal")?.target, -20, "负数录入要归一");
+});
+
+Deno.test("fundDipAlert：主信号暂停 → 仍返回触发但 shout=false（只报状态）", () => {
+  const d = fundDipAlert({ resumeRule: { targetDrawdown: "20" } }, -25, "pause");
+  assertEquals(d !== null, true);
+  assertEquals(d!.shout, false);
+});
+
+Deno.test("dipBannerHtml：空列表返回空串；暂停那条不得出现「建议加仓」", () => {
+  assertEquals(dipBannerHtml([]), "");
+  const html = dipBannerHtml([
+    { code: "000001", name: "测试基金A", ret: -23.4, target: -20, shout: true },
+    { code: "000002", name: "测试基金B", ret: -20.5, target: -20, shout: false },
+  ]);
+  assertEquals(html.includes("抄底提示"), true);
+  assertEquals(html.includes("【000001】测试基金A 收益 -23.4% 已跌破 -20% 安全垫"), true);
+  assertEquals(html.includes("建议加仓/多投"), true);
+  assertEquals(html.includes("主信号暂停中，暂不新增（仅状态提示）"), true);
+  // 暂停那条自己不能带买入指令：把第二行单独截出来验
+  const lineB = html.slice(html.indexOf("【000002】"));
+  assertEquals(lineB.includes("建议加仓"), false, "暂停的基金不许被第一条的「建议加仓」文案沾到");
+  assertEquals(/NaN|Infinity/.test(html), false);
+});
+
+Deno.test("接线：抄底横幅真进邮件，位置在日期之后、持仓概览之前", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      // 每份成本 2.00、今夜净值 1.60 → 收益率 -20.0%，恰好踩线目标跌幅 20%
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: {
+          funds: [{
+            fundCode: "000001", name: "测试基金", benchmark: "ZZZ",
+            marketValue: 800, shares: 500, costBasis: 2,
+            resumeRule: { requireDays: 3, mode: "ma_only", targetDrawdown: 20 },
+          }],
+        },
+      }]));
+    }
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const deps = { sendMail: async (_s: string, html: string) => { mail = html; } };
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), deps);
+    assertEquals(res.status, 200);
+    const iHead = mail.indexOf("收盘数据已自动更新");
+    const iDip = mail.indexOf("抄底提示");
+    const iHold = mail.indexOf("持仓概览");
+    const iFund = mail.indexOf("基金分析");
+    assertEquals(iDip > 0, true, "邮件里必须有抄底横幅（纯函数绿了不代表接上了）");
+    assertEquals(iHead < iDip && iDip < iHold && iHold < iFund, true, "位置：日期之后 → 抄底 → 持仓概览 → 基金分析");
+    assertEquals(mail.includes("收益 -20.0% 已跌破 -20% 安全垫"), true);
+    assertEquals(mail.includes("建议加仓/多投"), true);
     assertEquals(/NaN|Infinity/.test(mail), false);
   } finally {
     globalThis.fetch = real;
