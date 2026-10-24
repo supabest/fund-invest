@@ -438,6 +438,45 @@ Deno.test('数据不足判 NA：月线 < ' + 'TREND_MIN_MONTHS 门槛；非正�
   assertEquals(/NaN|null|undefined/.test(trendBadgeHtml(Object.assign({}, st, { label: 'mixed' }))), false, '渲染出现脏值');
 });
 
+// 本文件自有的近似断言（engine_test.ts 的 assertClose 不在本模块作用域，跨文件引用会直接炸）
+function assertClose(got: number, want: number, msg: string, tol: number) {
+  assertEquals(Math.abs(got - want) <= tol, true, msg + '，实得 ' + got + ' 期望 ' + want);
+}
+
+Deno.test('年化波动率是纯披露：同方向同端点，路径更抖必须给出更高的 σ（且据此得到更低的收益波动比）', () => {
+  const mild = longTrendStats(monthlyToRows(mkCloses(60, 0.004, 0.02)))!;
+  const harsh = longTrendStats(monthlyToRows(mkCloses(60, 0.004, 0.35)))!;
+  assertEquals('volAnn' in mild, true, '缺 volAnn：月线序列已经喂进来了，波动率没理由不算');
+  assertEquals('rvRatio' in mild, true, '缺 rvRatio（年化收益 ÷ 年化波动）');
+  // σ 必须真的在量“路径”而不是“方向”：两条序列都是上涨趋势，差别只在抖动
+  assertEquals(mild.volAnn !== null && harsh.volAnn !== null, true, '两条序列的 σ 都没算出来');
+  assertEquals((harsh.volAnn as number) > (mild.volAnn as number), true,
+    '抖动序列的年化波动没超过平滑序列，实得 ' + harsh.volAnn + ' vs ' + mild.volAnn);
+  // 前提自证：两边都是非退化序列，否则下面那句比大小是在比 null
+  assertEquals(mild.rvRatio !== null, true, 'mild σ 应为 0 以外的值，实得 volAnn=' + mild.volAnn);
+  assertEquals(harsh.rvRatio !== null, true, 'harsh σ 应为 0 以外的值，实得 volAnn=' + harsh.volAnn);
+  assertEquals((mild.rvRatio as number) > (harsh.rvRatio as number), true,
+    '同方向更抖的路应给出更低的收益波动比，实得 ' + mild.rvRatio + ' vs ' + harsh.rvRatio);
+  // 单位口径：月线 σ 必须年化（×√12），否则数值会小一个量级、和 GS 的“年化波动率”对不上
+  const mret: number[] = []; const cs = monthlyToRows(mkCloses(60, 0.004, 0.35)).map(r => r.close);
+  for (let i = 1; i < cs.length; i++) mret.push(Math.log(cs[i] / cs[i - 1]));
+  const mu = mret.reduce((a, b) => a + b, 0) / mret.length;
+  const sd = Math.sqrt(mret.reduce((a, b) => a + (b - mu) * (b - mu), 0) / (mret.length - 1));
+  assertClose(harsh.volAnn as number, sd * Math.sqrt(12), 'volAnn 必须是月收益样本标准差 ×√12', 1e-9);
+});
+
+Deno.test('σ=0 的退化序列不得产出 Infinity（完美等比 = 零波动，分母为 0 必须判 null）', () => {
+  const st = longTrendStats(monthlyToRows(mkCloses(60, 0.004)))!;
+  assertClose(st.volAnn as number, 0, '严格等比月线的对数收益是常数，σ 应为 0', 1e-12);
+  assertEquals(st.rvRatio, null, 'σ=0 时收益波动比无定义，必须是 null 而不是 Infinity/NaN');
+  const html = trendBadgeHtml(Object.assign({}, st, { label: longTrendLabel(st) }));
+  assertEquals(/Infinity|NaN|null|undefined/.test(html), false, '退化序列把脏值渲染进了角标：' + html.slice(0, 200));
+  assertMatch(html, /年化波动/, '角标 title 必须披露年化波动率');
+  assertMatch(html, /收益波动比/, '角标 title 必须披露收益波动比');
+  // 命名纪律（2026-10-14 教训沿用）：本指标未扣无风险利率，词不得超出判据所测——严禁写成“夏普比率”。
+  assertEquals(/夏普/.test(html), false, '未扣 rf 的收益波动比不得自称“夏普比率”：' + html.slice(0, 200));
+});
+
 Deno.test('旧口径字段必须死干净：两套口径并存是最难查的线上事故', () => {
   const st = longTrendStats(monthlyToRows(mkCloses(60, 0.004)))!;
   for (const gone of ['bars', 'peak', 'peakDraw', 'recent3', 'ma12m', 'monthly']) {

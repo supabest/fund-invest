@@ -47,7 +47,9 @@ export const TREND_DD_RATIO_MIN = NS.TREND_DD_RATIO_MIN as number;   // 2026-10-
 export const monthEndCloses = NS.monthEndCloses as (rows: { date: string; close: number }[] | null) => number[];
 export const olsLogTrend = NS.olsLogTrend as (closes: number[], w: number, perYear?: number) => { slope: number; r2: number | null; annualized: number; n: number } | null;
 export type TrendStats = { close: number; ma24m: number; months: number; firstYear: number | null; asOf: string | null; slope: number;
-  r2: number | null; annualized: number; mdd: number; fromPeak: number; ddRatio: number | null; recent24: number | null };
+  r2: number | null; annualized: number; mdd: number; fromPeak: number; ddRatio: number | null;
+  volAnn: number | null; rvRatio: number | null;   // 2026-10-18 纯披露：年化波动 / 年化收益÷年化波动（未扣 rf）
+  recent24: number | null };
 export const longTrendStats = NS.longTrendStats as (rows: { date: string; close: number }[] | null) => TrendStats | null;
 export const longTrendLabel = NS.longTrendLabel as (s: TrendStats | null) => 'steady' | 'mixed' | 'broken' | null;
 export type BrokenLeg = 'annualized' | 'recent' | null;

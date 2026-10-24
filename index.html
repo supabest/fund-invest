@@ -1038,6 +1038,23 @@ function maxDrawdown(closes){
   return { mdd: mdd, peak: peak, fromPeak: peak > 0 ? cs[cs.length - 1] / peak - 1 : null };
 }
 
+// 月收益样本标准差 ×√12 = 年化波动率（2026-10-18 加，**纯披露、不进判据、不设阈值**）。
+// 与 annualized 正交：后者量方向，这个量「路径抖不抖」——同端点同方向，锯齿序列必须给出更高的 σ。
+// 刻意与 GS 的「年化波动率(最近100周)」保持同单位，便于跨层对数；口径不同（这里是月线对数收益，GS 未公布公式）。
+function monthlyVol(monthly){
+  var rs = [], i;
+  for(i = 1; i < monthly.length; i++){
+    if(monthly[i - 1] > 0 && monthly[i] > 0) rs.push(Math.log(monthly[i] / monthly[i - 1]));
+  }
+  if(rs.length < 2) return null;
+  var mu = 0;
+  for(i = 0; i < rs.length; i++) mu += rs[i];
+  mu /= rs.length;
+  var ss = 0;
+  for(i = 0; i < rs.length; i++) ss += (rs[i] - mu) * (rs[i] - mu);
+  return Math.sqrt(ss / (rs.length - 1)) * Math.sqrt(12);
+}
+
 // 长期趋势统计：回归喂**上市至今全部月线**（不再 slice(-24)）；位置项仍看近 24 月线
 // as-of 口径（2026-10-14 用户裁定，spec 决议 24）：东财当月未收盘根**计入**样本，标签就是「当日价口径」。
 // 别“顺手”改成丢末根：实测边界股（伟明环保）只有 recent24 会在 0 上下跨零（−1.6% ↔ +1.2%）而翻转 mixed/broken，
@@ -1051,6 +1068,7 @@ function longTrendStats(rows){
     return r && /^\d{4}-\d{2}-\d{2}$/.test(String(r.date || '')) && isFinite(Number(r.close)) && Number(r.close) > 0;
   }).sort(function(a, b){ return String(a.date) < String(b.date) ? -1 : 1; });
   var dd = maxDrawdown(monthly);
+  var vol = monthlyVol(monthly);   // 与 dd 同级：都从同一条月线上量路径，不需要第二次取数
   var close = monthly[monthly.length - 1];
   var win = monthly.slice(-TREND_POSITION_MA);
   var r24 = olsLogTrend(monthly, TREND_POSITION_MA, 12);
@@ -1061,6 +1079,12 @@ function longTrendStats(rows){
     slope: t.slope, r2: t.r2, annualized: t.annualized,
     mdd: dd.mdd, fromPeak: dd.fromPeak,
     ddRatio: dd.mdd < 0 ? t.annualized / Math.abs(dd.mdd) : null,
+    // R-V：年化收益 ÷ 年化波动。**未扣无风险利率**，按命名纪律严禁称「夏普比率」；
+    // σ=0（完美等比）时分母为 0 → 必须 null，不得产出 Infinity（2026-10-18 加）。
+    // 1e-6 不是判据阈值而是**浮点退化护栏**：实测严格等比序列的 σ 算出来是 9.09e-18 而不是 0，
+    // 只写 vol>0 会让比值溢出成 5.4e15 直接甩到 title 上（本轮测试抓出来的真 bug）。
+    volAnn: vol,
+    rvRatio: (vol !== null && vol > 1e-6) ? t.annualized / vol : null,
     recent24: r24 ? r24.annualized : null };
 }
 
@@ -1177,6 +1201,7 @@ function trendBadgeHtml(stats){
     ? '上市以来年化 ' + pctv(stats.annualized)
       + ' · 月线拟合R² ' + num(stats.r2, 2)
       + ' · 最深回撤 ' + pctv(stats.mdd) + ' · 距峰 ' + pctv(stats.fromPeak)
+      + ' · 年化波动 ' + pctv(stats.volAnn) + ' · 收益波动比 ' + num(stats.rvRatio, 2)
       + ' · 近24月年化 ' + pctv(stats.recent24)
       + (leg ? ' · ' + BROKEN_LEG_CN[leg].why : '')
       + ' · 样本 ' + num(stats.months, 0) + ' 个月' + (stats.firstYear ? '（' + stats.firstYear + ' 年起，后复权含分红）' : '（起点未知，后复权含分红）')
