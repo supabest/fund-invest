@@ -8,7 +8,7 @@ Deno.env.set("DAILY_UPDATE_DISABLE_SERVE", "1");
 Deno.env.set("DAILY_UPDATE_TOKEN", "test-token");
 Deno.env.set("SUPABASE_URL", "https://fake.supabase.co");
 Deno.env.set("SB_SERVICE_KEY", "svc-placeholder");
-const { handle, holdingsSummaryHtml, fundDipAlert, dipBannerHtml } = await import("./index.ts");
+const { handle, holdingsSummaryHtml, fundDipAlert, dipBannerHtml, runRow } = await import("./index.ts");
 
 const SB = "https://fake.supabase.co";
 const TOKEN = "test-token";
@@ -373,6 +373,205 @@ Deno.test("并发预取后单项失败仍隔离：坏基金不拖倒好基金，
     assertEquals(byCode["000001"], true, "好基金不能因为邻居失败被带走");
     assertEquals(byCode["000002"], false, "坏基金要如实标 ok:false");
     assertEquals(body.funds.length, 2);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+// ── C: stock_signal_state 写库接线 + D: daily_update_run 运行台账（2026-10-27 加）──
+// 起因（2026-10-27 只读盘点实测）：
+//   ① stockSignalRows 在 :685/:735 只 push 从未 post，全仓 grep `stock_signal_state` 只有 :732 一处"读"，
+//      ⇒ 表恒为空 ⇒ wasOver 永远 false ⇒ 股票总仓位超限提醒每夜重复发。
+//   ② nightly 任务由 pg_cron 经 HTTP 触发、响应体被丢弃，且本机到 {ref}.supabase.co 数据面 TLS 被切，
+//      console 的 [daily-update][计时] 行拿不到 ⇒ 事后无法归因"哪一段吃掉了 150s"。加一张运行台账表。
+// 判据一字未动（信号/止盈/系数/邮件文案），只补写库与台账。
+
+// POST 捕获桩：按 URL 还原表名与 on_conflict，断言"真发了什么"而不是"源码里有没有这个词"
+function capturePosts(): { out: { table: string; conflict: string; rows: any[] }[]; record: (url: string, init?: RequestInit) => void } {
+  const out: { table: string; conflict: string; rows: any[] }[] = [];
+  return {
+    out,
+    record(url: string, init?: RequestInit) {
+      const t = /\/rest\/v1\/([A-Za-z0-9_]+)/.exec(url);
+      const c = /[?&]on_conflict=([^&]+)/.exec(url);
+      let parsed: unknown = null;
+      try { parsed = JSON.parse(String(init?.body ?? "null")); } catch { /* 非 JSON 体不阻断断言 */ }
+      out.push({ table: t ? t[1] : url, conflict: c ? c[1] : "", rows: Array.isArray(parsed) ? parsed : [parsed] });
+    },
+  };
+}
+
+// 唯一不依赖 K线成功就能产出 stock_signal_state 行的路径：股票行情全失败，但仓位上限用 currentPrice 兜底仍能算。
+// 1000 股 × 100 元 = 10 万 > 上限 5 万 ⇒ over。K线桩返回 {data:{}}（无 klines），8 个镜像各一次快失败，不退避。
+function capOnlyStates(cap: number) {
+  return [{ user_id: "u1", data: { stockCap: cap, stocks: [{ code: "600000", name: "测试股", shares: 1000, currentPrice: 100 }] } }];
+}
+
+function capOnlyStub(posts: ReturnType<typeof capturePosts>, inject?: (url: string, init?: RequestInit) => Response | null) {
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    const forced = inject ? inject(url, init) : null;
+    if (forced) return Promise.resolve(forced);
+    if (method === "POST") { posts.record(url, init); return Promise.resolve(Response.json({}, { status: 201 })); }
+    if (url.includes("dingtou_state")) return Promise.resolve(Response.json(capOnlyStates(50000)));
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+}
+
+Deno.test("C：股票信号真写库 —— POST /rest/v1/stock_signal_state 带 __STOCK_CAP__ tier=over", async () => {
+  const posts = capturePosts();
+  const real = globalThis.fetch;
+  capOnlyStub(posts);
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: async () => {} });
+    assertEquals(res.status, 200);
+    const writes = posts.out.filter((p) => p.table === "stock_signal_state");
+    assertEquals(writes.length >= 1, true, "必须真发一次 POST stock_signal_state（此前只读不写，表恒为空）");
+    assertEquals(writes[0].conflict, "user_id,code", "PK 是 (user_id,code)，upsert 冲突键要对");
+    const capRow = writes[0].rows.find((r: any) => r && r.code === "__STOCK_CAP__");
+    assertEquals(capRow && capRow.tier, "over", "10 万 > 上限 5 万 → 落库档位必须是 over，次日才能识别「已是 over 不重复提醒」");
+    assertEquals(capRow && capRow.user_id, "u1");
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("C：stock_signal_state 写库失败不致命 —— 仍 200、邮件照发、[写库] 日志可归因", async () => {
+  const posts = capturePosts();
+  const real = globalThis.fetch;
+  capOnlyStub(posts, (url, init) => {
+    if ((init?.method ?? "GET").toUpperCase() === "POST" && url.includes("/rest/v1/stock_signal_state")) {
+      return new Response("boom", { status: 500 });
+    }
+    return null;
+  });
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: async () => {} });
+    const body = await res.json() as Record<string, unknown>;
+    assertEquals(res.status, 200, "台账类信号表写失败不许把整晚任务判死（邮件是第一交付物）");
+    assertEquals(body.ok, true);
+    const mails = (body.notifications as Record<string, unknown>[]).filter((n) => n.sent === true);
+    assertEquals(mails.length >= 1, true, "信号表失败后邮件仍须真发出");
+    assertEquals(hasStageLog(logs.lines, "写库"), true, "要留下一条带表名的可归因失败日志");
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("D：runRow 纯函数 —— 计数、邮件口径、时长、timings 串一次说全", () => {
+  assertEquals(typeof runRow, "function", "runRow 必须先导出，否则台账内容无从验证");
+  const summary = {
+    users: 2,
+    funds: [{ ok: true }, { ok: false }, { ok: true }],
+    stocks: [{ ok: true }, { ok: false }],
+    indices: [{ ok: false }],
+    notifications: [{ sent: true }, { sent: false, mailError: "smtp down" }, { sent: false }],
+  };
+  const row = runRow(summary, ["state 10ms", "mail 120ms"], {
+    runAt: "2026-10-27T14:30:00.000Z", status: "ok", force: false, msTotal: 1234,
+  });
+  assertEquals(row.run_at, "2026-10-27T14:30:00.000Z");
+  assertEquals(row.status, "ok");
+  assertEquals(row.force, false);
+  assertEquals(row.users, 2);
+  assertEquals(row.ms_total, 1234);
+  assertEquals(row.timings, "state 10ms | mail 120ms");
+  assertEquals(row.funds_ok, 2);
+  assertEquals(row.funds_fail, 1);
+  assertEquals(row.stocks_ok, 1);
+  assertEquals(row.stocks_fail, 1);
+  assertEquals(row.index_ok, 0);
+  assertEquals(row.index_fail, 1);
+  assertEquals(row.mail_sent, 1);
+  assertEquals(row.mail_failed, 1, "没尝试发送的静默用户（sent=false 且无 mailError）不计失败");
+  assertEquals(row.error, null);
+});
+
+Deno.test("D：runRow 边界 —— running 空汇总全零、error 截断 200", () => {
+  const running = runRow({ users: 0, funds: [], stocks: [], indices: [], notifications: [] }, [], {
+    runAt: "2026-10-27T14:30:00.000Z", status: "running", force: true, msTotal: 42,
+  });
+  assertEquals(running.status, "running");
+  assertEquals(running.force, true);
+  assertEquals(running.funds_ok, 0);
+  assertEquals(running.mail_sent, 0);
+  assertEquals(running.timings, "");
+  const err = runRow({ users: 1 }, [], {
+    runAt: "2026-10-27T14:30:00.000Z", status: "error", force: false, msTotal: 151000,
+    error: "x".repeat(300),
+  });
+  assertEquals(err.error.length, 200, "error 必须截断，台账列宽有限且不能把整段堆栈塞进去");
+  assertEquals(err.status, "error");
+});
+
+Deno.test("D：成功链路写两行台账 —— 先 running 再 ok", async () => {
+  const posts = capturePosts();
+  const real = globalThis.fetch;
+  capOnlyStub(posts);
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: async () => {} });
+    assertEquals(res.status, 200);
+    const runs = posts.out.filter((p) => p.table === "daily_update_run");
+    assertEquals(runs.length, 2, "开始一行 + 收尾一行，中间被墙钟砍掉时表里只剩 running，这就是断点证据");
+    assertEquals(runs[0].rows[0].status, "running");
+    assertEquals(runs[0].conflict, "run_at");
+    assertEquals(runs[1].rows[0].status, "ok");
+    assertEquals(runs[1].rows[0].force, true);
+    assertEquals(runs[1].rows[0].stocks_fail, 1, "行情全失败要如实落在台账里");
+    assertEquals(typeof runs[1].rows[0].ms_total, "number");
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("D：致命链路也留台账 —— dingtou_state 读失败 → 500 + 一行 status=error", async () => {
+  const posts = capturePosts();
+  const real = globalThis.fetch;
+  capOnlyStub(posts, (url) => {
+    if (url.includes("dingtou_state")) return new Response("db down", { status: 500 });
+    return null;
+  });
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req());
+    const body = await res.json() as Record<string, unknown>;
+    assertEquals(res.status, 500);
+    assertEquals(body.ok, false);
+    const runs = posts.out.filter((p) => p.table === "daily_update_run");
+    assertEquals(runs.length, 1, "状态读取就失败 → 只有收尾那一行（running 行在 mark('state') 之后才写）");
+    assertEquals(runs[0].rows[0].status, "error");
+    assertEquals(String(runs[0].rows[0].error).includes("state read failed"), true);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("D：台账写库自身失败不改判 —— daily_update_run 500 时仍返回约定 200", async () => {
+  const posts = capturePosts();
+  const real = globalThis.fetch;
+  capOnlyStub(posts, (url, init) => {
+    if ((init?.method ?? "GET").toUpperCase() === "POST" && url.includes("/rest/v1/daily_update_run")) {
+      return new Response("no such table", { status: 500 });
+    }
+    return null;
+  });
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: async () => {} });
+    const body = await res.json() as Record<string, unknown>;
+    assertEquals(res.status, 200, "台账是观测件，绝不能因为表还没建就把整晚任务打挂");
+    assertEquals(body.ok, true);
+    assertEquals(hasStageLog(logs.lines, "写库"), true);
   } finally {
     globalThis.fetch = real;
     logs.restore();

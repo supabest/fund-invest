@@ -14,6 +14,13 @@
 //   并加阶段计时日志 `[daily-update][计时] state/fundFetch/write/mail`。
 //   起因：force 触发撞上 Edge 150s 墙钟（546 @151s），而 10 只基金串行取数一旦遇上游限流就必然超时；
 //   取数是网络等待，串行纯亏墙钟，写库仍是串行（单次几十毫秒，且失败需要逐表归因）。
+// v9 (2026-10-27): 两处只读盘点查出的缺陷整改，判据一字未动：
+//   ① stock_signal_state 补写库——第 4/5 步一直在 push stockSignalRows，但全函数从未 post，
+//     表恒为空 ⇒ 第 5 步读回的 wasOver 永远 false ⇒ 仓位超限提醒每夜重复。写入失败自吞，不拖垮邮件。
+//   ② 新增运行台账 daily_update_run——每次运行先落 status='running'，收尾落 'ok'/'error'
+//     （状态、force、用户数、总耗时、各段计时串、基金/股票/指数成功失败计数、邮件送达数、error）。
+//     用途：pg_cron 丢弃响应体且 Edge console 无抽取通道，被 150s 墙钟砍掉的那晚表里只剩 'running'，
+//     断点位置即证据；台账写入同样自吞（表没建也不能改变响应契约）。
 // 触发方式: POST /functions/v1/daily-update，Authorization: Bearer <DAILY_UPDATE_TOKEN>
 // 可选 body: {"force":true} 无变化也发送报告
 const GOAL_DEFAULT = 200000;
@@ -375,6 +382,40 @@ function logFailure(
 // 编排主体 = 原 Deno.serve 内联回调逐字提出为具名导出函数（可调用 + 可注入）；逻辑一字未改。
 // 注册守卫仅针对单测场景（index_test.ts 先设 DAILY_UPDATE_DISABLE_SERVE 再动态 import）；
 // 线上 Edge 不会注入该变量，Deno.serve 注册行为不变（同 sector-trend/stock-score）。
+// 运行台账行（2026-10-27 加）：本函数由 pg_cron 经 HTTP 触发、响应体被调用方丢弃，且 Edge console
+// 无日志抽取通道，事后既查不到"昨晚跑没跑"也查不到"钱花在哪一段"。故每次运行往 daily_update_run 落一行，
+// 中途被 150s 墙钟砍掉时表里只剩 status='running' 那一行 —— 断点位置即证据。
+// 纯函数导出：行内容（各段成功/失败计数、邮件口径、error 截断）可被单测直接验证，不靠正则守卫。
+export interface RunRowOpts {
+  runAt: string;
+  status: 'running' | 'ok' | 'error';
+  force: boolean;
+  msTotal: number;
+  error?: string | null;
+}
+export function runRow(summary: any, timings: string[], opts: RunRowOpts): Record<string, any> {
+  const cnt = (arr: any[], wantOk: boolean) => (arr || []).filter((x) => !!x && !!x.ok === wantOk).length;
+  const notes: any[] = summary.notifications || [];
+  return {
+    run_at: opts.runAt,
+    status: opts.status,
+    force: opts.force,
+    users: summary.users || 0,
+    ms_total: opts.msTotal,
+    timings: timings.join(' | '),
+    funds_ok: cnt(summary.funds, true),
+    funds_fail: cnt(summary.funds, false),
+    stocks_ok: cnt(summary.stocks, true),
+    stocks_fail: cnt(summary.stocks, false),
+    index_ok: cnt(summary.indices, true),
+    index_fail: cnt(summary.indices, false),
+    mail_sent: notes.filter((n) => n && n.sent === true).length,
+    // 只把"真尝试发送且失败"计为失败：无信号变化的静默用户 sent 保持 false 但从未尝试，不算投递失败
+    mail_failed: notes.filter((n) => n && n.sent !== true && n.mailError).length,
+    error: opts.error ? String(opts.error).slice(0, 200) : null,
+  };
+}
+
 export async function handle(
   req: Request,
   deps: DailyUpdateDeps = REAL_DEPS,
@@ -395,6 +436,21 @@ export async function handle(
   const T0 = Date.now();
   const timings: string[] = [];
   const mark = (label: string) => timings.push(label + ' ' + (Date.now() - T0) + 'ms');
+  const runAt = new Date().toISOString();
+  // 台账写入一律自吞异常：观测件坏了不能把交付件（邮件）拖挂，也不能改变响应契约。
+  const logRun = async (status: 'running' | 'ok' | 'error', error: string | null = null) => {
+    try {
+      const row = runRow(summary, timings, { runAt, status, force, msTotal: Date.now() - T0, error });
+      const r = await fetch(sbUrl + '/rest/v1/daily_update_run?on_conflict=run_at', {
+        method: 'POST',
+        headers: { ...H, Prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify([row])
+      });
+      if (!r.ok) logFailure('写库', 'daily_update_run ' + status + ' 落库失败 ' + r.status, new Error((await r.text()).slice(0, 200)));
+    } catch (e) {
+      logFailure('写库', 'daily_update_run ' + status + ' 落库异常', e);
+    }
+  };
 
   const post = async (table: string, onConflict: string, rows: any[]) => {
     if (!rows.length) return;
@@ -450,6 +506,7 @@ export async function handle(
     const states = await stRes.json();
     summary.users = states.length;
     mark('state');
+    await logRun('running');
 
     const fundJobs: { userId: string; code: string }[] = [];
     const stockJobs: { userId: string; code: string }[] = [];
@@ -738,6 +795,15 @@ export async function handle(
       }
     }
 
+    // 5b. 股票侧信号落库（2026-10-27 补）：上面 :685/:735 一直在往 stockSignalRows push，
+    // 但全函数从未 post —— 表恒为空 ⇒ :733 读回的 wasOver 永远 false ⇒ 仓位超限提醒每夜重复发一次。
+    // 这里补上写库；失败自吞（不致命），因为邮件才是第一交付物。
+    try {
+      await post('stock_signal_state', 'user_id,code', stockSignalRows);
+    } catch (e) {
+      logFailure('写库', 'stock_signal_state 落库失败（本次跳过，明日重试，不影响邮件）', e);
+    }
+
     mark('write');
     console.log('[daily-update][计时] ' + timings.join(' | '));
 
@@ -883,11 +949,13 @@ export async function handle(
     summary.at = new Date().toISOString();
     mark('mail');
     console.log('[daily-update][计时] 全链 ' + timings.join(' | '));
+    await logRun('ok');
     summary.timings = timings;
     return new Response(JSON.stringify(summary), { headers: { 'Content-Type': 'application/json' } });
   } catch (e) {
     logFailure('致命', 'nightly 任务异常终止', e);
     console.log('[daily-update][计时] 未完成 ' + timings.join(' | ') + ' | 已耗时 ' + (Date.now() - T0) + 'ms');
+    await logRun('error', String((e as any)?.message || e));
     return new Response(JSON.stringify({ ok: false, error: String((e as any)?.message || e).slice(0, 200), timings }), { status: 500 });
   }
 }
