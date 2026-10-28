@@ -8,7 +8,7 @@ Deno.env.set("DAILY_UPDATE_DISABLE_SERVE", "1");
 Deno.env.set("DAILY_UPDATE_TOKEN", "test-token");
 Deno.env.set("SUPABASE_URL", "https://fake.supabase.co");
 Deno.env.set("SB_SERVICE_KEY", "svc-placeholder");
-const { handle, holdingsSummaryHtml, fundDipAlert, dipBannerHtml, runRow, txSource, parseTxKline } = await import("./index.ts");
+const { handle, holdingsSummaryHtml, fundDipAlert, dipBannerHtml, runRow, txSource, parseTxKline, klineFailNote } = await import("./index.ts");
 
 const SB = "https://fake.supabase.co";
 const TOKEN = "test-token";
@@ -729,6 +729,131 @@ Deno.test("A 边界：两个源都失败仍如实标失败，邮件照发不误�
     assertEquals(typeof body.stocks[0].error, "string");
     assertEquals(body.indices[0].ok, false);
     assertEquals(hasStageLog(logs.lines, "取数"), true, "两条失败都要留下可归因日志");
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+// ── B: 失败原因别再只进计数（2026-10-28 加）──
+// 起因（生产实测）：NDX 指数腿从 2026-09-24 起静默停更一个月，邮件里一个字没有；台账只有 index_fail=1，
+// 因为 summary.indices 的 error 文本（index.ts:627）既不进邮件也不落库 ⇒ 现网在骗人，事后无从归因。
+// 另：fetchKline 只保留 lastErr，8 个镜像与腾讯各自怎么死的全丢了 ⇒ 兜底段错误串无信息量。
+
+const runOpts = { runAt: "2026-10-28T12:00:00.000Z", status: "ok" as const, force: false, msTotal: 1000 };
+
+Deno.test("B：runRow 把所有失败原因汇成 errors（基金→股票→指数 顺序、全绿为 null、超长截断）", () => {
+  const summary = {
+    users: 1,
+    funds: [{ code: "000001", ok: false, error: "净值接口 500" }],
+    stocks: [{ code: "600031", ok: false, error: "东财8镜像失败(no klines)｜腾讯sh600031无有效K线" }],
+    indices: [{ idx: "NDX", ok: false, error: "东财8镜像失败(timeout 6000ms)｜腾讯usNDX无有效K线" }],
+    notifications: [],
+  };
+  const row = runRow(summary, [], runOpts);
+  assertEquals(typeof row.errors, "string", "runRow 必须把失败原因汇总到 errors（现在只有计数）");
+  assertEquals(row.errors!.includes("基金 000001：净值接口 500"), true);
+  assertEquals(row.errors!.includes("股票 600031："), true);
+  assertEquals(row.errors!.includes("指数 NDX："), true);
+  assertEquals(row.errors!.indexOf("基金") < row.errors!.indexOf("股票"), true, "顺序按链路走：基金→股票→指数");
+  assertEquals(row.errors!.indexOf("股票") < row.errors!.indexOf("指数"), true);
+  // 成功项不许混进来：errors 只写失败
+  const mixed = { ...summary, funds: [{ code: "000002", ok: true }] };
+  assertEquals(runRow(mixed, [], runOpts).errors!.includes("000002"), false, "成功的不进 errors");
+  // 全绿 → null，不留空串占位
+  const green = runRow({ users: 1, funds: [{ code: "1", ok: true }], stocks: [], indices: [], notifications: [] }, [], runOpts);
+  assertEquals(green.errors, null);
+  // 40 条长错误必须截断，台账一行不许撑爆
+  const many = {
+    users: 1, funds: [], notifications: [],
+    stocks: Array.from({ length: 40 }, (_, i) => ({ code: "6000" + i, ok: false, error: "x".repeat(60) })),
+    indices: [],
+  };
+  const long = runRow(many, [], runOpts).errors!;
+  assertEquals(long.length <= 1200, true, "errors 必须截断（实测上限 1200）");
+});
+
+Deno.test("B：klineFailNote 一次说清东财镜像段与腾讯兜底各自怎么死的，且不超 140 字", () => {
+  assertEquals(typeof klineFailNote, "function", "klineFailNote 必须先导出");
+  const both = klineFailNote({ hosts: 8, budgetHit: false, mirrorErr: "no klines", txSymbol: "usNDX", txErr: "无有效K线" });
+  assertEquals(both.includes("东财8镜像"), true, "要如实报试了几个镜像，否则看不出是整段拒连还是个别超时");
+  assertEquals(both.includes("no klines"), true);
+  assertEquals(both.includes("腾讯usNDX"), true, "兜底问到哪个 symbol 要写出来，方便直接复现");
+  assertEquals(both.length <= 140, true);
+  const budget = klineFailNote({ hosts: 3, budgetHit: true, mirrorErr: "timeout 6000ms", txSymbol: null, txErr: null });
+  assertEquals(budget.includes("超预算"), true, "被预算切断必须写明，不然看的人以为 8 个镜像都试完了");
+  assertEquals(budget.includes("腾讯无源"), true, "txSource 返回 null 时必须说明没兜底源，不能让人以为兜底也失败了");
+  const txOnly = klineFailNote({ hosts: 8, budgetHit: false, mirrorErr: "error sending request", txSymbol: "sh600031", txErr: null });
+  assertEquals(txOnly.includes("error sending request"), true);
+  assertEquals(txOnly.includes("腾讯") && txOnly.includes("sh600031"), true);
+});
+
+// 端到端：东财无 klines + 腾讯畸形 ⇒ 错误串必须同时带两段归因（旧实现只剩腾讯那一句）
+Deno.test("B 接线：两个源都失败时，落库/返回的错误串带东财与腾讯两段归因", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) return Promise.resolve(Response.json(aLegStates()));
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("whatever", []), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: async () => {} });
+    const body = await res.json() as Record<string, any>;
+    assertEquals(res.status, 200);
+    assertEquals(body.stocks[0].ok, false);
+    assertEquals(/东财8镜像/.test(body.stocks[0].error), true, "股票腿错误要写东财段：" + body.stocks[0].error);
+    assertEquals(/no klines/.test(body.stocks[0].error), true, "东财的死法要留住，不能只报最后一句");
+    assertEquals(/腾讯/.test(body.stocks[0].error), true, "兜底的死法也要在");
+    assertEquals(/腾讯sh600031/.test(body.stocks[0].error), true, "写到 symbol，便于直接复现");
+    assertEquals(/指数|HS300/.test(JSON.stringify(body.indices[0])), true);
+    assertEquals(/东财8镜像/.test(body.indices[0].error), true, "指数腿共用 fetchKline，归因口径必须一致");
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+// 端到端：指数腿失败必须①在邮件里显性出现 ②随台账 errors 落库
+Deno.test("B 接线：指数腿失败显性进邮件，并随台账 errors 真落库", async () => {
+  const real = globalThis.fetch;
+  const posts = capturePosts();
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") { posts.record(url, init); return Promise.resolve(Response.json({}, { status: 201 })); }
+    if (url.includes("dingtou_state")) return Promise.resolve(Response.json(aLegStates()));
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) {
+      if (url.includes("sh600031")) return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 }));
+      return Promise.resolve(new Response(txJson("sh000300", []), { status: 200 })); // 指数兜底畸形
+    }
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: async (_s: string, html: string) => { mail = html; } });
+    assertEquals(res.status, 200);
+    const body = await res.json() as Record<string, any>;
+    assertEquals(body.stocks[0].ok, true, "股票腿照常兜底成功，这条只钉指数腿");
+    assertEquals(body.indices[0].ok, false, "沪深300 两个源都失败要如实 false");
+    assertEquals(mail.includes("沪深300"), true, "邮件里必须点名哪个大盘参考挂了");
+    assertEquals(/大盘参考.*(获取失败|拿不到)/.test(mail), true, "要像股票腿那样显式报错，不许静默跳过：" + mail.slice(0, 400));
+    assertEquals(mail.includes("未更新"), true, "要说清后果：本次档位没更新，别把上次的档位当今天的");
+    const ledger = posts.out.filter((p) => p.table === "daily_update_run");
+    assertEquals(ledger.length >= 2, true, "台账应有 running + ok 两行");
+    const last = ledger[ledger.length - 1].rows[0];
+    assertEquals(last.index_fail, 1);
+    assertEquals(typeof last.errors, "string", "台账必须落错误原因，只留数字下次还是查不到");
+    assertEquals(String(last.errors).includes("指数 HS300"), true);
+    assertEquals(/NaN|Infinity/.test(mail), false);
   } finally {
     globalThis.fetch = real;
     logs.restore();

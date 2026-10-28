@@ -401,6 +401,21 @@ export interface RunRowOpts {
   msTotal: number;
   error?: string | null;
 }
+
+// 失败原因汇总：只有计数时，NDX 停更一个月这种事在库里查不到任何线索（2026-10-28 现网取证）。
+// 逐条 `链路 标的：原因`，按基金→股票→指数顺序，整体截断 1200——台账列宽与写入稳定性优先。
+function collectErrors(summary: any): string | null {
+  const pick = (arr: any[], kind: string, key: string) =>
+    (arr || []).filter((x) => x && x.ok === false)
+      .map((x) => kind + ' ' + (x[key] || '?') + '：' + (x.error || '未知原因'));
+  const all = [
+    ...pick(summary.funds, '基金', 'code'),
+    ...pick(summary.stocks, '股票', 'code'),
+    ...pick(summary.indices, '指数', 'idx'),
+  ];
+  return all.length ? all.join(' | ').slice(0, 1200) : null;
+}
+
 export function runRow(summary: any, timings: string[], opts: RunRowOpts): Record<string, any> {
   const cnt = (arr: any[], wantOk: boolean) => (arr || []).filter((x) => !!x && !!x.ok === wantOk).length;
   const notes: any[] = summary.notifications || [];
@@ -420,6 +435,7 @@ export function runRow(summary: any, timings: string[], opts: RunRowOpts): Recor
     mail_sent: notes.filter((n) => n && n.sent === true).length,
     // 只把"真尝试发送且失败"计为失败：无信号变化的静默用户 sent 保持 false 但从未尝试，不算投递失败
     mail_failed: notes.filter((n) => n && n.sent !== true && n.mailError).length,
+    errors: collectErrors(summary),
     error: opts.error ? String(opts.error).slice(0, 200) : null,
   };
 }
@@ -468,6 +484,25 @@ export function parseTxKline(json: unknown, symbol: string): { date: string; clo
     close = c;
   }
   return closes.length ? { date, close, closes } : null;
+}
+
+// 取数失败的归因串：旧实现只留 lastErr，于是"8 个镜像怎么死的""兜底有没有源"全丢在日志里，
+// 而日志本身拿不到（Edge console 无抽取通道）⇒ 现网 NDX 静默停更一个月无人可查。
+// 长度封顶 140：调用方按 140 截断进 summary/台账，超了会互相吃掉。
+export interface KlineFailParts {
+  hosts: number;
+  budgetHit: boolean;
+  mirrorErr: string;
+  txSymbol?: string | null;
+  txErr?: string | null;
+}
+export function klineFailNote(p: KlineFailParts): string {
+  let s = '东财' + p.hosts + '镜像失败(' + (p.mirrorErr || '未知') + ')';
+  if (p.budgetHit) s += '｜镜像段超预算提前转兜底';
+  s += p.txSymbol
+    ? '｜腾讯' + p.txSymbol + (p.txErr ? '失败(' + p.txErr + ')' : '无有效K线')
+    : '｜腾讯无源(未兜底)';
+  return s.slice(0, 140);
 }
 
 export async function handle(
@@ -536,31 +571,46 @@ export async function handle(
     throw lastErr;
   };
   const fetchKline = async (secid: string, fqt: number, lmt: number): Promise<{ date: string; close: number; closes: number[]; name: string }> => {
-    let lastErr: any = null;
+    // 归因位：镜像段试了几个、死法是什么、有没有被预算提前切断、兜底问到哪个 symbol。
     // 东财镜像段硬预算：8 镜像 × 2 试最坏 ≈125s/标的，一个标的就能吃穿 150s 墙钟（现网 3 只股票 48s 全失败）。
     // 预算只限制"还在不在东财上耗"，不改变成功路径的口径；超时即转腾讯兜底。
+    let hostsTried = 0;
+    let budgetHit = false;
+    let mirrorErr = '未取到数据';
     const tMirror = Date.now();
     for (const host of KLINE_HOSTS) {
-      if (Date.now() - tMirror > MIRROR_BUDGET_MS) { lastErr = new Error('东财镜像段超预算 ' + MIRROR_BUDGET_MS + 'ms'); break; }
+      if (Date.now() - tMirror > MIRROR_BUDGET_MS) { budgetHit = true; break; }
+      hostsTried++;
       try {
         const r = await fetchRetry('https://' + host + '/api/qt/stock/kline/get?secid=' + secid + '&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f53&klt=101&fqt=' + fqt + '&lmt=' + lmt + '&end=20500101', { headers: { 'User-Agent': 'Mozilla/5.0' } }, 2);
         const j = await r.json();
         const klines: string[] = (j && j.data && j.data.klines) || [];
-        if (!klines.length) { lastErr = new Error('no klines'); continue; }
+        if (!klines.length) { mirrorErr = 'no klines'; continue; }
         const rows = klines.map((kl: string) => { const [dd, cc] = kl.split(','); return { date: dd, close: parseFloat(cc) }; });
         return { date: rows[rows.length - 1].date, close: rows[rows.length - 1].close, closes: rows.map(x => x.close), name: (j && j.data && j.data.name) || '' };
-      } catch (e) { lastErr = e; }
+      } catch (e) {
+        mirrorErr = String((e as any)?.message || e).slice(0, 60);
+      }
     }
     const tx = txSource(secid);
+    let txErr: string | null = null;
     if (tx) {
       try {
         const r = await fetchRetry('https://web.ifzq.gtimg.cn/appstock/app/' + tx.endpoint + '/get?param=' + encodeURIComponent(tx.symbol + ',day,,,' + lmt + ',qfq'), { headers: { 'User-Agent': 'Mozilla/5.0' } }, 2, 6000);
         const p = parseTxKline(await r.json(), tx.symbol);
         if (p) return { ...p, name: '' };
-        lastErr = new Error('tencent 无有效K线 ' + tx.symbol);
-      } catch (e) { lastErr = e; }
+        // 拿到响应却解析不出有效根：txErr 留 null ⇒ 文案走"无有效K线"，与"网络/HTTP 挂了"区分开
+      } catch (e) {
+        txErr = String((e as any)?.message || e).slice(0, 60);
+      }
     }
-    throw lastErr || new Error('all kline hosts failed');
+    throw new Error(klineFailNote({
+      hosts: hostsTried,
+      budgetHit,
+      mirrorErr,
+      txSymbol: tx ? tx.symbol : null,
+      txErr,
+    }));
   };
 
   try {
@@ -915,6 +965,16 @@ export async function handle(
         idxRows.push({ idx_code: k, label: idxLevels[k].label, updated_at: new Date().toISOString() });
       }
       if (idxRows.length) await post('index_state', 'idx_code', idxRows);
+
+      // 6b-补. 指数腿挂掉时逐名报出：只落一个 index_fail 计数，用户会把昨天的档位当今天的。
+      // 系数取 bl 缺失时的 1，所以后果必须写明白——不是"沿用上次"，是"本次不打折"。
+      const benchFailed: Record<string, string> = {};
+      for (const it of summary.indices) if (it && it.ok === false) benchFailed[it.idx] = it.error || '未知原因';
+      const myFailedBench = [...new Set(todayRows.map((r: any) => r.benchmark).filter((b: string) => !!benchFailed[b]))];
+      for (const k of myFailedBench) {
+        items.push('⚠️ 大盘参考：' + BENCH[k].name + ' 本次获取失败（' + benchFailed[k]
+          + '），档位未更新，本次买入系数按 1 计（不打折）');
+      }
 
       summary.notifications.push({ userId: userId.slice(0, 8), items: items.length, sent: false });
 

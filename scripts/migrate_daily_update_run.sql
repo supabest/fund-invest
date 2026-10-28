@@ -18,8 +18,14 @@ CREATE TABLE IF NOT EXISTS public.daily_update_run (
   mail_sent    integer,
   mail_failed  integer,
   error        text,
+  errors       text,
   PRIMARY KEY (run_at)
 );
+
+-- 2026-10-28 B：errors 装逐条失败原因（基金/股票/指数，截断到 1200 字），只有计数的那版查不到"为什么挂"。
+-- 表已在生产存在 ⇒ CREATE IF NOT EXISTS 不会补列，必须先跑这条再部署函数：
+-- PostgREST 对未知列整条 upsert 报 42703，函数侧虽自吞，但当晚台账会一行不落。
+ALTER TABLE public.daily_update_run ADD COLUMN IF NOT EXISTS errors text;
 
 CREATE INDEX IF NOT EXISTS daily_update_run_status_run_at
   ON public.daily_update_run (status, run_at DESC);
