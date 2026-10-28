@@ -239,35 +239,40 @@ Deno.test("大盘参考键：空串 = 豁免（不参考），未填 = HS300，�
   }
 });
 
-Deno.test("回撤抄底门槛：基金 30% / 股票 20%，页面 dipAlert* 与服务端 dipLadder 逐格一致", () => {
+Deno.test("回撤抄底门槛：基金与股票统一 30%，页面 dipAlert* 与服务端 dipLadder 逐格一致", () => {
   const high = 100;
   const pcts: Array<number | null> = [null, 0, 79.9, 80];
   for (let dd = 0; dd <= 60; dd += 0.5) {
     const price = high * (1 - dd / 100);
     for (const pct of pcts) {
-      const srvS = D.dipLadder({ high52w: high }, price, pct, 20);
+      const srvS = D.dipLadder({ high52w: high }, price, pct);
       const pageS = pageDipAlertStock({ high52w: high, currentPrice: price, valuationPercentile: pct });
       assertEquals(pageS === null, srvS === null, `股票亮灯 dd=${dd} pct=${pct}`);
       assertEquals(pageS?.add ?? null, srvS?.add ?? null, `股票档位 dd=${dd} pct=${pct}`);
       assertEquals(pageS?.dd.toFixed(6) ?? null, srvS?.dd.toFixed(6) ?? null, `股票回撤 dd=${dd} pct=${pct}`);
 
-      const srvF = D.dipLadder({ high52w: high }, price, pct, 30);
+      const srvF = D.dipLadder({ high52w: high }, price, pct);
       const pageF = pageDipFundLadder({ high52w: high, currentNav: price, valuationPercentile: pct }, { level: "watch" });
       assertEquals(pageF === null, srvF === null, `基金亮灯 dd=${dd} pct=${pct}`);
       assertEquals(pageF?.add ?? null, srvF?.add ?? null, `基金档位 dd=${dd} pct=${pct}`);
       assertEquals(pageF?.dd.toFixed(6) ?? null, srvF?.dd.toFixed(6) ?? null, `基金回撤 dd=${dd} pct=${pct}`);
     }
   }
-  // 门槛本身钉死：20% 只亮股票腿，30% 才亮基金腿；29.5 不亮、30.0 亮
+  // 门槛本身钉死：29.5 不亮、30.0 亮；30–34.9 是 +30 档、35 起 +40 档、50 起 +60 档
   const at = (d: number) => ({
     high52w: high, currentPrice: high * (1 - d / 100), currentNav: high * (1 - d / 100),
   });
-  assertEquals(pageDipAlertStock(at(20)) !== null, true, "股票 dd 20% 亮");
+  assertEquals(pageDipAlertStock(at(20)), null, "股票 dd 20% 不再亮（统一 30%）");
   assertEquals(pageDipFundLadder(at(20), { level: "watch" }), null, "基金 dd 20% 不亮");
+  assertEquals(pageDipAlertStock(at(29.5)), null, "29.5% 不亮");
   assertEquals(pageDipFundLadder(at(29.5), { level: "watch" }), null, "基金 29.5% 不亮");
-  assertEquals(pageDipFundLadder(at(30), { level: "watch" })?.add, 30, "基金 30.0% 亮 +30 档");
+  assertEquals(pageDipAlertStock(at(30))?.add, 30, "股票 30.0% → +30 档");
+  assertEquals(pageDipFundLadder(at(30), { level: "watch" })?.add, 30, "基金 30.0% → +30 档");
+  assertEquals(pageDipAlertStock(at(34.5))?.add, 30, "34.5% 仍 +30 档");
   assertEquals(pageDipFundLadder(at(34.5), { level: "watch" })?.add, 30, "基金 34.5% 仍 +30 档");
+  assertEquals(pageDipAlertStock(at(35))?.add, 40, "35% → +40 档");
   assertEquals(pageDipFundLadder(at(35), { level: "watch" })?.add, 40, "基金 35% → +40 档");
+  assertEquals(pageDipAlertStock(at(50))?.add, 60, "50% → +60 档（最深档）");
 });
 
 Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对的函数（防「测试绿但生产走岔路」）", async () => {
@@ -278,9 +283,9 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
     "index.html 必须有 SIGNAL_PURE 标记块（本测试的抽取来源）");
   assert(/\/\/ ==== LADDER_PURE_BEGIN ====/.test(html) && /\/\/ ==== LADDER_PURE_END ====/.test(html),
     "index.html 必须有 LADDER_PURE 标记块（回撤抄底判据的抽取来源）");
-  assert(/dipAlertStock\(\{ \.\.\.f, currentPrice: parseFloat\(f\.currentNav\)\|\|0 \}, 30\)/.test(html),
-    "页面基金腿必须显式传门槛 30（默认 20 会退回旧口径）");
-  assert(/const sDip = dipAlertStock\(s\);/.test(html), "页面股票腿保持默认门槛 20");
+  assert(/dipAlertStock\(\{ \.\.\.f, currentPrice: parseFloat\(f\.currentNav\)\|\|0 \}\)/.test(html),
+    "页面基金腿复用 dipAlertStock（门槛由函数内统一 30%）");
+  assert(/const sDip = dipAlertStock\(s\);/.test(html), "页面股票腿调用同一个 dipAlertStock");
   const server = await Deno.readTextFile(new URL("../supabase/functions/daily-update/index.ts", import.meta.url));
   assert(/evalFundSignalServer\(f, close, dev, streak, themeCaps, themeSum, goal\)/.test(server),
     "夜间基金路径必须调用 evalFundSignalServer（被比对的函数）");
@@ -292,8 +297,8 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
   // 若哪天把 pct 也传进股票腿，必须同期在页面造出对应展示，否则邮件会出现页面没有的档位。
   assert(/const tier = baseSignalLabel\(dev\);/.test(server),
     "股票腿必须保持 dev 单腿（页面对股票无均线档位；改动需同步 spec 与页面）");
-  assert(/const ladder = dipLadder\(f, close, readPct\(f\), 30\);/.test(server),
-    "邮件基金腿必须传门槛 30（与页面同步）");
-  assert(/ladder: dipLadder\(s, close, readPct\(s\), 20\)/.test(server),
-    "邮件股票腿保持门槛 20");
+  assert(/const ladder = dipLadder\(f, close, readPct\(f\)\);/.test(server),
+    "邮件基金腿必须走统一门槛的 dipLadder");
+  assert(/ladder: dipLadder\(s, close, readPct\(s\)\)/.test(server),
+    "邮件股票腿必须走统一门槛的 dipLadder");
 });
