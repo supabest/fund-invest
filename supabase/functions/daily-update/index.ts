@@ -321,12 +321,13 @@ export function resumeBannerHtml(list: ResumeHit[]): string {
 
 // 抄底横幅：每只触发基金一行；空列表返回空串，不留空壳。
 // 目标跌幅用 String() 而不是 toFixed(1)：页面回显是 -20%，邮件不能写成 -20.0% 增加噪音。
+// shout=false 表示当前处于非定投状态——只陈述事实、不给系统指令（2026-10-28 用户裁决）。
 export function dipBannerHtml(list: Array<{ code: string; name?: string; ret: number; target: number; shout: boolean }>): string {
   if (!list.length) return '';
   const lines = list.map(d => {
     const who = '【' + d.code + '】' + (d.name ? d.name + ' ' : '');
-    const tail = d.shout ? '建议加仓/多投' : '主信号暂停中，暂不新增（仅状态提示）';
-    return who + '收益 ' + d.ret.toFixed(1) + '% 已跌破 ' + String(d.target) + '% 安全垫 → ' + tail;
+    const tail = d.shout ? ' → 建议加仓/多投' : '';
+    return who + '收益 ' + d.ret.toFixed(1) + '% 已跌破 ' + String(d.target) + '% 安全垫' + tail;
   });
   return '<div style="background:#EAF3EE;border-left:3px solid ' + C_UP + ';border-radius:8px;padding:12px 14px;margin:14px 0;">'
     + '<div style="font-size:14px;font-weight:700;color:' + C_UP + ';">🟢 抄底提示'

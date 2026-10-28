@@ -18,6 +18,7 @@ import {
   marketLevel as pageMarketLevel, baseSignal, evalFundSignal, fundBenchKey, computeDeviation,
   computeReturn as pageComputeReturn, dualSignal, pctTier, setState,
   dipAlertStock as pageDipAlertStock, dipAlertFundLadder as pageDipFundLadder,
+  buyBannerHtml as pageBuyBanner,
 } from "./signal_parity.ts";
 
 Deno.env.set("DAILY_UPDATE_DISABLE_SERVE", "1");
@@ -313,6 +314,19 @@ Deno.test("回撤抄底门槛：基金与股票统一 30%，页面 dipAlert* 与
     "基金侧已取消估值分位，95 无权否决");
 });
 
+Deno.test("抄底横幅：用户的定投暂停状态不再被写成「暂不新增」指令", () => {
+  const paused = pageBuyBanner([{ kind: "ladder", dd: 36, add: 40, shout: false }]);
+  assertEquals(paused.includes("暂不新增"), false, "暂停只是用户当前的定投状态，不是系统指令");
+  assertEquals(paused.includes("仅状态提示"), false);
+  assertEquals(paused.includes("→"), false, "删掉指令后不许留悬空箭头");
+  assertEquals(paused.includes("已达 +40% 加仓档"), true, "事实仍要如实写出");
+  const live = pageBuyBanner([{ kind: "ladder", dd: 36, add: 40, shout: true }]);
+  assertEquals(live.includes("建议加仓/多投"), true, "非暂停仍给出加仓建议");
+  const cost = pageBuyBanner([{ kind: "cost", ret: -23.4, target: -20, shout: false }]);
+  assertEquals(cost.includes("成本口径：收益 -23.4% 已跌破 -20% 安全垫"), true);
+  assertEquals(cost.includes("暂不新增"), false);
+});
+
 Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对的函数（防「测试绿但生产走岔路」）", async () => {
   const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
   assert(/const sig = evalFundSignal\(f\);/.test(html), "页面基金卡片必须调用 evalFundSignal(f)");
@@ -347,4 +361,7 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
   assert(/ladder: dipLadder\(s, close, readPct\(s\)\)/.test(server),
     "邮件股票腿必须走统一门槛的 dipLadder（股票侧保留高估否决）");
   assert(/pct: readPct\(f\)/.test(server) === false, "邮件基金报告不得再带 pct 字段");
+  // 2026-10-28 用户裁决：「暂停」只代表用户当前在该基金的定投状态，不是系统指令
+  assert(/暂不新增|仅状态提示/.test(html) === false, "页面抄底横幅不得把用户的定投暂停状态写成系统指令");
+  assert(/暂不新增|仅状态提示/.test(server) === false, "邮件抄底横幅不得把用户的定投暂停状态写成系统指令");
 });

@@ -2730,11 +2730,8 @@ function dipAlertStock(s){
   if(pct!==null && !isNaN(pct) && pct>=80) return null;
   return {dd, add};
 }
-// ==== LADDER_PURE_END ====
-function sellBannerHtml(a){
-  return `<div class="trade-banner sell">⚠️ 达到止盈档：${a.ret>=0?'+':''}${a.ret.toFixed(1)}% ≥ +${a.tier.ret}% 档 → 建议卖出 ${a.tier.sell}% 份额</div>`;
-}
-// 抄底横幅：成本/市场两口径合并成一条（不再各亮各的）；shout=false（主信号暂停中）时只报告状态不建议买入
+// 抄底横幅：成本/市场两口径合并成一条（不再各亮各的）；shout=false 表示当前处于非定投状态——
+// 只陈述事实、不给系统指令（2026-10-28 用户裁决：暂停只是他在这只基金上的定投状态，不是指示）
 function buyBannerHtml(list){
   const parts = [];
   for(const d of list){
@@ -2742,7 +2739,11 @@ function buyBannerHtml(list){
     else parts.push(`市场口径：较52周高点回撤 ${d.dd.toFixed(1)}% 已达 +${d.add}% 加仓档`);
   }
   const anyShout = list.some(d=>d.shout);
-  return `<div class="trade-banner buy">🟢 抄底信号 · ${parts.join('；')}${anyShout ? ' → 主信号非暂停，建议加仓/多投' : ' → 主信号暂停中，暂不新增（仅状态提示）'}</div>`;
+  return `<div class="trade-banner buy">🟢 抄底信号 · ${parts.join('；')}${anyShout ? ' → 主信号非暂停，建议加仓/多投' : ''}</div>`;
+}
+// ==== LADDER_PURE_END ====
+function sellBannerHtml(a){
+  return `<div class="trade-banner sell">⚠️ 达到止盈档：${a.ret>=0?'+':''}${a.ret.toFixed(1)}% ≥ +${a.tier.ret}% 档 → 建议卖出 ${a.tier.sell}% 份额</div>`;
 }
 
 function pillClass(level){

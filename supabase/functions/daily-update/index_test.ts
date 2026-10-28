@@ -277,7 +277,7 @@ Deno.test("fundDipAlert：主信号暂停 → 仍返回触发但 shout=false（�
   assertEquals(d!.shout, false);
 });
 
-Deno.test("dipBannerHtml：空列表返回空串；暂停那条不得出现「建议加仓」", () => {
+Deno.test("dipBannerHtml：空列表返回空串；暂停那条只陈述事实，不写「暂不新增」指令", () => {
   assertEquals(dipBannerHtml([]), "");
   const html = dipBannerHtml([
     { code: "000001", name: "测试基金A", ret: -23.4, target: -20, shout: true },
@@ -286,10 +286,15 @@ Deno.test("dipBannerHtml：空列表返回空串；暂停那条不得出现「�
   assertEquals(html.includes("抄底提示"), true);
   assertEquals(html.includes("【000001】测试基金A 收益 -23.4% 已跌破 -20% 安全垫"), true);
   assertEquals(html.includes("建议加仓/多投"), true);
-  assertEquals(html.includes("主信号暂停中，暂不新增（仅状态提示）"), true);
-  // 暂停那条自己不能带买入指令：把第二行单独截出来验
+  // 2026-10-28 用户裁决：「暂停」只代表用户当前在该基金的定投状态，不是系统指令
+  assertEquals(html.includes("暂不新增"), false);
+  assertEquals(html.includes("仅状态提示"), false);
+  assertEquals(html.includes("主信号暂停中"), false);
+  // 暂停那条自己不能带买入指令，也不留一个指向空指令的箭头
   const lineB = html.slice(html.indexOf("【000002】"));
   assertEquals(lineB.includes("建议加仓"), false, "暂停的基金不许被第一条的「建议加仓」文案沾到");
+  assertEquals(lineB.includes("→"), false, "删掉指令后不许留悬空箭头");
+  assertEquals(lineB.includes("已跌破 -20% 安全垫"), true, "事实仍要如实写出");
   assertEquals(/NaN|Infinity/.test(html), false);
 });
 
