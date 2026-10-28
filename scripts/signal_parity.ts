@@ -95,7 +95,11 @@ export const DD_STEPS = F.DD_STEPS as { dd: number; add: number }[];
 export const ddAddPct = F.ddAddPct as (dd: number) => number;
 export const pctTier = F.pctTier as (pct: number | null) => { label: string; coef: number; desc: string } | null;
 export const drawdownFrom = F.drawdownFrom as (high: number, price: number) => number | null;
-export const dualSignal = F.dualSignal as (pct: number | null, dd: number | null) => { total: number; label: string; addPct: number; vetoed: boolean };
+export const dualSignal = F.dualSignal as (
+  pct: number | null,
+  dd: number | null,
+  withPct?: boolean,
+) => { total: number; label: string; addPct: number; vetoed: boolean; reasons: string[] };
 export const computeDeviation = F.computeDeviation as (f: FundLike) => number | null;
 export const effectiveCost = F.effectiveCost as (f: FundLike) => number;
 export const computeReturn = F.computeReturn as (f: FundLike) => number | null;
