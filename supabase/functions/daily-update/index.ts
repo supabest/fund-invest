@@ -32,14 +32,17 @@
 const GOAL_DEFAULT = 200000;
 export const DEFAULT_TIERS = [{ ret: 20, sell: 10 }, { ret: 40, sell: 20 }, { ret: 60, sell: 30 }, { ret: 80, sell: 50 }];
 export const DEFAULT_CAPS: Record<string, number> = { '机器人/先进制造': 10, '电力/新能源': 15, '全球资源': 20, '日本股票': 15, '美国股票': 30, '均衡配置': 10 };
-export const BENCH: Record<string, { secid: string; name: string; th: number[] }> = {
+export const BENCH: Record<string, { secid: string; name: string; th: number[]; noHistorySource?: boolean }> = {
   HS300: { secid: '1.000300', name: '沪深300', th: [-8, -3, 3, 8] },
   NDX: { secid: '100.NDX', name: '纳斯达克', th: [-8, -3, 3, 8] },
   SPX: { secid: '100.SPX', name: '标普500', th: [-8, -3, 3, 8] },
   DJIA: { secid: '100.DJIA', name: '道琼斯', th: [-8, -3, 3, 8] },
   HSI: { secid: '100.HSI', name: '恒生指数', th: [-8, -3, 3, 8] },
   HSTECH: { secid: '124.HSTECH', name: '恒生科技', th: [-12, -5, 5, 12] },
-  N225: { secid: '100.N225', name: '日经225', th: [-8, -3, 3, 8] }
+  // 2026-10-28 取证：腾讯无日本指数通道（5 endpoint × 5 symbol 全无节点）、新浪 int_* 是陈旧快照
+  // （比现网已验证的腾讯道指/标普/纳指低 11.7%/14.0%/24.2%）、东财 push2his 8 镜像本机与 Edge 双向断，
+  // 仅 push2 实时可用（拿不到 120 根）。用户裁定停尝试、接受无大盘折扣，不再每晚白跑 6s。
+  N225: { secid: '100.N225', name: '日经225', th: [-8, -3, 3, 8], noHistorySource: true },
 };
 const KLINE_HOSTS = ['push2his.eastmoney.com', '1.push2his.eastmoney.com', '23.push2his.eastmoney.com', '33.push2his.eastmoney.com', '44.push2his.eastmoney.com', '92.push2his.eastmoney.com', '98.push2his.eastmoney.com', '99.push2his.eastmoney.com'];
 // 单标的在东财镜像段上的时间预算：超了就转腾讯，不再逐个镜像耗墙钟（150s 是硬上限）。
@@ -635,7 +638,7 @@ export async function handle(
         const code = String(f.fundCode || '').trim();
         if (/^\d{6}$/.test(code)) fundJobs.push({ userId: st.user_id, code });
         const k = f.benchmark || 'HS300';
-        if (BENCH[k]) idxSet.add(k);
+        if (BENCH[k] && !BENCH[k].noHistorySource) idxSet.add(k);
       }
       const stocks = (st.data && st.data.stocks) || [];
       for (const s of stocks) {

@@ -859,3 +859,62 @@ Deno.test("B 接线：指数腿失败显性进邮件，并随台账 errors 真�
     logs.restore();
   }
 });
+
+// 2026-10-28 取证结论：日经225 无历史源——腾讯 5 endpoint × 5 symbol 全无节点、
+// 新浪 int_* 比已验证的腾讯值低 11.7%~24.2%（陈旧快照）、东财 push2his 8 镜像两个出口全断，
+// 只有 push2 实时可用（拿不到 120 根）。用户裁定：停尝试、接受无大盘折扣，邮件不再报这条噪声。
+function n225States() {
+  return [{
+    user_id: "u1",
+    data: {
+      funds: [
+        { fundCode: "000001", name: "沪深300基金", benchmark: "HS300", marketValue: 1000, shares: 100, costBasis: 2 },
+        { fundCode: "000002", name: "摩根日本精选(QDII)C", benchmark: "N225", marketValue: 1000, shares: 100, costBasis: 2 },
+      ],
+      stocks: [],
+    },
+  }];
+}
+
+Deno.test("N225：无源标的不再尝试取数，也不再进邮件与台账（停噪声）", async () => {
+  const real = globalThis.fetch;
+  const posts = capturePosts();
+  const n225Hits: string[] = [];
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") { posts.record(url, init); return Promise.resolve(Response.json({}, { status: 201 })); }
+    if (url.includes("dingtou_state")) return Promise.resolve(Response.json(n225States()));
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (url.includes("push2his")) {
+      if (url.includes("1.000300")) {
+        return Promise.resolve(Response.json({ data: { name: "沪深300", klines: ["2026-10-27,4049.55", "2026-10-28,4083.87"] } }));
+      }
+      n225Hits.push(url);
+      return Promise.resolve(Response.json({ data: {} }));
+    }
+    if (url.includes("ifzq.gtimg.cn")) {
+      if (url.includes("N225")) n225Hits.push(url);
+      return Promise.resolve(new Response(txJson("whatever", []), { status: 200 }));
+    }
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: async (_s: string, html: string) => { mail = html; } });
+    assertEquals(res.status, 200);
+    const body = await res.json() as Record<string, any>;
+    assertEquals(n225Hits.length, 0, "无源就不该再每晚白跑 6s 镜像预算：" + n225Hits.length + " 次");
+    assertEquals(body.indices.some((i: any) => i.idx === "N225"), false, "N225 不应出现在取数结果里");
+    assertEquals(body.indices.every((i: any) => i.idx !== "HS300" || i.ok === true), true, "其余指数照常取");
+    assertEquals(mail.includes("日经225"), false, "邮件不再报这条固定告警");
+    const ledger = posts.out.filter((p) => p.table === "daily_update_run");
+    const last = ledger[ledger.length - 1].rows[0];
+    assertEquals(last.index_fail, 0, "台账里不该留一个永久失败的腿");
+    assertEquals(last.errors, null, "全绿时 errors 为 null");
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
