@@ -21,6 +21,12 @@
 //     （状态、force、用户数、总耗时、各段计时串、基金/股票/指数成功失败计数、邮件送达数、error）。
 //     用途：pg_cron 丢弃响应体且 Edge console 无抽取通道，被 150s 墙钟砍掉的那晚表里只剩 'running'，
 //     断点位置即证据；台账写入同样自吞（表没建也不能改变响应契约）。
+// v10 (2026-10-28): 股票/指数腿加腾讯 gtimg 兜底 + 东财镜像段单标的 6s 硬预算。
+//   起因（实测）：push2his 对 Edge 出口 IP 连接层拒连，10-25/26/27 连续三晚股票与指数双腿全废
+//   （stock_latest 停在 10-24 20:31、index_history 停在 10-23）；旧实现 8 镜像 × 2 试最坏 ≈125s/标的，
+//   一个标的就能吃穿 150s 墙钟，兜底若排在镜像轮询之后等于永远走不到。
+//   口径已逐根核对（见 txSource 注释），且**东财仍是首选**：东财给得出数据就绝不问腾讯，判据输入不变。
+//   遗留：日经225 腾讯无源（实测 type error），该基准仍只吃东财，取不到即如实失败。
 // 触发方式: POST /functions/v1/daily-update，Authorization: Bearer <DAILY_UPDATE_TOKEN>
 // 可选 body: {"force":true} 无变化也发送报告
 const GOAL_DEFAULT = 200000;
@@ -36,6 +42,8 @@ export const BENCH: Record<string, { secid: string; name: string; th: number[] }
   N225: { secid: '100.N225', name: '日经225', th: [-8, -3, 3, 8] }
 };
 const KLINE_HOSTS = ['push2his.eastmoney.com', '1.push2his.eastmoney.com', '23.push2his.eastmoney.com', '33.push2his.eastmoney.com', '44.push2his.eastmoney.com', '92.push2his.eastmoney.com', '98.push2his.eastmoney.com', '99.push2his.eastmoney.com'];
+// 单标的在东财镜像段上的时间预算：超了就转腾讯，不再逐个镜像耗墙钟（150s 是硬上限）。
+const MIRROR_BUDGET_MS = 6000;
 
 export function marketLevel(dev: number | null, th: number[]) {
   if (dev === null) return { level: 'neutral', label: '中性', coef: 1 };
@@ -416,6 +424,52 @@ export function runRow(summary: any, timings: string[], opts: RunRowOpts): Recor
   };
 }
 
+// 腾讯 gtimg 兜底源（2026-10-28）：东财 push2his 对 Edge 出口 IP 连续 3 晚拒连（error sending request，
+// 连接层被断），股票腿与指数腿同时全废——stock_latest 停在 10-24 20:31、index_history 停在 10-23。
+// 板块腿当年因同一问题迁到腾讯（见 sector-trend/tencent.ts 头注释）。本函数只在东财整段失败后补一次，
+// 首选源不变 ⇒ 判据输入口径不变；口径已逐根核对：10-27 收盘 600031=18.070/000338=21.000/002415=34.250
+// 与东财 fqt=1 分毫不差（腾讯行格式 [date, open, close, high, low, volume]，收盘取 r[2]）。
+// 腾讯无日本市场源（jpN225/jpNKY 实测 type error）⇒ N225 返回 null，继续只吃东财，不瞎猜代理。
+export function txSource(secid: string): { symbol: string; endpoint: string } | null {
+  const m = /^(\d+)\.(.+)$/.exec(secid);
+  if (!m) return null;
+  const [, market, code] = m;
+  // 美股指数必须走 usfqkline：同一个 symbol 在 fqkline 下只回 1 根（实测），拿不到 120 日均线
+  if (market === '1' && /^\d{6}$/.test(code)) return { symbol: 'sh' + code, endpoint: 'fqkline' };
+  if (market === '0' && /^\d{6}$/.test(code)) return { symbol: 'sz' + code, endpoint: 'fqkline' };
+  if (market === '116' && /^\d{5}$/.test(code)) return { symbol: 'hk' + code, endpoint: 'fqkline' };
+  const IDX: Record<string, [string, string]> = {
+    '100.HSI': ['hkHSI', 'fqkline'],
+    '124.HSTECH': ['hkHSTECH', 'fqkline'],
+    '100.NDX': ['usNDX', 'usfqkline'],
+    '100.SPX': ['usINX', 'usfqkline'],
+    '100.DJIA': ['usDJI', 'usfqkline'],
+  };
+  const hit = IDX[secid];
+  return hit ? { symbol: hit[0], endpoint: hit[1] } : null;
+}
+
+// 腾讯 K线解析 → {date, close, closes}；空/畸形一律 null（让调用方按"兜底也没拿到"处理，不假装成功）
+export function parseTxKline(json: unknown, symbol: string): { date: string; close: number; closes: number[] } | null {
+  let node: any;
+  try { node = (json as any)?.data?.[symbol]; } catch { return null; }
+  const rows = Array.isArray(node?.qfqday) ? node.qfqday : Array.isArray(node?.day) ? node.day : null;
+  if (!rows) return null;
+  const closes: number[] = [];
+  let date = '';
+  let close = NaN;
+  for (const r of rows) {
+    if (!Array.isArray(r) || r.length < 6) continue;
+    const d = typeof r[0] === 'string' ? r[0] : '';
+    const c = Number(r[2]);
+    if (!d || !Number.isFinite(c)) continue;
+    closes.push(c);
+    date = d;
+    close = c;
+  }
+  return closes.length ? { date, close, closes } : null;
+}
+
 export async function handle(
   req: Request,
   deps: DailyUpdateDeps = REAL_DEPS,
@@ -483,7 +537,11 @@ export async function handle(
   };
   const fetchKline = async (secid: string, fqt: number, lmt: number): Promise<{ date: string; close: number; closes: number[]; name: string }> => {
     let lastErr: any = null;
+    // 东财镜像段硬预算：8 镜像 × 2 试最坏 ≈125s/标的，一个标的就能吃穿 150s 墙钟（现网 3 只股票 48s 全失败）。
+    // 预算只限制"还在不在东财上耗"，不改变成功路径的口径；超时即转腾讯兜底。
+    const tMirror = Date.now();
     for (const host of KLINE_HOSTS) {
+      if (Date.now() - tMirror > MIRROR_BUDGET_MS) { lastErr = new Error('东财镜像段超预算 ' + MIRROR_BUDGET_MS + 'ms'); break; }
       try {
         const r = await fetchRetry('https://' + host + '/api/qt/stock/kline/get?secid=' + secid + '&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f53&klt=101&fqt=' + fqt + '&lmt=' + lmt + '&end=20500101', { headers: { 'User-Agent': 'Mozilla/5.0' } }, 2);
         const j = await r.json();
@@ -491,6 +549,15 @@ export async function handle(
         if (!klines.length) { lastErr = new Error('no klines'); continue; }
         const rows = klines.map((kl: string) => { const [dd, cc] = kl.split(','); return { date: dd, close: parseFloat(cc) }; });
         return { date: rows[rows.length - 1].date, close: rows[rows.length - 1].close, closes: rows.map(x => x.close), name: (j && j.data && j.data.name) || '' };
+      } catch (e) { lastErr = e; }
+    }
+    const tx = txSource(secid);
+    if (tx) {
+      try {
+        const r = await fetchRetry('https://web.ifzq.gtimg.cn/appstock/app/' + tx.endpoint + '/get?param=' + encodeURIComponent(tx.symbol + ',day,,,' + lmt + ',qfq'), { headers: { 'User-Agent': 'Mozilla/5.0' } }, 2, 6000);
+        const p = parseTxKline(await r.json(), tx.symbol);
+        if (p) return { ...p, name: '' };
+        lastErr = new Error('tencent 无有效K线 ' + tx.symbol);
       } catch (e) { lastErr = e; }
     }
     throw lastErr || new Error('all kline hosts failed');

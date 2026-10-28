@@ -8,7 +8,7 @@ Deno.env.set("DAILY_UPDATE_DISABLE_SERVE", "1");
 Deno.env.set("DAILY_UPDATE_TOKEN", "test-token");
 Deno.env.set("SUPABASE_URL", "https://fake.supabase.co");
 Deno.env.set("SB_SERVICE_KEY", "svc-placeholder");
-const { handle, holdingsSummaryHtml, fundDipAlert, dipBannerHtml, runRow } = await import("./index.ts");
+const { handle, holdingsSummaryHtml, fundDipAlert, dipBannerHtml, runRow, txSource, parseTxKline } = await import("./index.ts");
 
 const SB = "https://fake.supabase.co";
 const TOKEN = "test-token";
@@ -572,6 +572,163 @@ Deno.test("D：台账写库自身失败不改判 —— daily_update_run 500 时
     assertEquals(res.status, 200, "台账是观测件，绝不能因为表还没建就把整晚任务打挂");
     assertEquals(body.ok, true);
     assertEquals(hasStageLog(logs.lines, "写库"), true);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+// ── A: 股票/指数腿加腾讯 gtimg 兜底（2026-10-28 加）──
+// 起因（实测，非推断）：push2his 对 Edge 出口 IP 连续 3 晚拒连 ⇒ stock_latest 停在 10-24 20:31、
+// index_history 停在 10-23、index_state 停在 10-24 force，股票+指数两条腿全废；邮件只喊得出股票那半。
+// 板块腿当年因同一问题迁到腾讯（sector-trend/tencent.ts 头注释「东财 push2/push2his 已被 WAF IP 封禁」）。
+// 口径核对（2026-10-28 本机逐根对账）：10-27 收盘 600031=18.070 / 000338=21.000 / 002415=34.250，
+// 与东财 fqt=1 分毫不差 ⇒ 兜底接管时判据输入不变。腾讯行格式 [date, open, close, high, low, volume]，收盘是 r[2]。
+// 顺序承诺：东财仍是首选，腾讯只在东财整段失败后补一次（T4 钉住这条，防止哪天变成静默换源改口径）。
+
+// 腾讯真实响应形状的最小可用样本（含一行畸形，验证剔除）
+function txJson(symbol: string, rows: unknown[]): string {
+  return JSON.stringify({ code: 0, msg: "", data: { [symbol]: { qfqday: rows, qt: {} } } });
+}
+const TX_STOCK_ROWS = [
+  ["2026-10-23", "17.680", "18.320", "18.320", "17.590", "927042.000"],
+  ["2026-10-26", "18.210", "18.270", "18.380", "17.850", "622222.000"],
+  ["2026-10-27", "18.170", "18.070", "18.280", "18.020", "454393.000"],
+  ["畸形行"],
+];
+
+// 一只 A股 + 一只基准为 HS300 的基金：一条链路同时压到股票腿与指数腿
+function aLegStates() {
+  return [{
+    user_id: "u1",
+    data: {
+      funds: [{ fundCode: "000001", name: "测试基金", benchmark: "HS300", marketValue: 1000, shares: 100, costBasis: 2 }],
+      stocks: [{ code: "600031", name: "三一重工", shares: 100, currentPrice: 18 }],
+    },
+  }];
+}
+
+Deno.test("A：txSource 映射 —— A股/港股/指数特判，腾讯无源的标的返回 null", () => {
+  assertEquals(typeof txSource, "function", "txSource 必须先导出");
+  assertEquals(txSource("1.600031"), { symbol: "sh600031", endpoint: "fqkline" });
+  assertEquals(txSource("0.000338"), { symbol: "sz000338", endpoint: "fqkline" });
+  assertEquals(txSource("116.00700"), { symbol: "hk00700", endpoint: "fqkline" });
+  assertEquals(txSource("1.000300"), { symbol: "sh000300", endpoint: "fqkline" }, "沪深300 走同一 sh 前缀");
+  assertEquals(txSource("100.HSI"), { symbol: "hkHSI", endpoint: "fqkline" }, "恒指在腾讯是 hk 前缀，不能按 100 拼 us");
+  assertEquals(txSource("124.HSTECH"), { symbol: "hkHSTECH", endpoint: "fqkline" });
+  assertEquals(txSource("100.NDX"), { symbol: "usNDX", endpoint: "usfqkline" }, "美股指数必须走 usfqkline，fqkline 只回 1 根");
+  assertEquals(txSource("100.SPX"), { symbol: "usINX", endpoint: "usfqkline" });
+  assertEquals(txSource("100.DJIA"), { symbol: "usDJI", endpoint: "usfqkline" });
+  // 腾讯无日本市场源（2026-10-28 实测 jpN225/jpNKY 均 type error）⇒ 不许瞎猜一个源，交回东财
+  assertEquals(txSource("100.N225"), null);
+  assertEquals(txSource("garbage"), null);
+  assertEquals(txSource("1.ABCDEF"), null, "沪市段只认 6 位数字，防把指数码拼成个股");
+});
+
+Deno.test("A：parseTxKline 取 r[2] 收盘（不是 r[1] 开盘），畸形行剔除", () => {
+  const p = parseTxKline(JSON.parse(txJson("sh600031", TX_STOCK_ROWS)), "sh600031");
+  assertEquals(p !== null, true);
+  assertEquals(p!.closes, [18.32, 18.27, 18.07], "收盘取 r[2]；取错列会整条均线腿偏 0.5%");
+  assertEquals(p!.date, "2026-10-27");
+  assertEquals(p!.close, 18.07);
+  // 只吃过 6 列格式（[date, open, close, high, low, volume]）。列数不足的半截行宁可整行丢弃，
+  // 不能顺手拿 r[2] 当收盘——格式一旦漂移，静默错位比直接判失败更坏。
+  const half = parseTxKline(JSON.parse(txJson("sh600031", [
+    ["2026-10-27", "18.170", "18.070", "18.280", "18.020", "454393.000"],
+    ["2026-10-28", "18.000", "19.900"],
+  ])), "sh600031");
+  assertEquals(half!.closes, [18.07], "半截行必须丢弃：收进去会让均线偏一个开市价");
+  assertEquals(half!.close, 18.07, "最新一根被丢弃后日期也要跟着退，不能留一个不存在的交易日");
+  assertEquals(parseTxKline(JSON.parse(txJson("sh600031", [])), "sh600031"), null, "空数组要判失败，不能让兜底假装成功");
+  assertEquals(parseTxKline({ data: {} }, "sh600031"), null, "响应里没有该 symbol → null");
+  assertEquals(parseTxKline(null, "sh600031"), null);
+});
+
+// 端到端：东财 8 镜像全 "no klines"（快速失败，不退避）→ 股票腿与指数腿都必须被腾讯补上
+Deno.test("A 接线：东财整段失败时股票与指数由腾讯补上，任务不再双腿全废", async () => {
+  const real = globalThis.fetch;
+  const txHits: string[] = [];
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) return Promise.resolve(Response.json(aLegStates()));
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) {
+      if (url.includes("sh600031")) { txHits.push("sh600031"); return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 })); }
+      if (url.includes("sh000300")) { txHits.push("sh000300"); return Promise.resolve(new Response(txJson("sh000300", [["2026-10-27", "4030", "4049.55", "4060", "4020", "123"]]), { status: 200 })); }
+      txHits.push("other");
+    }
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: async () => {} });
+    const body = await res.json() as Record<string, any>;
+    assertEquals(res.status, 200);
+    assertEquals(body.stocks[0].ok, true, "股票腿必须被兜底救回来（现网已连续 3 晚 false）");
+    assertEquals(body.stocks[0].close, 18.07, "收盘价取腾讯 r[2]，与东财 10-27 实测一致");
+    assertEquals(body.indices[0].ok, true, "指数腿同样共用 fetchKline，必须一起救回");
+    assertEquals(body.indices[0].close, 4049.55);
+    assertEquals(body.indices[0].idx, "HS300");
+    assertEquals(txHits.includes("sh600031") && txHits.includes("sh000300"), true, "两只都该问到腾讯");
+    assertEquals(/NaN|Infinity/.test(JSON.stringify(body)), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("A 承诺：东财成功时绝不请求腾讯（首选源不变 ⇒ 判据口径不变）", async () => {
+  const real = globalThis.fetch;
+  let txCalled = 0;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) return Promise.resolve(Response.json(aLegStates()));
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (url.includes("ifzq.gtimg.cn")) { txCalled++; return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 })); }
+    if (url.includes("push2his")) {
+      return Promise.resolve(Response.json({ data: { name: "三一重工", klines: ["2026-10-23,18.32", "2026-10-26,18.27", "2026-10-27,18.07"] } }));
+    }
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: async () => {} });
+    const body = await res.json() as Record<string, any>;
+    assertEquals(body.stocks[0].ok, true);
+    assertEquals(body.stocks[0].close, 18.07);
+    assertEquals(txCalled, 0, "东财给得出数据就不许改口问腾讯——静默换源等于偷偷改判据输入");
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("A 边界：两个源都失败仍如实标失败，邮件照发不误判", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) return Promise.resolve(Response.json(aLegStates()));
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(Response.json({ code: 0, msg: "param error", data: [] }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: async () => {} });
+    const body = await res.json() as Record<string, any>;
+    assertEquals(res.status, 200, "取不到也不把整晚判死");
+    assertEquals(body.stocks[0].ok, false, "两源皆失败要如实 false");
+    assertEquals(typeof body.stocks[0].error, "string");
+    assertEquals(body.indices[0].ok, false);
+    assertEquals(hasStageLog(logs.lines, "取数"), true, "两条失败都要留下可归因日志");
   } finally {
     globalThis.fetch = real;
     logs.restore();
