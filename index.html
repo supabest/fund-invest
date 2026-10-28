@@ -2730,6 +2730,22 @@ function dipAlertStock(s){
   if(pct!==null && !isNaN(pct) && pct>=80) return null;
   return {dd, add};
 }
+// 股票加仓计划：档位比例按「整体持仓市值」计（2026-10-29 用户裁决：不是定投基数），
+// A 股按整手 100 股向下折算——不足一手时只报目标金额，绝不四舍五入出虚构手数
+function stockAddPlan(mv, price, add){
+  if(!(mv > 0) || !(price > 0) || !(add > 0)) return null;
+  const lotSize = 100;
+  const want = mv * add / 100;
+  const lots = Math.floor(want / (price * lotSize) + 1e-9);
+  const amount = lots * price * lotSize;
+  return { want, lots, amount, lotSize, ratio: amount / mv * 100 };
+}
+function stockBuyBannerHtml(d, plan){
+  const head = `🟢 抄底：较52周高点回撤 ${d.dd.toFixed(1)}% 已达 +${d.add}% 加仓档 → `;
+  if(!plan) return `<div class="trade-banner buy">${head}建议买入</div>`;
+  if(plan.lots < 1) return `<div class="trade-banner buy">${head}目标加仓 ¥${Math.round(plan.want).toLocaleString('en-US')}，不足 1 手（每手 ${plan.lotSize} 股）</div>`;
+  return `<div class="trade-banner buy">${head}建议买入 ${plan.lots} 手（${plan.lots * plan.lotSize} 股）≈ ¥${Math.round(plan.amount).toLocaleString('en-US')}（占持仓 ${plan.ratio.toFixed(1)}%）</div>`;
+}
 // 抄底横幅：成本/市场两口径合并成一条（不再各亮各的）；shout=false 表示当前处于非定投状态——
 // 只陈述事实、不给系统指令（2026-10-28 用户裁决：暂停只是他在这只基金上的定投状态，不是指示）
 function buyBannerHtml(list){
@@ -2972,6 +2988,7 @@ function renderStockSection(){
     const nextTier = nextProfitTier(s);    const pillCls = dev===null ? 'pill-normal' : (dev<=-5 ? 'pill-strong' : (dev>=3 ? 'pill-half' : 'pill-normal'));
     const sAlert = profitAlertFromRet(ret, s);
     const sDip = dipAlertStock(s);
+    const sPlan = sDip ? stockAddPlan(stockMvOf(s), parseFloat(s.currentPrice)||0, sDip.add) : null;
     const card = document.createElement('div');
     card.className = 'fund-card';
     card.innerHTML = `
@@ -2993,7 +3010,7 @@ function renderStockSection(){
       <div class="signal-price">现价 ${s.currentPrice||'--'}${s.ma60?' · MA60 '+Number(s.ma60).toFixed(2):''}${s.ma120?' · MA120 '+Number(s.ma120).toFixed(2):''}</div>
       ${dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0)}
       ${sAlert ? sellBannerHtml(sAlert) : ''}
-      ${sDip ? `<div class="trade-banner buy">🟢 抄底：较52周高点回撤 ${sDip.dd.toFixed(1)}% 已达 +${sDip.add}% 加仓档 → 双信号建议加仓</div>` : ''}
+      ${sDip ? stockBuyBannerHtml(sDip, sPlan) : ''}
       <div class="fund-body" id="sbody-${s.id}"></div>
     `;
     list.appendChild(card);

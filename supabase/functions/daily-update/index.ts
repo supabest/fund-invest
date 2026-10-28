@@ -301,10 +301,25 @@ function sellMarkHtml(a: { ret: number; tier: { ret: number; sell: number } } | 
   return '<div style="margin:6px 0;padding:8px 10px;background:#B14A341A;border-left:3px solid ' + C_DOWN + ';border-radius:6px;color:' + C_DOWN + ';font-weight:700;">'
     + '🔴 达到止盈档：+' + a.ret.toFixed(1) + '% ≥ +' + a.tier.ret + '% 档 → 建议卖出 ' + a.tier.sell + '% 份额</div>';
 }
-function buyMarkHtml(l: { dd: number; add: number } | null): string {
+// 股票加仓计划：档位比例按「整体持仓市值」计（2026-10-29 用户裁决：不是定投基数），
+// A 股按整手 100 股向下折算——不足一手时只报目标金额，绝不四舍五入出虚构手数
+export function stockAddPlan(mv: number, price: number, add: number): { want: number; lots: number; amount: number; lotSize: number; ratio: number } | null {
+  if (!(mv > 0) || !(price > 0) || !(add > 0)) return null;
+  const lotSize = 100;
+  const want = mv * add / 100;
+  const lots = Math.floor(want / (price * lotSize) + 1e-9);
+  const amount = lots * price * lotSize;
+  return { want, lots, amount, lotSize, ratio: amount / mv * 100 };
+}
+function buyMarkHtml(l: { dd: number; add: number } | null, plan?: { want: number; lots: number; amount: number; lotSize: number; ratio: number } | null): string {
   if (!l) return '';
+  const head = '🟢 较52周高点回撤 ' + l.dd.toFixed(1) + '% 已达 +' + l.add + '% 加仓档 → ';
+  const tail = !plan ? '建议买入'
+    : plan.lots < 1
+      ? '目标加仓 ' + money(plan.want) + '，不足 1 手（每手 ' + plan.lotSize + ' 股）'
+      : '建议买入 ' + plan.lots + ' 手（' + plan.lots * plan.lotSize + ' 股）≈ ' + money(plan.amount) + '（占持仓 ' + plan.ratio.toFixed(1) + '%）';
   return '<div style="margin:6px 0;padding:8px 10px;background:#EAF3EE;border-left:3px solid ' + C_UP + ';border-radius:6px;color:' + C_UP + ';font-weight:700;">'
-    + '🟢 较52周高点回撤 ' + l.dd.toFixed(1) + '% 已达 +' + l.add + '% 加仓档 → 建议买入</div>';
+    + head + tail + '</div>';
 }
 
 // 需恢复定投：仅对手动暂停（档位仍是「暂停中」）的基金，且两条恢复指标至少一条已触发。
@@ -937,10 +952,12 @@ export async function handle(
           const sname = s.name || k.name || '';
           const taken = s.profitTaken || [];
           const nextTier = tiers.find((x: any) => !taken.includes(x.ret)) || null;
+          const sLadder = dipLadder(s, close, readPct(s));
+          const addPlan = sLadder ? stockAddPlan(sMv, close, sLadder.add) : null;
           (stockReport[userId] = stockReport[userId] || []).push({
             code, name: sname || code, close, date: k.date, dev, ma60, ma120, below,
             tier: tier.label + (dev === null ? '（数据不足）' : ''), ret, nextTier,
-            sell: sellAlert(ret, s), ladder: dipLadder(s, close, readPct(s))
+            sell: sellAlert(ret, s), ladder: sLadder, addPlan
           });
 
           await post('stock_history', 'user_id,code,price_date', [{ user_id: userId, code, price_date: k.date, close, ma20, ma60, ma120, dev_pct: dev }]);
@@ -1117,7 +1134,7 @@ export async function handle(
         return '<li style="margin:12px 0;padding:10px 12px;background:#FAF8F2;border-radius:8px;">'
           + '<b>【' + r.code + '】' + r.name + '</b> ' + retChipHtml(r.ret)
           + sellMarkHtml(r.sell)
-          + buyMarkHtml(r.ladder)
+          + buyMarkHtml(r.ladder, r.addPlan)
           + '<div style="margin:4px 0;">📊 买入参考：<b style="color:#A87C2E;">' + r.tier + '</b> · 现价 ' + r.close + '（' + r.date + '）</div>'
           + '<div style="color:#707C8C;font-size:13px;">📈 较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (trendStr ? '｜' + trendStr : '') + '</div>'
           + '<div style="color:#707C8C;font-size:13px;">💰 ' + profitStr + '</div>'

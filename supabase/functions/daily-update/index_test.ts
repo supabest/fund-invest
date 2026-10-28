@@ -10,7 +10,7 @@ Deno.env.set("SUPABASE_URL", "https://fake.supabase.co");
 Deno.env.set("SB_SERVICE_KEY", "svc-placeholder");
 const { handle, holdingsSummaryHtml, fundDipAlert, dipBannerHtml, runRow, txSource, parseTxKline, klineFailNote,
   ddAddPct, drawdownFrom, dipLadder, sellAlert, retChipHtml, baseSignalLabel,
-  evalFundSignalServer } = await import("./index.ts");
+  evalFundSignalServer, stockAddPlan } = await import("./index.ts");
 
 const SB = "https://fake.supabase.co";
 const TOKEN = "test-token";
@@ -967,6 +967,26 @@ Deno.test("dipLadder：回撤 ≥30% 门槛与档位表（股票侧保留高估�
   assertEquals(dipLadder({}, 7.0, null), null, "没填 52 周高点就不亮");
 });
 
+Deno.test("stockAddPlan：整体持仓占比 × 档位 → 按整手（100 股）折算出加仓手数与金额", () => {
+  // 持仓 500 股 × 18.07 = 9,035；+40% ⇒ 目标 3,614 元 ⇒ 正好 2 手
+  const p = stockAddPlan(500 * 18.07, 18.07, 40)!;
+  assertEquals(p.want.toFixed(2), "3614.00");
+  assertEquals(p.lots, 2);
+  assertEquals(p.amount.toFixed(2), "3614.00");
+  assertEquals(p.lotSize, 100);
+  // 目标额不足 1 手 ⇒ 0 手、金额 0（不许编造半手）
+  const small = stockAddPlan(100 * 18.07, 18.07, 40)!;
+  assertEquals(small.lots, 0);
+  assertEquals(small.amount, 0);
+  // 边界：目标恰好等于 1 手金额 ⇒ 1 手（浮点容差）；略低 ⇒ 0 手
+  assertEquals(stockAddPlan(100 * 18.07, 18.07, 100)!.lots, 1);
+  assertEquals(stockAddPlan(100 * 18.07 * 0.99, 18.07, 100)!.lots, 0);
+  // 缺份额/价格/档位 ⇒ null（页面与邮件都不许编造金额）
+  assertEquals(stockAddPlan(0, 18.07, 40), null);
+  assertEquals(stockAddPlan(9035, 0, 40), null);
+  assertEquals(stockAddPlan(9035, 18.07, 0), null);
+});
+
 Deno.test("sellAlert：达到止盈档且未执行才报，已执行不重复报", () => {
   const f = { profitTiers: [{ ret: 10, sell: 30 }, { ret: 20, sell: 30 }, { ret: 35, sell: 20 }, { ret: 50, sell: 20 }], profitTaken: [] };
   assertEquals(sellAlert(12, f), { ret: 12, tier: { ret: 10, sell: 30 } });
@@ -1081,11 +1101,12 @@ Deno.test("邮件接线：非暂停的基金与股票在回撤达 +30% 加仓档
     if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
     if (url.includes("dingtou_state")) {
       // 基金 52周高点 2.50 / 净值 1.60 ⇒ 回撤 36%（+40% 档）；股票 30 / 18.07 ⇒ 39.8%（+40% 档）
+      // 股票给 500 股：整手折算后确实买得起（2 手），本条只验「达档即打买入标志」
       return Promise.resolve(Response.json([{
         user_id: "u1",
         data: {
           funds: [{ fundCode: "000001", name: "测试基金", benchmark: "", marketValue: 160, shares: 100, costBasis: 1.6, high52w: 2.5 }],
-          stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 20, high52w: 30 }],
+          stocks: [{ code: "600031", name: "三一重工", shares: 500, cost: 20, high52w: 30 }],
         },
       }]));
     }
@@ -1212,6 +1233,68 @@ Deno.test("邮件接线：股票达止盈档时同样写「已达到」，不与
     const seg = mail.slice(mail.indexOf("【600031】"));
     assertEquals(seg.includes("已达到 +80% 止盈档"), true);
     assertEquals(seg.includes("下一止盈档"), false, "已达 80% 档时不许再写「下一止盈档 +20%」");
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：股票回撤加仓档折算成整手——写出手数、股数与按手金额，并标占持仓比例", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      // 500 股 × 18.07 = 9,035；高点 30 ⇒ 回撤 39.8%（+40% 档）⇒ 目标 3,614 元，正合 2 手
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: { funds: [], stocks: [{ code: "600031", name: "三一重工", shares: 500, cost: 30, high52w: 30 }] },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    assertEquals(mail.includes("建议买入 2 手（200 股）≈ ¥3,614（占持仓 40.0%）"), true, "整手金额要写出来：" + mail.slice(mail.indexOf("【600031】"), mail.indexOf("【600031】") + 400));
+    assertEquals(/NaN|Infinity|undefined/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：目标加仓额不足一手时如实说「不足 1 手」，不许四舍五入成 0 股或虚构金额", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      // 100 股 × 18.07 = 1,807；+40% ⇒ 目标 722.8 元 < 一手 1,807 元
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: { funds: [], stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 30, high52w: 30 }] },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    const seg = mail.slice(mail.indexOf("【600031】"));
+    assertEquals(seg.includes("目标加仓 ¥723，不足 1 手（每手 100 股）"), true, "不足一手要如实说：" + seg.slice(0, 400));
+    assertEquals(seg.includes("0 手"), false, "不许写「买 0 手」这种空指令");
+    assertEquals(/NaN|Infinity|undefined/.test(mail), false);
   } finally {
     globalThis.fetch = real;
     logs.restore();

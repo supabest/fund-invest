@@ -48,7 +48,7 @@ const EXPORT_NAMES = [
   'marketLevel', 'DD_STEPS', 'ddAddPct', 'pctTier', 'drawdownFrom', 'dualSignal',
   'computeDeviation', 'effectiveCost', 'computeReturn', 'themeMarketValue', 'themeCapAmount', 'fundBenchKey',
   'baseSignal', 'evalFundSignal', 'fmtWan', 'fmtSigned', 'fmtMoney', 'fmtPct',
-  'dipAlertStock', 'dipAlertFundLadder', 'buyBannerHtml',
+  'dipAlertStock', 'dipAlertFundLadder', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml',
   '__setState',
 ];
 
@@ -120,6 +120,11 @@ export const dipAlertFundLadder = F.dipAlertFundLadder as (
 ) => { kind: string; dd: number; add: number; shout: boolean } | null;
 export const buyBannerHtml = F.buyBannerHtml as (
   list: Array<{ kind: string; dd?: number; add?: number; ret?: number; target?: number; shout: boolean }>,
+) => string;
+export type AddPlan = { want: number; lots: number; amount: number; lotSize: number; ratio: number };
+export const stockAddPlan = F.stockAddPlan as (mv: number, price: number, add: number) => AddPlan | null;
+export const stockBuyBannerHtml = F.stockBuyBannerHtml as (
+  d: { dd: number; add: number }, plan: AddPlan | null,
 ) => string;
 
 /** 注入前端全局态（funds 影响 themeMarketValue；themeCaps/goal 影响 themeCapAmount）。 */

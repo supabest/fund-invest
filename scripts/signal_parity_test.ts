@@ -19,6 +19,7 @@ import {
   computeReturn as pageComputeReturn, dualSignal, pctTier, setState,
   dipAlertStock as pageDipAlertStock, dipAlertFundLadder as pageDipFundLadder,
   buyBannerHtml as pageBuyBanner,
+  stockAddPlan as pageStockAddPlan, stockBuyBannerHtml as pageStockBuyBanner,
 } from "./signal_parity.ts";
 
 Deno.env.set("DAILY_UPDATE_DISABLE_SERVE", "1");
@@ -327,6 +328,59 @@ Deno.test("抄底横幅：用户的定投暂停状态不再被写成「暂不新
   assertEquals(cost.includes("暂不新增"), false);
 });
 
+Deno.test("股票加仓计划：整体持仓占比 × 档位比例，按整手（100 股）折算，双端逐格一致", () => {
+  const mvs = [0, 1, 500, 1807, 9035, 18070, 123456.78];
+  const prices = [0, 3.33, 18.07, 250];
+  const adds = [0, 30, 40, 60];
+  for (const mv of mvs) {
+    for (const price of prices) {
+      for (const add of adds) {
+        const p = pageStockAddPlan(mv, price, add);
+        const s = D.stockAddPlan(mv, price, add);
+        assertEquals(p, s, `页面与服务端必须同值：mv=${mv} price=${price} add=${add}`);
+        if (p === null) continue;
+        assertEquals(p.lotSize, 100, "A 股每手 100 股");
+        assertEquals(p.lots, Math.floor(p.lots), "手数必须是整数（只买整手）");
+        assertEquals(p.amount, p.lots * price * p.lotSize, "金额 = 手数 × 每手股数 × 现价");
+        assert(p.amount <= p.want + 1e-9, "整手金额不得超过目标加仓额（只往下取整）");
+        assertEquals(Number.isFinite(p.ratio), true, "占持仓比例不得为 NaN/Infinity");
+      }
+    }
+  }
+  // 语义钉死：500 股 × 18.07、+40% ⇒ 目标 3,614 元，正合 2 手
+  const p = pageStockAddPlan(9035, 18.07, 40)!;
+  assertEquals(p.want.toFixed(2), "3614.00");
+  assertEquals(p.lots, 2);
+  assertEquals(p.amount.toFixed(2), "3614.00");
+  assertEquals(p.ratio.toFixed(1), "40.0");
+  // 不足一手：目标 722.8 元 < 1,807 元
+  const tiny = pageStockAddPlan(1807, 18.07, 40)!;
+  assertEquals(tiny.lots, 0);
+  assertEquals(tiny.amount, 0);
+  assertEquals(tiny.ratio, 0);
+  // 恰好一手：不许被浮点误差吃掉
+  assertEquals(pageStockAddPlan(1807, 18.07, 100)!.lots, 1);
+  assertEquals(pageStockAddPlan(1807 * 0.99, 18.07, 100)!.lots, 0);
+  // 缺持仓/缺价格/档位为 0 → null（页面回落到不带金额的「建议买入」）
+  assertEquals(pageStockAddPlan(0, 18.07, 40), null);
+  assertEquals(pageStockAddPlan(9035, 0, 40), null);
+  assertEquals(pageStockAddPlan(9035, 18.07, 0), null);
+});
+
+Deno.test("股票抄底横幅：整手时写手数+按手金额，不足一手如实说，缺持仓数据回落纯建议", () => {
+  const dip = { dd: 39.8, add: 40 };
+  const ok = pageStockBuyBanner(dip, pageStockAddPlan(9035, 18.07, 40));
+  assert(ok.includes("建议买入 2 手（200 股）"), "手数与股数都要写：" + ok);
+  assert(ok.includes("¥3,614"), "按手计的金额要写：" + ok);
+  assert(ok.includes("占持仓 40.0%"), "要说清这是占整体持仓的比例：" + ok);
+  const tiny = pageStockBuyBanner(dip, pageStockAddPlan(1807, 18.07, 40));
+  assert(tiny.includes("目标加仓 ¥723，不足 1 手（每手 100 股）"), "不足一手要如实说：" + tiny);
+  assert(tiny.includes("0 手") === false, "不许出现「买 0 手」这种空指令");
+  const noPos = pageStockBuyBanner(dip, null);
+  assert(noPos.includes("建议买入"), "没有持仓股数时仍给方向性建议");
+  assert(/NaN|Infinity|undefined/.test(ok + tiny + noPos) === false);
+});
+
 Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对的函数（防「测试绿但生产走岔路」）", async () => {
   const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
   assert(/const sig = evalFundSignal\(f\);/.test(html), "页面基金卡片必须调用 evalFundSignal(f)");
@@ -338,6 +392,10 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
   assert(/dipAlertStock\(\{ \.\.\.f, currentPrice: parseFloat\(f\.currentNav\)\|\|0, valuationPercentile: null \}\)/.test(html),
     "页面基金腿复用 dipAlertStock，但必须显式把估值分位置空（基金侧已取消该指标）");
   assert(/const sDip = dipAlertStock\(s\);/.test(html), "页面股票腿调用同一个 dipAlertStock");
+  // 股票加仓金额必须走同一套纯函数（档位比例 × 整体持仓市值 → 整手），不许在模板里手写折算
+  assert(/const sPlan = sDip \? stockAddPlan\(stockMvOf\(s\), parseFloat\(s\.currentPrice\)\|\|0, sDip\.add\) : null;/.test(html),
+    "页面股票卡片必须用 stockAddPlan(stockMvOf(s), 现价, sDip.add) 算加仓计划");
+  assert(/stockBuyBannerHtml\(sDip, sPlan\)/.test(html), "页面股票抄底横幅必须由 stockBuyBannerHtml(sDip, sPlan) 渲染");
   // 基金侧取消估值分位：表单不再有这个输入、卡片双信号条不再读它
   assert(/data-k="valuationPercentile"/.test(html) === false, "基金表单不得再有估值分位输入框");
   assert(/dualSignalHtml\(f, parseFloat\(f\.currentNav\)\|\|0, parseFloat\(f\.baseAmount\)\|\|0, false\)/.test(html),
@@ -358,8 +416,13 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
     "基金侧取消估值分位后，baseSignalLabel 不得再接受第二个参数（基金/股票都只传 dev）");
   assert(/const ladder = dipLadder\(f, close, null\);/.test(server),
     "邮件基金腿必须走统一门槛的 dipLadder，且不传分位（基金侧无高估否决）");
-  assert(/ladder: dipLadder\(s, close, readPct\(s\)\)/.test(server),
+  assert(/const sLadder = dipLadder\(s, close, readPct\(s\)\);/.test(server),
     "邮件股票腿必须走统一门槛的 dipLadder（股票侧保留高估否决）");
+  assert(/const addPlan = sLadder \? stockAddPlan\(sMv, close, sLadder\.add\) : null;/.test(server),
+    "邮件股票腿必须按整体持仓市值（sMv）折算整手计划");
+  assert(/buyMarkHtml\(r\.ladder, r\.addPlan\)/.test(server), "股票邮件卡片必须把整手计划传给 buyMarkHtml");
+  assert(/buyMarkHtml\(r\.multiplier > 0 \? r\.ladder : null\)/.test(server),
+    "基金邮件卡片不得传整手计划（基金按定投基数倍数，不按手）");
   assert(/pct: readPct\(f\)/.test(server) === false, "邮件基金报告不得再带 pct 字段");
   // 2026-10-28 用户裁决：「暂停」只代表用户当前在该基金的定投状态，不是系统指令
   assert(/暂不新增|仅状态提示/.test(html) === false, "页面抄底横幅不得把用户的定投暂停状态写成系统指令");
