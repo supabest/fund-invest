@@ -257,6 +257,72 @@ export function fundDipAlert(f: any, ret: number | null, sigLevel?: string): Fun
   return { ret, target, shout: sigLevel !== 'pause' };
 }
 
+// 回撤加仓阶梯：与页面 DD_STEPS（index.html 2562）同表；改表必须双端同步，否则页面与邮件给出不同加仓档。
+export const DD_STEPS = [{ dd: 50, add: 60 }, { dd: 35, add: 40 }, { dd: 20, add: 30 }, { dd: 15, add: 20 }, { dd: 10, add: 10 }, { dd: 5, add: 5 }];
+export function ddAddPct(dd: number): number {
+  for (const s of DD_STEPS) if (dd >= s.dd) return s.add;
+  return 0;
+}
+export function drawdownFrom(high: number, price: number): number | null {
+  if (!(high > 0) || !(price > 0)) return null;
+  return price >= high ? 0 : (high - price) / high * 100;
+}
+// 基金/股票共用的「回撤达加仓档」：与页面 dipAlertStock 同门槛（add≥30 即回撤≥20%）；
+// 估值分位≥80 高估区仲裁否决——盈利衰退期的下跌不单独追跌。
+export function dipLadder(f: { high52w?: number | string } | null | undefined, price: number, pct: number | null): { dd: number; add: number } | null {
+  const dd = drawdownFrom(Number(f && f.high52w) || 0, price);
+  if (dd === null) return null;
+  const add = ddAddPct(dd);
+  if (add < 30) return null;
+  if (pct !== null && Number.isFinite(pct) && pct >= 80) return null;
+  return { dd, add };
+}
+// 止盈档：与页面 profitAlertFromRet 同判据——取已触及的最高未执行档；已执行档跳过，不重复喊。
+export function sellAlert(
+  ret: number | null,
+  f: { profitTiers?: Array<{ ret: number; sell: number }>; profitTaken?: number[] } | null | undefined,
+): { ret: number; tier: { ret: number; sell: number } } | null {
+  if (ret === null || !Number.isFinite(ret) || ret <= 0) return null;
+  const tiers = (f && f.profitTiers && f.profitTiers.length) ? f.profitTiers : DEFAULT_TIERS;
+  const taken: number[] = (f && f.profitTaken) || [];
+  let hit: { ret: number; sell: number } | null = null;
+  for (const t of tiers) if (ret >= t.ret && !taken.includes(t.ret)) hit = t;
+  return hit ? { ret, tier: hit } : null;
+}
+// 名称右侧的收益率色块：赚绿亏红（与持仓概览同色）；无成本给 --，绝不吐 NaN。
+export function retChipHtml(ret: number | null): string {
+  if (ret === null || !Number.isFinite(ret)) {
+    return '<span style="font-size:13px;font-weight:700;color:' + C_MUTED + ';">--</span>';
+  }
+  const sign = ret >= 0 ? '+' : '';
+  return '<span style="font-size:15px;font-weight:700;color:' + (ret >= 0 ? C_UP : C_DOWN) + ';white-space:nowrap;">'
+    + sign + ret.toFixed(1) + '%</span>';
+}
+
+// 卡片顶部的买卖标志：止盈档与回撤加仓档各一条，未触发返回空串（不留空壳）。
+function sellMarkHtml(a: { ret: number; tier: { ret: number; sell: number } } | null): string {
+  if (!a) return '';
+  return '<div style="margin:6px 0;padding:8px 10px;background:#B14A341A;border-left:3px solid ' + C_DOWN + ';border-radius:6px;color:' + C_DOWN + ';font-weight:700;">'
+    + '🔴 达到止盈档：+' + a.ret.toFixed(1) + '% ≥ +' + a.tier.ret + '% 档 → 建议卖出 ' + a.tier.sell + '% 份额</div>';
+}
+function buyMarkHtml(l: { dd: number; add: number } | null): string {
+  if (!l) return '';
+  return '<div style="margin:6px 0;padding:8px 10px;background:#EAF3EE;border-left:3px solid ' + C_UP + ';border-radius:6px;color:' + C_UP + ';font-weight:700;">'
+    + '🟢 较52周高点回撤 ' + l.dd.toFixed(1) + '% 已达 +' + l.add + '% 加仓档 → 建议买入</div>';
+}
+
+// 需恢复定投：仅对手动暂停（档位仍是「暂停中」）的基金，且两条恢复指标至少一条已触发。
+// 只做提示，不改档位/金额（10-09 仲裁：买入指令只由主信号发），所以这里给的是状态旗标不是买入指令。
+export interface ResumeHit { code: string; name?: string; reasons: string[]; }
+export function resumeBannerHtml(list: ResumeHit[]): string {
+  if (!list.length) return '';
+  const lines = list.map(d => '【' + d.code + '】' + (d.name ? d.name + ' ' : '') + d.reasons.join('；'));
+  return '<div style="background:#FBF1E4;border-left:3px solid #A87C2E;border-radius:8px;padding:12px 14px;margin:14px 0;">'
+    + '<div style="font-size:15px;font-weight:700;color:#A87C2E;">🟠 需恢复定投'
+    + '<span style="font-weight:400;font-size:12px;color:' + C_MUTED + ';">（当前处于非定投状态，以下恢复指标已触发）</span></div>'
+    + '<div style="font-size:13px;color:#1B2436;margin-top:4px;">' + lines.join('<br>') + '</div></div>';
+}
+
 // 抄底横幅：每只触发基金一行；空列表返回空串，不留空壳。
 // 目标跌幅用 String() 而不是 toFixed(1)：页面回显是 -20%，邮件不能写成 -20.0% 增加噪音。
 export function dipBannerHtml(list: Array<{ code: string; name?: string; ret: number; target: number; shout: boolean }>): string {
@@ -688,6 +754,7 @@ export async function handle(
     const fundReport: Record<string, any[]> = {};
     const fundHold: Record<string, HoldingsAgg> = {};
     const fundDips: Record<string, Array<{ code: string; name: string } & FundDip>> = {};
+    const fundResume: Record<string, ResumeHit[]> = {};
     // 3a. 基金净值原文并发预取（并发 5、重试 2 次 / 8s）。
     // 原实现串行 + 3 次重试，10 只基金一旦遇上游限流，最坏 10×（9×3+退避）就越过 150s 墙钟。
     // 并发 3/6s 实测：每只都在 6s 撞超时再重试（东财单文件 6–10s），整段仍要 57s ⇒ 提到 5 并发、8s。
@@ -765,12 +832,19 @@ export async function handle(
           }, 0);
           const sig = evalFundSignalServer(f, close, dev, streak, themeCaps, themeSum, goal);
           const ret = computeReturn(close, f);
+          const fname = nameMatch ? nameMatch[1] : (f.name || '');
           // 抄底提示：跌穿成本安全垫就点名（主信号暂停时不喊买，只报状态）
           const dip = fundDipAlert(f, ret, sig.level);
           if (dip) {
-            (fundDips[userId] = fundDips[userId] || []).push({
-              code, name: nameMatch ? nameMatch[1] : (f.name || ''), ...dip,
-            });
+            (fundDips[userId] = fundDips[userId] || []).push({ code, name: fname, ...dip });
+          }
+          // 回撤达加仓档：暂停中 → 只进「需恢复定投」旗标；非暂停才在卡片里喊买入（10-09 仲裁）
+          const ladder = dipLadder(f, close, readPct(f));
+          if (f.manualPause && sig.label === '暂停中') {
+            const reasons: string[] = [];
+            if (dip) reasons.push('收益 ' + dip.ret.toFixed(1) + '% 已跌破 ' + String(dip.target) + '% 成本安全垫');
+            if (ladder) reasons.push('较52周高点回撤 ' + ladder.dd.toFixed(1) + '%（已达 +' + ladder.add + '% 加仓档）');
+            if (reasons.length) (fundResume[userId] = fundResume[userId] || []).push({ code, name: fname, reasons });
           }
           const tiers = (f.profitTiers && f.profitTiers.length) ? f.profitTiers : DEFAULT_TIERS;
           let newTier: number | null = null;
@@ -789,10 +863,11 @@ export async function handle(
           const taken = f.profitTaken || [];
           const nextTier = tiers.find((x: any) => !taken.includes(x.ret)) || null;
           (fundReport[userId] = fundReport[userId] || []).push({
-            code, name: nameMatch ? nameMatch[1] : (f.name || ''), nav: close, navDate,
+            code, name: fname, nav: close, navDate,
             dev, ma60, ma120, streak, pct: readPct(f), label: sig.label, multiplier: sig.multiplier,
             amount: Math.round(amount), benchmarkName: bl ? BENCH[bkey].name : '', benchmarkLevel: bl ? bl.label : '',
-            ret, nextTier, resumeReady: !!sig.resumeReady, theme: f.theme || ''
+            ret, nextTier, resumeReady: !!sig.resumeReady, theme: f.theme || '',
+            sell: sellAlert(ret, f), ladder
           });
 
           await post('fund_nav_history', 'user_id,code,nav_date', [{ user_id: userId, code, nav_date: navDate, nav: close, ma60, ma120, dev_pct: dev, above_ma60: above }]);
@@ -866,7 +941,8 @@ export async function handle(
           const nextTier = tiers.find((x: any) => !taken.includes(x.ret)) || null;
           (stockReport[userId] = stockReport[userId] || []).push({
             code, name: sname || code, close, date: k.date, dev, ma60, ma120, below,
-            tier: tier.label + (dev === null ? '（数据不足）' : ''), ret, nextTier
+            tier: tier.label + (dev === null ? '（数据不足）' : ''), ret, nextTier,
+            sell: sellAlert(ret, s), ladder: dipLadder(s, close, readPct(s))
           });
 
           await post('stock_history', 'user_id,code,price_date', [{ user_id: userId, code, price_date: k.date, close, ma20, ma60, ma120, dev_pct: dev }]);
@@ -1004,7 +1080,7 @@ export async function handle(
         let actionStr: string;
         if (r.label.includes('QDII溢价')) actionStr = '溢价率过高，暂停买入，等待溢价回落';
         else if (r.label.includes('仓位超限')) actionStr = '主题仓位已达上限，停止买入该主题；浮盈可按止盈档分批兑现';
-        else if (r.label === '暂停中') actionStr = '已按你的要求暂停定投，恢复条件满足时系统会提醒你';
+        else if (r.label === '暂停中') actionStr = '当前处于非定投状态，恢复条件满足时系统会提醒你';
         else if (r.resumeReady) actionStr = '恢复条件已满足，可恢复定投';
         else if (r.label === '暂停') actionStr = '停止加码，浮盈分批止盈锁定收益';
         else if (r.label === '减半') actionStr = '放缓定投节奏，关注止盈档位';
@@ -1012,9 +1088,14 @@ export async function handle(
         else if (r.label === '加强') actionStr = '维持或加大定投节奏';
         else if (r.dev === null && (r.pct === null || r.pct === undefined)) actionStr = '自动获取净值/均线数据后即可分析';
         else actionStr = '按计划定投，持有不动';
-        const profitStr = r.ret === null ? '' : ('当前收益率 ' + fmtSigned(r.ret) + (r.nextTier ? '｜下一止盈档 +' + r.nextTier.ret + '%（卖' + r.nextTier.sell + '%）' : '｜各止盈档已执行完毕'));
+        // 已达档时不再写「下一止盈档」：nextTier 取的是第一个未执行档，+60% 时会写成 +20%，与上方卖出标志自相矛盾
+        const tierNote = r.sell ? '｜已达到 +' + r.sell.tier.ret + '% 止盈档'
+          : (r.nextTier ? '｜下一止盈档 +' + r.nextTier.ret + '%（卖' + r.nextTier.sell + '%）' : '｜各止盈档已执行完毕');
+        const profitStr = r.ret === null ? '' : ('当前收益率 ' + fmtSigned(r.ret) + tierNote);
         return '<li style="margin:12px 0;padding:10px 12px;background:#FAF8F2;border-radius:8px;">'
-          + '<b>【' + r.code + '】' + r.name + '</b>'
+          + '<b>【' + r.code + '】' + r.name + '</b> ' + retChipHtml(r.ret)
+          + sellMarkHtml(r.sell)
+          + buyMarkHtml(r.multiplier > 0 ? r.ladder : null)
           + '<div style="margin:4px 0;">📊 信号：<b style="color:#A87C2E;">' + r.label + '</b>' + (r.multiplier > 0 && r.amount > 0 ? ' · 本期建议买入 <b>¥' + r.amount + '</b>/期' : ' · 暂停买入') + '</div>'
           + '<div style="color:#707C8C;font-size:13px;">📈 ' + statusStr + '</div>'
           + '<div style="color:#707C8C;font-size:13px;">💰 ' + profitStr + '</div>'
@@ -1034,9 +1115,13 @@ export async function handle(
         else if (r.dev < 10) actionStr = '偏高区，不再追高，关注止盈档';
         else actionStr = '明显高位，浮盈分批止盈锁定收益';
         const trendStr = r.ma60 ? (r.below > 0 ? '已连续 ' + r.below + ' 日低于60日线' : (r.above > 0 ? '已连续 ' + r.above + ' 日站上60日线' : '')) : '';
-        const profitStr = r.ret === null ? '' : ('当前收益率 ' + fmtSigned(r.ret) + (r.nextTier ? '｜下一止盈档 +' + r.nextTier.ret + '%（卖' + r.nextTier.sell + '%）' : ''));
+        const tierNote = r.sell ? '｜已达到 +' + r.sell.tier.ret + '% 止盈档'
+          : (r.nextTier ? '｜下一止盈档 +' + r.nextTier.ret + '%（卖' + r.nextTier.sell + '%）' : '');
+        const profitStr = r.ret === null ? '' : ('当前收益率 ' + fmtSigned(r.ret) + tierNote);
         return '<li style="margin:12px 0;padding:10px 12px;background:#FAF8F2;border-radius:8px;">'
-          + '<b>【' + r.code + '】' + r.name + '</b>'
+          + '<b>【' + r.code + '】' + r.name + '</b> ' + retChipHtml(r.ret)
+          + sellMarkHtml(r.sell)
+          + buyMarkHtml(r.ladder)
           + '<div style="margin:4px 0;">📊 买入参考：<b style="color:#A87C2E;">' + r.tier + '</b> · 现价 ' + r.close + '（' + r.date + '）</div>'
           + '<div style="color:#707C8C;font-size:13px;">📈 较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (trendStr ? '｜' + trendStr : '') + '</div>'
           + '<div style="color:#707C8C;font-size:13px;">💰 ' + profitStr + '</div>'
@@ -1047,6 +1132,7 @@ export async function handle(
       const html = '<div style="font-family:-apple-system,PingFang SC,Arial;max-width:600px;margin:0 auto;font-size:14px;color:#1B2436;line-height:1.7;">'
         + '<h2 style="font-size:18px;border-bottom:2px solid #A87C2E;padding-bottom:8px;">定投信号台 · ' + title + '</h2>'
         + '<p style="color:#707C8C;">' + dateStr + ' 收盘数据已自动更新</p>'
+        + resumeBannerHtml(fundResume[userId] || [])
         + dipBannerHtml(fundDips[userId] || [])
         + holdingsSummaryHtml(fundHold[userId] || null, stockHold[userId] || null, dateStr)
         + (items.length

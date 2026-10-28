@@ -8,7 +8,8 @@ Deno.env.set("DAILY_UPDATE_DISABLE_SERVE", "1");
 Deno.env.set("DAILY_UPDATE_TOKEN", "test-token");
 Deno.env.set("SUPABASE_URL", "https://fake.supabase.co");
 Deno.env.set("SB_SERVICE_KEY", "svc-placeholder");
-const { handle, holdingsSummaryHtml, fundDipAlert, dipBannerHtml, runRow, txSource, parseTxKline, klineFailNote } = await import("./index.ts");
+const { handle, holdingsSummaryHtml, fundDipAlert, dipBannerHtml, runRow, txSource, parseTxKline, klineFailNote,
+  ddAddPct, drawdownFrom, dipLadder, sellAlert, retChipHtml } = await import("./index.ts");
 
 const SB = "https://fake.supabase.co";
 const TOKEN = "test-token";
@@ -913,6 +914,205 @@ Deno.test("N225：无源标的不再尝试取数，也不再进邮件与台账�
     const last = ledger[ledger.length - 1].rows[0];
     assertEquals(last.index_fail, 0, "台账里不该留一个永久失败的腿");
     assertEquals(last.errors, null, "全绿时 errors 为 null");
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+// ── 2026-10-28 三条需求：非定投状态/需恢复、名称右侧收益率、卖出与买入标志 ──
+// 判据不动：档位与系数仍由 evalFundSignalServer 决定；这里只加"看得见"的层。
+
+Deno.test("ddAddPct：回撤加仓阶梯与页面同表（5/10/15/20/35/50 → 5/10/20/30/40/60）", () => {
+  const cases: [number, number][] = [[0, 0], [4.99, 0], [5, 5], [9.9, 5], [10, 10], [15, 20], [19.9, 20], [20, 30], [34.9, 30], [35, 40], [50, 60], [80, 60]];
+  for (const [dd, add] of cases) assertEquals(ddAddPct(dd), add, "dd=" + dd);
+});
+
+Deno.test("drawdownFrom：高点缺失/非正 → null，创新高给 0", () => {
+  assertEquals(drawdownFrom(0, 10), null);
+  assertEquals(drawdownFrom(10, 0), null);
+  assertEquals(drawdownFrom(10, 12), 0);
+  assertEquals(drawdownFrom(23.8, 17.86)!.toFixed(2), "24.96");
+});
+
+Deno.test("dipLadder：回撤≥20% 才喊（与页面抄底横幅同门槛），高估≥80 仲裁否决", () => {
+  const f = { high52w: 10, currentNav: 8.1 }; // dd 19%
+  assertEquals(dipLadder(f, 8.1, null), null, "19% 未到 20% 大档");
+  const g = { high52w: 10, currentNav: 8.0 }; // dd 20%
+  assertEquals(dipLadder(g, 8.0, null), { dd: 20, add: 30 });
+  assertEquals(dipLadder(g, 8.0, 79.9)?.add, 30, "79.9 不否决");
+  assertEquals(dipLadder(g, 8.0, 80), null, "百分位≥80 高估 → 不追跌");
+  assertEquals(dipLadder({}, 8.0, null), null, "没填 52 周高点就不亮");
+});
+
+Deno.test("sellAlert：达到止盈档且未执行才报，已执行不重复报", () => {
+  const f = { profitTiers: [{ ret: 10, sell: 30 }, { ret: 20, sell: 30 }, { ret: 35, sell: 20 }, { ret: 50, sell: 20 }], profitTaken: [] };
+  assertEquals(sellAlert(12, f), { ret: 12, tier: { ret: 10, sell: 30 } });
+  assertEquals(sellAlert(45, f)?.tier.ret, 35, "取已触及的最高档");
+  assertEquals(sellAlert(5, f), null, "没到第一档不报");
+  assertEquals(sellAlert(null, f), null, "算不出收益率不报");
+  assertEquals(sellAlert(12, { ...f, profitTaken: [10] }), null, "该档已执行过");
+  assertEquals(sellAlert(25, { ...f, profitTaken: [10] }), { ret: 25, tier: { ret: 20, sell: 30 } }, "跳过已执行档继续往上判");
+});
+
+Deno.test("retChipHtml：赚绿亏砖红、无成本显示 --，绝不吐 NaN", () => {
+  assertEquals(retChipHtml(5.34).includes("#3F8A68"), true);
+  assertEquals(retChipHtml(5.34).includes("+5.3%"), true);
+  assertEquals(retChipHtml(-2.04).includes("#B14A34"), true);
+  assertEquals(retChipHtml(-2.04).includes("-2.0%"), true);
+  const nil = retChipHtml(null);
+  assertEquals(nil.includes("--"), true);
+  assertEquals(/NaN|Infinity|undefined/.test(nil), false);
+});
+
+// 三条需求的接线（2026-10-28）：判据不动，只把状态/收益率/买卖标志做成看得见的层。
+// 用户原话：「已按你的要求暂停定投」不是我要求你暂停，是目前此基金的非定投状态。
+
+Deno.test("邮件接线：手动暂停的基金不再说「你要求暂停」，回撤达加仓档要打「需恢复定投」旗标", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (url.includes("dingtou_state")) {
+      // 成本 1.60 = 今夜净值 1.60 ⇒ 收益 0%（成本安全垫不触发）；52周高点 2.50 ⇒ 回撤 36% ≥ 20% 加仓档
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: {
+          funds: [{
+            fundCode: "000001", name: "测试基金", benchmark: "",
+            marketValue: 160, shares: 100, costBasis: 1.6, high52w: 2.5,
+            manualPause: true,
+            resumeRule: { requireDays: 5, mode: "ma_and_drawdown", targetDrawdown: 10 },
+          }],
+          stocks: [],
+        },
+      }]));
+    }
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    assertEquals(mail.includes("已按你的要求暂停定投"), false, "这是系统状态，不是用户的要求");
+    assertEquals(mail.includes("当前处于非定投状态"), true, "先把状态说对");
+    assertEquals(mail.includes("暂停中"), true, "判据不动：档位标签仍如实显示暂停中");
+    assertEquals(mail.includes("需恢复定投"), true, "回撤 36% 已达 +40% 加仓档 → 必须醒目提示恢复");
+    assertEquals(mail.includes("36.0%"), true, "要写出回撤幅度，不能只喊恢复");
+    assertEquals(mail.includes("建议买入"), false, "暂停中按 10-09 仲裁不喊买入（买入指令只由主信号发）");
+    assertEquals(/NaN|Infinity/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：达止盈档打「建议卖出」，基金与股票名称右侧都有按赚亏着色的收益率", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (url.includes("dingtou_state")) {
+      // 基金 成本 1.00 / 净值 1.60 ⇒ +60%，命中默认 60% 档（卖 30%）
+      // 股票 成本 20 / 收盘 18.07 ⇒ -9.7%，只验着色不验档位
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: {
+          funds: [{ fundCode: "000001", name: "测试基金", benchmark: "", marketValue: 160, shares: 100, costBasis: 1 }],
+          stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 20 }],
+        },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    assertEquals(mail.includes("建议卖出 30% 份额"), true, "+60% 命中 60% 档（卖 30%）要在明显位置喊出来：" + mail.slice(0, 600));
+    assertEquals(/【000001】测试基金<\/b>\s*<span[^>]*#3F8A68[^>]*>\+60\.0%/.test(mail), true, "基金名右侧要跟正收益绿块");
+    assertEquals(/【600031】三一重工<\/b>\s*<span[^>]*#B14A34[^>]*>-9\.[67]%/.test(mail), true, "股票名右侧要跟负收益红块");
+    const fundSeg = mail.slice(mail.indexOf("【000001】"), mail.indexOf("💹 股票分析"));
+    assertEquals(fundSeg.includes("已达到 +60% 止盈档"), true, "已达标就写已达标");
+    assertEquals(fundSeg.includes("下一止盈档"), false, "已达 60% 档时不许再写「下一止盈档 +20%」自相矛盾");
+    assertEquals(/NaN|Infinity/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：非暂停的基金与股票在回撤达 +30% 加仓档时都打「建议买入」标志", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (url.includes("dingtou_state")) {
+      // 基金 52周高点 2.50 / 净值 1.60 ⇒ 回撤 36%（+40% 档）；股票 30 / 18.07 ⇒ 39.8%（+40% 档）
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: {
+          funds: [{ fundCode: "000001", name: "测试基金", benchmark: "", marketValue: 160, shares: 100, costBasis: 1.6, high52w: 2.5 }],
+          stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 20, high52w: 30 }],
+        },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    assertEquals((mail.match(/建议买入/g) || []).length >= 2, true, "基金和股票各一条买入标志：" + mail.slice(0, 600));
+    assertEquals(mail.includes("36.0%"), true, "基金回撤幅度要写出来");
+    assertEquals(mail.includes("39.8%"), true, "股票回撤幅度要写出来");
+    assertEquals(mail.includes("+40% 加仓档"), true, "档位要与页面回撤阶梯同表（dd≥35 → +40%）");
+    assertEquals(/NaN|Infinity/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：股票达止盈档时同样写「已达到」，不与「下一止盈档」自相矛盾", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      // 成本 10 / 收盘 18.07 ⇒ +80.7%，命中默认 80% 档（卖 50%）
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: { funds: [], stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 10 }] },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    assertEquals(mail.includes("建议卖出 50% 份额"), true, "+80.7% 命中 80% 档（卖 50%）");
+    const seg = mail.slice(mail.indexOf("【600031】"));
+    assertEquals(seg.includes("已达到 +80% 止盈档"), true);
+    assertEquals(seg.includes("下一止盈档"), false, "已达 80% 档时不许再写「下一止盈档 +20%」");
   } finally {
     globalThis.fetch = real;
     logs.restore();
