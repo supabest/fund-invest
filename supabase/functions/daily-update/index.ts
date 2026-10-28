@@ -267,11 +267,17 @@ export function drawdownFrom(high: number, price: number): number | null {
   if (!(high > 0) || !(price > 0)) return null;
   return price >= high ? 0 : (high - price) / high * 100;
 }
-// 基金/股票共用的「回撤达加仓档」：与页面 dipAlertStock 同门槛（add≥30 即回撤≥20%）；
-// 估值分位≥80 高估区仲裁否决——盈利衰退期的下跌不单独追跌。
-export function dipLadder(f: { high52w?: number | string } | null | undefined, price: number, pct: number | null): { dd: number; add: number } | null {
+// 基金/股票共用的「回撤达加仓档」：门槛各自定——基金 30%（2026-10-28 用户确认）、股票 20%，与页面 dipAlertStock 同门槛；
+// 档位数值仍取 DD_STEPS 同表，门槛提高不改档位。估值分位≥80 高估区仲裁否决——盈利衰退期的下跌不单独追跌。
+export function dipLadder(
+  f: { high52w?: number | string } | null | undefined,
+  price: number,
+  pct: number | null,
+  minDd: number,
+): { dd: number; add: number } | null {
   const dd = drawdownFrom(Number(f && f.high52w) || 0, price);
   if (dd === null) return null;
+  if (dd < minDd) return null;
   const add = ddAddPct(dd);
   if (add < 30) return null;
   if (pct !== null && Number.isFinite(pct) && pct >= 80) return null;
@@ -839,7 +845,7 @@ export async function handle(
             (fundDips[userId] = fundDips[userId] || []).push({ code, name: fname, ...dip });
           }
           // 回撤达加仓档：暂停中 → 只进「需恢复定投」旗标；非暂停才在卡片里喊买入（10-09 仲裁）
-          const ladder = dipLadder(f, close, readPct(f));
+          const ladder = dipLadder(f, close, readPct(f), 30);
           if (f.manualPause && sig.label === '暂停中') {
             const reasons: string[] = [];
             if (dip) reasons.push('收益 ' + dip.ret.toFixed(1) + '% 已跌破 ' + String(dip.target) + '% 成本安全垫');
@@ -942,7 +948,7 @@ export async function handle(
           (stockReport[userId] = stockReport[userId] || []).push({
             code, name: sname || code, close, date: k.date, dev, ma60, ma120, below,
             tier: tier.label + (dev === null ? '（数据不足）' : ''), ret, nextTier,
-            sell: sellAlert(ret, s), ladder: dipLadder(s, close, readPct(s))
+            sell: sellAlert(ret, s), ladder: dipLadder(s, close, readPct(s), 20)
           });
 
           await post('stock_history', 'user_id,code,price_date', [{ user_id: userId, code, price_date: k.date, close, ma20, ma60, ma120, dev_pct: dev }]);

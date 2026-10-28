@@ -8,6 +8,8 @@
 // - 块内引用的全局态（funds/themeCaps/goal）与页面常量（BENCHMARKS/DEFAULT_*）在此注入，常量取自 index.html 原文。
 
 const MARKER = /\/\/ ==== SIGNAL_PURE_BEGIN ====([\s\S]*?)\/\/ ==== SIGNAL_PURE_END ====/;
+// 回撤抄底判据在 SIGNAL_PURE 之外（页面卡片横幅用），单独抽一块：门槛基金 30 / 股票 20 的双端护栏。
+const LADDER_MARKER = /\/\/ ==== LADDER_PURE_BEGIN ====([\s\S]*?)\/\/ ==== LADDER_PURE_END ====/;
 
 // 常量声明在块外（页面顶部），按原文抽取并求值；抽取或求值失败即抛。
 const CONST_SOURCES: Record<string, RegExp> = {
@@ -46,6 +48,7 @@ const EXPORT_NAMES = [
   'marketLevel', 'DD_STEPS', 'ddAddPct', 'pctTier', 'drawdownFrom', 'dualSignal',
   'computeDeviation', 'effectiveCost', 'computeReturn', 'themeMarketValue', 'themeCapAmount', 'fundBenchKey',
   'baseSignal', 'evalFundSignal', 'fmtWan', 'fmtSigned', 'fmtMoney', 'fmtPct',
+  'dipAlertStock', 'dipAlertFundLadder',
   '__setState',
 ];
 
@@ -53,9 +56,11 @@ async function load(): Promise<Record<string, unknown>> {
   const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
   const m = html.match(MARKER);
   if (!m) throw new Error('index.html 缺少 SIGNAL_PURE 标记块');
+  const ladder = html.match(LADDER_MARKER);
+  if (!ladder) throw new Error('index.html 缺少 LADDER_PURE 标记块');
   const consts = Object.keys(CONST_SOURCES).map(n => `const ${n} = ${extractConst(html, n)}`).join('\n');
   // deno-lint-ignore no-explicit-any
-  const ns = new Function(consts + STUBS + m[1] + '\nreturn {' + EXPORT_NAMES.join(', ') + '};')() as any;
+  const ns = new Function(consts + STUBS + m[1] + '\n' + ladder[1] + '\nreturn {' + EXPORT_NAMES.join(', ') + '};')() as any;
   const missing = EXPORT_NAMES.filter(k => ns[k] === undefined);
   if (missing.length) throw new Error('SIGNAL_PURE 块缺少导出：' + missing.join(', '));
   return ns;
@@ -103,6 +108,12 @@ export const fmtWan = F.fmtWan as (n: number) => string;
 export const fmtSigned = F.fmtSigned as (n: number, digits?: number) => string;
 export const fmtMoney = F.fmtMoney as (n: number) => string;
 export const fmtPct = F.fmtPct as (n: number | null, digits?: number) => string;
+export const dipAlertStock = F.dipAlertStock as (
+  s: { high52w?: unknown; currentPrice?: unknown; valuationPercentile?: unknown }, minDd?: number,
+) => { dd: number; add: number } | null;
+export const dipAlertFundLadder = F.dipAlertFundLadder as (
+  f: { high52w?: unknown; currentNav?: unknown; valuationPercentile?: unknown }, sig?: { level?: string } | null,
+) => { kind: string; dd: number; add: number; shout: boolean } | null;
 
 /** 注入前端全局态（funds 影响 themeMarketValue；themeCaps/goal 影响 themeCapAmount）。 */
 export const setState = F.__setState as (next: { funds?: { theme?: string; marketValue?: number }[]; themeCaps?: Record<string, number>; goal?: number }) => void;

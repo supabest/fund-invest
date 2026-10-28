@@ -935,14 +935,22 @@ Deno.test("drawdownFrom：高点缺失/非正 → null，创新高给 0", () => 
   assertEquals(drawdownFrom(23.8, 17.86)!.toFixed(2), "24.96");
 });
 
-Deno.test("dipLadder：回撤≥20% 才喊（与页面抄底横幅同门槛），高估≥80 仲裁否决", () => {
-  const f = { high52w: 10, currentNav: 8.1 }; // dd 19%
-  assertEquals(dipLadder(f, 8.1, null), null, "19% 未到 20% 大档");
-  const g = { high52w: 10, currentNav: 8.0 }; // dd 20%
-  assertEquals(dipLadder(g, 8.0, null), { dd: 20, add: 30 });
-  assertEquals(dipLadder(g, 8.0, 79.9)?.add, 30, "79.9 不否决");
-  assertEquals(dipLadder(g, 8.0, 80), null, "百分位≥80 高估 → 不追跌");
-  assertEquals(dipLadder({}, 8.0, null), null, "没填 52 周高点就不亮");
+Deno.test("dipLadder：基金门槛 30%、股票 20%，档位仍与页面同表，高估≥80 仲裁否决", () => {
+  const f = { high52w: 10 };
+  // 同一只 dd=25% 的标的：股票门槛(20)喊，基金门槛(30)不喊
+  assertEquals(dipLadder(f, 7.5, null, 20)?.add, 30, "股票：dd 25% 仍喊");
+  assertEquals(dipLadder(f, 7.5, null, 30), null, "基金：dd 25% 未到 30% 门槛");
+  // 严格 ≥30：29.9 不亮、30.0 亮
+  assertEquals(dipLadder(f, 7.01, null, 30), null, "29.9% 不亮");
+  assertEquals(dipLadder(f, 7.0, null, 30)!.dd.toFixed(1), "30.0", "30.0% 恰好亮");
+  assertEquals(dipLadder(f, 7.0, null, 30)?.add, 30);
+  // 门槛提高不改档位数值：34.9 仍是 +30 档，35 才 +40
+  assertEquals(dipLadder(f, 6.51, null, 30)?.add, 30, "34.9% → +30 档");
+  assertEquals(dipLadder(f, 6.5, null, 30)?.add, 40, "35% → +40 档");
+  // 高估否决与缺失高点
+  assertEquals(dipLadder(f, 7.0, 79.9, 30)?.add, 30, "79.9 不否决");
+  assertEquals(dipLadder(f, 7.0, 80, 30), null, "百分位≥80 高估 → 不追跌");
+  assertEquals(dipLadder({}, 7.0, null, 30), null, "没填 52 周高点就不亮");
 });
 
 Deno.test("sellAlert：达到止盈档且未执行才报，已执行不重复报", () => {
@@ -1080,6 +1088,45 @@ Deno.test("邮件接线：非暂停的基金与股票在回撤达 +30% 加仓档
     assertEquals(mail.includes("36.0%"), true, "基金回撤幅度要写出来");
     assertEquals(mail.includes("39.8%"), true, "股票回撤幅度要写出来");
     assertEquals(mail.includes("+40% 加仓档"), true, "档位要与页面回撤阶梯同表（dd≥35 → +40%）");
+    assertEquals(/NaN|Infinity/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：基金门槛抬到 30% 后，dd 27.3% 的基金不喊买入、dd 24.7% 的股票照喊", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (url.includes("dingtou_state")) {
+      // 基金 2.20 / 1.60 ⇒ 回撤 27.3%（旧 20% 门槛会喊，新 30% 门槛必须哑）；股票 24 / 18.07 ⇒ 24.7%（照喊）
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: {
+          funds: [{ fundCode: "000001", name: "测试基金", benchmark: "", marketValue: 160, shares: 100, costBasis: 1.6, high52w: 2.2 }],
+          stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 20, high52w: 24 }],
+        },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    const fundSeg = mail.slice(mail.indexOf("【000001】"), mail.indexOf("💹 股票分析"));
+    const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
+    assertEquals(fundSeg.includes("建议买入"), false, "基金 dd 27.3% 未到新门槛 30%，不许喊买入");
+    assertEquals(stockSeg.includes("建议买入"), true, "股票门槛不动（dd 24.7% ≥ 20%）");
+    assertEquals(stockSeg.includes("24.7%"), true, "股票回撤幅度要写出来");
+    assertEquals((mail.match(/建议买入/g) || []).length, 1);
     assertEquals(/NaN|Infinity/.test(mail), false);
   } finally {
     globalThis.fetch = real;

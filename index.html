@@ -2716,24 +2716,28 @@ function dipAlertFund(f, sig){
   if(ret > target + 1e-9) return null;  // 1e-9 容差：恰好踩线时浮点误差（-9.999999…）不能漏亮
   return {kind:'cost', ret, target, shout: !(sig && sig.level==='pause')};
 }
-// 基金抄底·市场口径：复用股票同款回撤阶梯（≥+30% 大档即 dd≥20%），高估≥80 仲裁否决；同样吃主信号档级
+// ==== LADDER_PURE_BEGIN ====
+// 基金抄底·市场口径：复用股票同款回撤阶梯，但门槛更高——基金 dd≥30%（2026-10-28 用户确认），股票默认 20%；
+// 档位数值仍取 DD_STEPS 同表（30–34.9 → +30、35–49.9 → +40、≥50 → +60）；高估≥80 仲裁否决；同样吃主信号档级
 function dipAlertFundLadder(f, sig){
   // 字段适配：股票吃 currentPrice，基金净值在 currentNav，不转换会静默不亮
-  const base = dipAlertStock({ ...f, currentPrice: parseFloat(f.currentNav)||0 });
+  const base = dipAlertStock({ ...f, currentPrice: parseFloat(f.currentNav)||0 }, 30);
   if(!base) return null;
   return {kind:'ladder', dd: base.dd, add: base.add, shout: !(sig && sig.level==='pause')};
 }
 // 股票抄底：直接吃双信号回撤阶梯——≥+30% 大档（即 dd≥20%）且未被高估仲裁否决才亮；阈值与阶梯表联动
-function dipAlertStock(s){
+function dipAlertStock(s, minDd = 20){
   const price = parseFloat(s.currentPrice)||0;
   const dd = drawdownFrom(parseFloat(s.high52w)||0, price);
   if(dd===null) return null;
+  if(dd < minDd) return null;
   const add = ddAddPct(dd);
   if(add < 30) return null;
   const pct = (s.valuationPercentile==='' || s.valuationPercentile===undefined || s.valuationPercentile===null) ? null : parseFloat(s.valuationPercentile);
   if(pct!==null && !isNaN(pct) && pct>=80) return null;
   return {dd, add};
 }
+// ==== LADDER_PURE_END ====
 function sellBannerHtml(a){
   return `<div class="trade-banner sell">⚠️ 达到止盈档：${a.ret>=0?'+':''}${a.ret.toFixed(1)}% ≥ +${a.tier.ret}% 档 → 建议卖出 ${a.tier.sell}% 份额</div>`;
 }
