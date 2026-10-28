@@ -137,40 +137,73 @@ Deno.test("穷举矩阵：均线腿 × 估值百分位腿 × 手动暂停/恢复
   assert(n > 30000, `矩阵规模异常小：${n}`);   // 防「循环写错导致根本没跑」的静默空转
 });
 
-Deno.test("边界钉死：缺数据不造词（dev=null & pct=null → 正常），单腿可用时另一腿照常参与", () => {
+Deno.test("边界钉死：缺数据不造词（dev=null → 正常），估值分位对基金已无影响", () => {
   setState({ funds: [], themeCaps: {}, goal: 200000 });
-  // 两腿全缺：页面口径不给「缺数据」标签，报告里由状态行（zone=数据不足）披露
-  assertEquals(evalFundSignal({ ma60: null, ma120: null, currentNav: 100, valuationPercentile: null }), {
+  // 均线腿全缺：页面口径不给「缺数据」标签，报告里由状态行（zone=数据不足）披露
+  assertEquals(evalFundSignal({ ma60: null, ma120: null, currentNav: 100 }), {
     level: "normal", label: "正常", multiplier: 1,
     reasons: ["未填写均线数据，偏离度信号缺省为中性"],
   });
-  // 只缺均线腿、百分位可用 → 百分位腿单独定档（页面与服务端都不许退化成中性）
-  assertEquals(evalFundSignal({ ma60: null, ma120: null, currentNav: 100, valuationPercentile: 10 }).label, "加强");
-  // 只有一条均线（ma120 缺）→ 单腿偏离照常参与（-6% → 加强）
-  assertEquals(evalFundSignal({ ma60: 100, ma120: null, currentNav: 94, valuationPercentile: null }).label, "加强");
+  // 基金侧取消估值分位（2026-10-28 用户裁决）：填了也不参与，缺均线一律回中性（旧规则会抬成加强）
+  assertEquals(evalFundSignal({ ma60: null, ma120: null, currentNav: 100, valuationPercentile: 10 }).label, "正常");
+  // 只有一条均线（ma120 缺）→ 单腿偏离照常参与（-6% → 加强）；pct 95 不许把它抵成正常
+  assertEquals(evalFundSignal({ ma60: 100, ma120: null, currentNav: 94, valuationPercentile: 95 }).label, "加强");
 });
 
-Deno.test("golden nails：档位词表与仲裁规则（页面侧，服务端同值由矩阵守护）", () => {
+Deno.test("golden nails：档位词表（基金侧只吃均线腿，分位填什么都无感）", () => {
   setState({ funds: [], themeCaps: {}, goal: 200000 });
   const cases: [Record<string, unknown>, string, number][] = [
-    [{ ma60: 100, ma120: 100, currentNav: 94 }, "加强", 1.5],                      // dev −6
-    [{ ma60: 100, ma120: 100, currentNav: 94, valuationPercentile: 95 }, "正常", 1], // 两腿抵消：+1 −2
-    [{ ma60: 100, ma120: 100, currentNav: 100, valuationPercentile: 10 }, "加强", 1.5],
-    [{ ma60: 100, ma120: 100, currentNav: 80, valuationPercentile: 10 }, "双倍", 2],
-    [{ ma60: 100, ma120: 100, currentNav: 112, valuationPercentile: 95 }, "暂停", 0],
-    [{ ma60: 100, ma120: 100, currentNav: 100, valuationPercentile: 90 }, "减半", 0.5],
+    [{ ma60: 100, ma120: 100, currentNav: 94 }, "加强", 1.5],   // dev −6（+1）
+    [{ ma60: 100, ma120: 100, currentNav: 100 }, "正常", 1],
+    [{ ma60: 100, ma120: 100, currentNav: 99 }, "正常", 1],     // dev −1（0）
+    // 均线单腿最高 +2 / 最低 −2 ⇒ 「双倍」(≥3) 与「暂停」(≤−3) 在基金侧已不可达（2026-10-28 取消分位腿的后果）
+    [{ ma60: 100, ma120: 100, currentNav: 80 }, "加强", 1.5],   // dev −20 封顶 +2
+    [{ ma60: 100, ma120: 100, currentNav: 112 }, "减半", 0.5],  // dev +12 封底 −2
   ];
   for (const [f, label, mult] of cases) {
     const r = baseSignal(f);
     assertEquals({ label: r.label, mult: r.multiplier }, { label, mult });
   }
-  // 仲裁规则：百分位 ≥80（高估区）时回撤加仓被「不追跌」否决
+  // 分位字段在基金侧已下线：同一组均线，填 10/60/95 的结论必须与不填完全一致
+  for (const pct of [10, 60, 95]) {
+    const r = baseSignal({ ma60: 100, ma120: 100, currentNav: 94, valuationPercentile: pct });
+    assertEquals({ label: r.label, mult: r.multiplier }, { label: "加强", mult: 1.5 }, "pct=" + pct);
+  }
+  // 双信号仲裁仍在（股票腿还在用）：百分位 ≥80 时回撤加仓被「不追跌」否决
   const vetoed = dualSignal(90, 35);
   assertEquals({ addPct: vetoed.addPct, vetoed: vetoed.vetoed, label: vetoed.label }, { addPct: 0, vetoed: true, label: "暂停" });
   // 未高估时回撤阶梯照常累加：百分位中性 ×1 + 回撤 35% 档 +40% → 加强
   const ok = dualSignal(50, 35);
   assertEquals({ addPct: ok.addPct, vetoed: ok.vetoed, label: ok.label }, { addPct: 40, vetoed: false, label: "加强" });
   assertEquals(pctTier(null), null, "百分位缺数据必须是 null（不许落 0 被读成低估）");
+});
+
+Deno.test("基金侧取消估值分位：pct 10→95 对双端结论零影响（旧规则会改档）", () => {
+  setState({ funds: [], themeCaps: {}, goal: 200000 });
+  for (const dev of DEVS) {
+    const refF = makeFund(dev, null);
+    const pageRef = evalFundSignal(refF);
+    const srvRef = D.evalFundSignalServer(refF, refF.currentNav as number, computeDeviation(refF), null, {}, 0, 200000);
+    for (const pct of [10, 20, 40, 60, 79.9, 80, 95]) {
+      const f = makeFund(dev, pct);
+      const pageR = evalFundSignal(f);
+      const srvR = D.evalFundSignalServer(f, f.currentNav as number, computeDeviation(f), null, {}, 0, 200000);
+      assertEquals({ label: pageR.label, multiplier: pageR.multiplier },
+        { label: pageRef.label, multiplier: pageRef.multiplier }, `页面 dev=${dev} pct=${pct} 仍受分位影响`);
+      assertEquals({ label: srvR.label, multiplier: srvR.multiplier },
+        { label: pageR.label, multiplier: pageR.multiplier }, `服务端 dev=${dev} pct=${pct}`);
+      assertEquals({ label: srvRef.label, multiplier: srvRef.multiplier },
+        { label: pageRef.label, multiplier: pageRef.multiplier }, `服务端无分位基准 dev=${dev}`);
+    }
+  }
+});
+
+Deno.test("双信号条：基金 withPct=false 不再提估值分位，股票侧仍提示未填", () => {
+  const fundSide = dualSignal(null, 36, false);
+  assertEquals(fundSide.reasons.some(r => r.includes("估值")), false, "基金侧已无该指标，理由里不许再提");
+  assertEquals({ addPct: fundSide.addPct, total: fundSide.total.toFixed(2) }, { addPct: 40, total: "1.40" });
+  const stockSide = dualSignal(null, 36);
+  assertEquals(stockSide.reasons.some(r => r.includes("未填估值百分位")), true, "股票侧仍保留提示");
 });
 
 Deno.test("常量同源：大盘系数表 / 默认主题上限 / 止盈档 两端逐值一致", () => {
@@ -241,7 +274,7 @@ Deno.test("大盘参考键：空串 = 豁免（不参考），未填 = HS300，�
 
 Deno.test("回撤抄底门槛：基金与股票统一 30%，页面 dipAlert* 与服务端 dipLadder 逐格一致", () => {
   const high = 100;
-  const pcts: Array<number | null> = [null, 0, 79.9, 80];
+  const pcts: Array<number | null> = [null, 0, 79.9, 80, 95];
   for (let dd = 0; dd <= 60; dd += 0.5) {
     const price = high * (1 - dd / 100);
     for (const pct of pcts) {
@@ -251,7 +284,8 @@ Deno.test("回撤抄底门槛：基金与股票统一 30%，页面 dipAlert* 与
       assertEquals(pageS?.add ?? null, srvS?.add ?? null, `股票档位 dd=${dd} pct=${pct}`);
       assertEquals(pageS?.dd.toFixed(6) ?? null, srvS?.dd.toFixed(6) ?? null, `股票回撤 dd=${dd} pct=${pct}`);
 
-      const srvF = D.dipLadder({ high52w: high }, price, pct);
+      // 基金侧不再传分位（2026-10-28）：页面腿把 valuationPercentile 显式置空，服务端传 null
+      const srvF = D.dipLadder({ high52w: high }, price, null);
       const pageF = pageDipFundLadder({ high52w: high, currentNav: price, valuationPercentile: pct }, { level: "watch" });
       assertEquals(pageF === null, srvF === null, `基金亮灯 dd=${dd} pct=${pct}`);
       assertEquals(pageF?.add ?? null, srvF?.add ?? null, `基金档位 dd=${dd} pct=${pct}`);
@@ -273,6 +307,10 @@ Deno.test("回撤抄底门槛：基金与股票统一 30%，页面 dipAlert* 与
   assertEquals(pageDipAlertStock(at(35))?.add, 40, "35% → +40 档");
   assertEquals(pageDipFundLadder(at(35), { level: "watch" })?.add, 40, "基金 35% → +40 档");
   assertEquals(pageDipAlertStock(at(50))?.add, 60, "50% → +60 档（最深档）");
+  // 仲裁只留股票：同一只 dd 40% 的标的，股票填 pct 95 被否，基金填什么都不否
+  assertEquals(pageDipAlertStock({ ...at(40), valuationPercentile: 95 }), null, "股票侧高估≥80 仍否决");
+  assertEquals(pageDipFundLadder({ ...at(40), valuationPercentile: 95 }, { level: "watch" })?.add, 40,
+    "基金侧已取消估值分位，95 无权否决");
 });
 
 Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对的函数（防「测试绿但生产走岔路」）", async () => {
@@ -283,9 +321,14 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
     "index.html 必须有 SIGNAL_PURE 标记块（本测试的抽取来源）");
   assert(/\/\/ ==== LADDER_PURE_BEGIN ====/.test(html) && /\/\/ ==== LADDER_PURE_END ====/.test(html),
     "index.html 必须有 LADDER_PURE 标记块（回撤抄底判据的抽取来源）");
-  assert(/dipAlertStock\(\{ \.\.\.f, currentPrice: parseFloat\(f\.currentNav\)\|\|0 \}\)/.test(html),
-    "页面基金腿复用 dipAlertStock（门槛由函数内统一 30%）");
+  assert(/dipAlertStock\(\{ \.\.\.f, currentPrice: parseFloat\(f\.currentNav\)\|\|0, valuationPercentile: null \}\)/.test(html),
+    "页面基金腿复用 dipAlertStock，但必须显式把估值分位置空（基金侧已取消该指标）");
   assert(/const sDip = dipAlertStock\(s\);/.test(html), "页面股票腿调用同一个 dipAlertStock");
+  // 基金侧取消估值分位：表单不再有这个输入、卡片双信号条不再读它
+  assert(/data-k="valuationPercentile"/.test(html) === false, "基金表单不得再有估值分位输入框");
+  assert(/dualSignalHtml\(f, parseFloat\(f\.currentNav\)\|\|0, parseFloat\(f\.baseAmount\)\|\|0, false\)/.test(html),
+    "基金卡片双信号条必须以 withPct=false 调用（否则「未填估值百分位」理由会回灌）");
+  assert(/dualSignalHtml\(s, parseFloat\(s\.currentPrice\)\|\|0, 0\)/.test(html), "股票卡片保持读估值分位");
   const server = await Deno.readTextFile(new URL("../supabase/functions/daily-update/index.ts", import.meta.url));
   assert(/evalFundSignalServer\(f, close, dev, streak, themeCaps, themeSum, goal\)/.test(server),
     "夜间基金路径必须调用 evalFundSignalServer（被比对的函数）");
@@ -297,8 +340,11 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
   // 若哪天把 pct 也传进股票腿，必须同期在页面造出对应展示，否则邮件会出现页面没有的档位。
   assert(/const tier = baseSignalLabel\(dev\);/.test(server),
     "股票腿必须保持 dev 单腿（页面对股票无均线档位；改动需同步 spec 与页面）");
-  assert(/const ladder = dipLadder\(f, close, readPct\(f\)\);/.test(server),
-    "邮件基金腿必须走统一门槛的 dipLadder");
+  assert(/baseSignalLabel\([^)]*,/.test(server) === false,
+    "基金侧取消估值分位后，baseSignalLabel 不得再接受第二个参数（基金/股票都只传 dev）");
+  assert(/const ladder = dipLadder\(f, close, null\);/.test(server),
+    "邮件基金腿必须走统一门槛的 dipLadder，且不传分位（基金侧无高估否决）");
   assert(/ladder: dipLadder\(s, close, readPct\(s\)\)/.test(server),
-    "邮件股票腿必须走统一门槛的 dipLadder");
+    "邮件股票腿必须走统一门槛的 dipLadder（股票侧保留高估否决）");
+  assert(/pct: readPct\(f\)/.test(server) === false, "邮件基金报告不得再带 pct 字段");
 });

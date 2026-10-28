@@ -2522,10 +2522,9 @@ function fundBenchKey(f){
   return f.benchmark || 'HS300';
 }
 
-// Core signal engine. Returns {level, label, multiplier, reasons:[]}
+// Core signal engine（基金侧只吃均线偏离腿；2026-10-28 用户裁决取消估值分位——基金无法联网取数，只能手填）
 function baseSignal(f){
   const dev = computeDeviation(f);
-  const pct = f.valuationPercentile===''||f.valuationPercentile===undefined||f.valuationPercentile===null ? null : parseFloat(f.valuationPercentile);
   let score = 0;
   const reasons = [];
 
@@ -2537,14 +2536,6 @@ function baseSignal(f){
     else { reasons.push('净值贴近均线（偏离 '+dev.toFixed(1)+'%）'); }
   } else {
     reasons.push('未填写均线数据，偏离度信号缺省为中性');
-  }
-
-  if(pct!==null && !isNaN(pct)){
-    if(pct<=20){ score+=2; reasons.push('估值百分位 '+pct+'%，处于低位'); }
-    else if(pct<=40){ score+=1; reasons.push('估值百分位 '+pct+'%，偏低'); }
-    else if(pct>=80){ score-=2; reasons.push('估值百分位 '+pct+'%，处于高位'); }
-    else if(pct>=60){ score-=1; reasons.push('估值百分位 '+pct+'%，偏高'); }
-    else { reasons.push('估值百分位 '+pct+'%，中性'); }
   }
 
   let level, label, multiplier;
@@ -2574,13 +2565,13 @@ function drawdownFrom(high, price){
   if(!(high>0) || !(price>0)) return null;
   return price>=high ? 0 : (high-price)/high*100;
 }
-// 仲裁规则：百分位≥80（高估区）时回撤加仓失效——盈利衰退期的下跌不单独追跌
-function dualSignal(pct, dd){
+// 仲裁规则：百分位≥80（高估区）时回撤加仓失效——盈利衰退期的下跌不单独追跌（仅股票侧；withPct=false 时不读分位）
+function dualSignal(pct, dd, withPct = true){
   const pt = pctTier(pct);
   const reasons = [];
   let addPct = 0, vetoed = false;
   if(pt) reasons.push('估值百分位 '+pct+'% → '+pt.desc+'·'+pt.label);
-  else reasons.push('未填估值百分位 · 仅按回撤信号');
+  else if(withPct) reasons.push('未填估值百分位 · 仅按回撤信号');
   if(dd===null){
     reasons.push('52周高点未记录 · 回撤信号缺省（点「自动获取」或手动填写）');
   } else {
@@ -2614,16 +2605,17 @@ function dualPillClass(label){
 }
 // 卡片上的对照信号条：百分位/回撤两项数据全无时不显示，避免噪音
 // 例外：取过数却没分位（NA 三态）必须当面说出来——整条静默返回空串正是本仓库记过的「界面无感」缺陷
-function dualSignalHtml(item, price, baseAmount){
-  const pct = (item.valuationPercentile==='' || item.valuationPercentile===undefined || item.valuationPercentile===null)
+// withPct=false 供基金侧使用（2026-10-28 起基金取消估值分位，只剩回撤一条腿）
+function dualSignalHtml(item, price, baseAmount, withPct = true){
+  const pct = (!withPct || item.valuationPercentile==='' || item.valuationPercentile===undefined || item.valuationPercentile===null)
     ? null : parseFloat(item.valuationPercentile);
   const dd = drawdownFrom(parseFloat(item.high52w)||0, price);
   // 口径 chip 只在自动取数写过 meta 的股票上出现（基金无 valPctMeta → 空串，卡片零噪音）
-  const chip = valPctHtml(item && item.valPctMeta, fmtDateCN(new Date()));
+  const chip = withPct ? valPctHtml(item && item.valPctMeta, fmtDateCN(new Date())) : '';
   if((pct===null || isNaN(pct)) && dd===null){
     return chip ? '<div class="dual-strip"><span class="dual-tag">估值分位</span>'+chip+'</div>' : '';
   }
-  const d = dualSignal(isNaN(pct)?null:pct, dd);
+  const d = dualSignal(isNaN(pct)?null:pct, dd, withPct);
   const pctPill = d.pctTier ? '<span class="signal-pill '+dualPillClass(d.pctTier.label)+'">百分位·'+d.pctTier.label+'</span>' : '';
   const ddPill = dd!==null
     ? '<span class="signal-pill '+(d.addPct>0?'pill-double':(d.vetoed?'pill-pause':'pill-normal'))+'">回撤'+dd.toFixed(1)+'%'+(d.addPct>0?'·加仓+'+d.addPct+'%':(d.vetoed?'·禁加仓':''))+'</span>'
@@ -2718,10 +2710,11 @@ function dipAlertFund(f, sig){
 }
 // ==== LADDER_PURE_BEGIN ====
 // 基金抄底·市场口径：复用股票同款回撤阶梯与门槛（52 周回撤 ≥30%，2026-10-28 用户裁决两端统一）；
-// 档位数值取 DD_STEPS 同表（30–34.9 → +30、35–49.9 → +40、≥50 → +60）；高估≥80 仲裁否决；同样吃主信号档级
+// 档位数值取 DD_STEPS 同表（30–34.9 → +30、35–49.9 → +40、≥50 → +60）；同样吃主信号档级。
+// 基金侧取消估值分位（2026-10-28）：显式置空，不吃高估否决
 function dipAlertFundLadder(f, sig){
   // 字段适配：股票吃 currentPrice，基金净值在 currentNav，不转换会静默不亮
-  const base = dipAlertStock({ ...f, currentPrice: parseFloat(f.currentNav)||0 });
+  const base = dipAlertStock({ ...f, currentPrice: parseFloat(f.currentNav)||0, valuationPercentile: null });
   if(!base) return null;
   return {kind:'ladder', dd: base.dd, add: base.add, shout: !(sig && sig.level==='pause')};
 }
@@ -2904,7 +2897,7 @@ function renderFundList(){
         <span class="signal-amount">${sig.multiplier!==undefined ? '建议金额 '+fmtMoney((f.baseAmount||0)*sig.multiplier*coef)+'/期' : ''}</span>
       </div>
       <div class="signal-reason">${sig.reasons.join('；')}</div>
-      ${dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0)}
+      ${dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0, false)}
       ${alert ? sellBannerHtml(alert) : ''}
       ${dips.length ? buyBannerHtml(dips) : ''}
       <div class="fund-body" id="body-${f.id}"></div>
@@ -3274,7 +3267,6 @@ function fundBodyHtml(f){
       <div class="field"><label>60日均线</label><input type="number" step="0.0001" data-k="ma60" value="${f.ma60??''}"></div>
       <div class="field"><label>120日均线</label><input type="number" step="0.0001" data-k="ma120" value="${f.ma120??''}"></div>
       <div class="field"><label>52周最高净值（自动回算）</label><input type="number" step="0.0001" data-k="high52w" value="${f.high52w??''}"></div>
-      <div class="field full"><label>估值百分位（0-100，越低越便宜；主信号与双信号对照共用）</label><input type="number" data-k="valuationPercentile" value="${f.valuationPercentile??''}"></div>
       <div class="field full"><div class="small-note" data-wrap="qdiiNote">${f.isQDII ? '✓ 已自动识别为 QDII 基金（可填溢价率参与暂停规则）' : 'QDII 身份自动识别，无需手动勾选'}</div></div>
       <div class="field full" data-wrap="qdiiWrap" style="${f.isQDII?'':'display:none;'}"><label>QDII 场内溢价率（%，≥2% 独立触发暂停）</label><input type="number" step="0.1" data-k="qdiiPremium" value="${f.qdiiPremium??''}"></div>
     </div>
@@ -3647,7 +3639,6 @@ async function saveFundForm(id){
   f.marketValue = f.shares * f.currentNav;
   f.ma60 = parseFloat(get('ma60').value)||0;
   f.ma120 = parseFloat(get('ma120').value)||0;
-  f.valuationPercentile = get('valuationPercentile').value;
   const hvRaw = String(get('high52w').value||'').trim();
   if(hvRaw!=='') f.high52w = parseFloat(hvRaw)||0;
   const qdiiEl = body.querySelector('[data-k="qdiiPremium"]');
@@ -3873,7 +3864,7 @@ document.getElementById('addFundBtn').addEventListener('click', async ()=>{
   const f = {
     id: uid(), name:'', theme: DEFAULT_THEMES[0], benchmark:'HS300', isQDII:false, qdiiPremium:'', fundCode:'',
     shares:0, marketValue:0, baseAmount:0, costBasis:0, costTotal:0, currentNav:0, ma60:0, ma120:0,
-    valuationPercentile:'', manualPause:false, aboveMaStreak:0,
+    manualPause:false, aboveMaStreak:0,
     resumeRule:{requireDays:3, mode:'ma_only', targetDrawdown:''},
     profitTiers: DEFAULT_TIERS, profitTaken: []
   };

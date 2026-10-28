@@ -109,7 +109,7 @@ export const fmtSigned = F.fmtSigned as (n: number, digits?: number) => string;
 export const fmtMoney = F.fmtMoney as (n: number) => string;
 export const fmtPct = F.fmtPct as (n: number | null, digits?: number) => string;
 export const dipAlertStock = F.dipAlertStock as (
-  s: { high52w?: unknown; currentPrice?: unknown; valuationPercentile?: unknown }, minDd?: number,
+  s: { high52w?: unknown; currentPrice?: unknown; valuationPercentile?: unknown },
 ) => { dd: number; add: number } | null;
 export const dipAlertFundLadder = F.dipAlertFundLadder as (
   f: { high52w?: unknown; currentNav?: unknown; valuationPercentile?: unknown }, sig?: { level?: string } | null,

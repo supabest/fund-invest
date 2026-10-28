@@ -9,7 +9,8 @@ Deno.env.set("DAILY_UPDATE_TOKEN", "test-token");
 Deno.env.set("SUPABASE_URL", "https://fake.supabase.co");
 Deno.env.set("SB_SERVICE_KEY", "svc-placeholder");
 const { handle, holdingsSummaryHtml, fundDipAlert, dipBannerHtml, runRow, txSource, parseTxKline, klineFailNote,
-  ddAddPct, drawdownFrom, dipLadder, sellAlert, retChipHtml } = await import("./index.ts");
+  ddAddPct, drawdownFrom, dipLadder, sellAlert, retChipHtml, baseSignalLabel,
+  evalFundSignalServer } = await import("./index.ts");
 
 const SB = "https://fake.supabase.co";
 const TOKEN = "test-token";
@@ -935,7 +936,18 @@ Deno.test("drawdownFrom：高点缺失/非正 → null，创新高给 0", () => 
   assertEquals(drawdownFrom(23.8, 17.86)!.toFixed(2), "24.96");
 });
 
-Deno.test("dipLadder：基金与股票统一回撤 ≥30% 门槛，档位仍与页面同表，高估≥80 仲裁否决", () => {
+Deno.test("基金侧取消估值分位（2026-10-28 用户裁决）：主信号只吃均线腿，pct 不再改档", () => {
+  const base = { theme: "T", ma60: 100, ma120: 100, currentNav: 94, costBasis: 1 };
+  assertEquals(baseSignalLabel(-6).label, "加强", "dev −6 单腿（+1）→ 加强");
+  // 旧规则：pct 95 会抵成「正常」、pct 10 会抬成「双倍」——基金侧现在都必须无感
+  for (const pct of ["", undefined, null, 0, 10, 40, 60, 80, 95, "abc"]) {
+    const f = { ...base, valuationPercentile: pct };
+    const r = evalFundSignalServer(f, 94, -6, null, {}, 0, 200000);
+    assertEquals({ label: r.label, multiplier: r.multiplier }, { label: "加强", multiplier: 1.5 }, "pct=" + String(pct));
+  }
+});
+
+Deno.test("dipLadder：回撤 ≥30% 门槛与档位表（股票侧保留高估≥80 否决；基金侧见上条不再传分位）", () => {
   const f = { high52w: 10 };
   assertEquals(dipLadder(f, 7.5, null), null, "dd 25% 未到统一门槛");
   assertEquals(dipLadder(f, 7.01, null), null, "29.9% 不亮");
@@ -1123,6 +1135,45 @@ Deno.test("邮件接线：门槛统一 30% 后，dd 27.3% 的基金与 dd 24.7% 
     assertEquals(fundSeg.includes("建议买入"), false, "基金 dd 27.3% 未到 30%，不许喊买入");
     assertEquals(stockSeg.includes("建议买入"), false, "股票门槛也抬到 30%，dd 24.7% 不许喊买入");
     assertEquals((mail.match(/建议买入/g) || []).length, 0);
+    assertEquals(/NaN|Infinity/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：基金不再读估值分位——pct 95 也照常亮回撤加仓档，报告不出现估值分位", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (url.includes("dingtou_state")) {
+      // 52周高点 2.50 / 净值 1.60 ⇒ 回撤 36%（+40% 档）；旧规则下 pct 95 会把这条买入标否掉
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: {
+          funds: [{
+            fundCode: "000001", name: "测试基金", benchmark: "", marketValue: 160, shares: 100,
+            costBasis: 1.6, high52w: 2.5, valuationPercentile: 95,
+          }],
+          stocks: [],
+        },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    const fundSeg = mail.slice(mail.indexOf("【000001】"), mail.indexOf("💹 股票分析") === -1 ? mail.length : mail.indexOf("💹 股票分析"));
+    assertEquals(fundSeg.includes("建议买入"), true, "基金侧不看估值分位：pct 95 无权再否掉回撤加仓档");
+    assertEquals(fundSeg.includes("+40% 加仓档"), true);
+    assertEquals(fundSeg.includes("估值分位"), false, "基金报告不再出现估值分位");
     assertEquals(/NaN|Infinity/.test(mail), false);
   } finally {
     globalThis.fetch = real;

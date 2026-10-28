@@ -115,22 +115,16 @@ export function fundBenchKey(f: any): string {
   return f.benchmark || 'HS300';
 }
 
-// 常规档位：均线偏离腿 + 估值百分位腿（2026-10-18 双端一致性整改：逐格对齐页面 baseSignal）。
+// 常规档位：只吃均线偏离腿（2026-10-28 用户裁决：基金侧取消估值分位，只有手动填写、无法联网取数）。
 // 标签词表与页面一致（双倍/加强/正常/减半/暂停）；数据缺失不在标签里造词，由报告状态行的 zone='数据不足' 披露。
 // 双端一致性由 scripts/signal_parity_test.ts 穷举矩阵守护：这里改语义必须同步改页面，或同步改测试。
-export function baseSignalLabel(dev: number | null, pct: number | null = null): SignalResult {
+export function baseSignalLabel(dev: number | null): SignalResult {
   let score = 0;
   if (dev !== null) {
     if (dev <= -15) score += 2;
     else if (dev <= -5) score += 1;
     else if (dev >= 10) score -= 2;
     else if (dev >= 3) score -= 1;
-  }
-  if (pct !== null) {
-    if (pct <= 20) score += 2;
-    else if (pct <= 40) score += 1;
-    else if (pct >= 80) score -= 2;
-    else if (pct >= 60) score -= 1;
   }
   if (score >= 3) return { label: '双倍', level: 'double', multiplier: 2 };
   if (score >= 1) return { label: '加强', level: 'strong', multiplier: 1.5 };
@@ -142,7 +136,6 @@ export function baseSignalLabel(dev: number | null, pct: number | null = null): 
 // 复刻页面 evalFundSignal，顺序也照页面：QDII溢价 → 手动暂停/恢复 → 主题上限(金额锚定) → 常规信号。
 // 旧版顺序（上限在手动暂停之前）会让「恢复条件已满足」的资金在邮件里仍报「仓位超限」，与页面结论相反——已整改。
 export function evalFundSignalServer(f: any, nav: number, dev: number | null, streak: number | null, themeCaps: Record<string, number>, themeMv: number, goal: number): SignalResult {
-  const pct = readPct(f);
   // 1. QDII 溢价独立触发（页面标签为「暂停」+理由；这里保留后缀供邮件动作文案识别）
   if (f.isQDII && f.qdiiPremium !== '' && f.qdiiPremium !== undefined && !isNaN(parseFloat(f.qdiiPremium))) {
     const prem = parseFloat(f.qdiiPremium);
@@ -161,7 +154,7 @@ export function evalFundSignalServer(f: any, nav: number, dev: number | null, st
     }
     const satisfied = rr.mode === 'ma_only' ? maOk : (rr.mode === 'ma_and_drawdown' ? (maOk && ddOk) : (maOk || ddOk));
     if (satisfied) {
-      const base = baseSignalLabel(dev, pct);
+      const base = baseSignalLabel(dev);
       return { label: '满足恢复条件 → 建议' + base.label, level: base.level, multiplier: base.multiplier, resumeReady: true };
     }
     return { label: '暂停中', level: 'pause', multiplier: 0 };
@@ -170,7 +163,7 @@ export function evalFundSignalServer(f: any, nav: number, dev: number | null, st
   const capPct = themeCaps[f.theme] ?? 100;
   if (themeMv >= capPct / 100 * goal) return { label: '暂停（仓位超限）', level: 'pause', multiplier: 0 };
   // 4. 常规信号
-  return baseSignalLabel(dev, pct);
+  return baseSignalLabel(dev);
 }
 
 function fmtSigned(n: number): string {
@@ -268,7 +261,7 @@ export function drawdownFrom(high: number, price: number): number | null {
   return price >= high ? 0 : (high - price) / high * 100;
 }
 // 基金/股票共用的「回撤达加仓档」：52 周回撤 ≥30% 才亮（2026-10-28 用户裁决基金与股票统一门槛）；
-// 档位数值取 DD_STEPS 同表；估值分位≥80 高估区仲裁否决——盈利衰退期的下跌不单独追跌。
+// 档位数值取 DD_STEPS 同表；pct 非空时按估值分位≥80 高估区仲裁否决——仅股票侧会传（基金侧已取消该指标）。
 export function dipLadder(
   f: { high52w?: number | string } | null | undefined,
   price: number,
@@ -842,7 +835,8 @@ export async function handle(
             (fundDips[userId] = fundDips[userId] || []).push({ code, name: fname, ...dip });
           }
           // 回撤达加仓档：暂停中 → 只进「需恢复定投」旗标；非暂停才在卡片里喊买入（10-09 仲裁）
-          const ladder = dipLadder(f, close, readPct(f));
+          // 基金侧取消估值分位（2026-10-28）：分位位传 null，不吃高估否决
+          const ladder = dipLadder(f, close, null);
           if (f.manualPause && sig.label === '暂停中') {
             const reasons: string[] = [];
             if (dip) reasons.push('收益 ' + dip.ret.toFixed(1) + '% 已跌破 ' + String(dip.target) + '% 成本安全垫');
@@ -867,7 +861,7 @@ export async function handle(
           const nextTier = tiers.find((x: any) => !taken.includes(x.ret)) || null;
           (fundReport[userId] = fundReport[userId] || []).push({
             code, name: fname, nav: close, navDate,
-            dev, ma60, ma120, streak, pct: readPct(f), label: sig.label, multiplier: sig.multiplier,
+            dev, ma60, ma120, streak, label: sig.label, multiplier: sig.multiplier,
             amount: Math.round(amount), benchmarkName: bl ? BENCH[bkey].name : '', benchmarkLevel: bl ? bl.label : '',
             ret, nextTier, resumeReady: !!sig.resumeReady, theme: f.theme || '',
             sell: sellAlert(ret, f), ladder
@@ -1067,9 +1061,7 @@ export async function handle(
       const fundBlock = (fundReport[userId] || []).map(r => {
         const zone = r.dev === null ? '数据不足' : (r.dev <= -15 ? '深度低位' : r.dev <= -5 ? '低位区' : r.dev < 3 ? '中性区间' : r.dev < 10 ? '偏高区' : '明显高位');
         const benchmarkStr = r.benchmarkLevel ? '｜基准 ' + r.benchmarkName + ' ' + r.benchmarkLevel : '';
-        // 估值百分位腿（2026-10-18 起参与档位合成，必须在报告里露面，否则「为什么是减半」无法归因）
-        const pctStr = (r.pct === null || r.pct === undefined) ? '' : '｜估值分位 ' + r.pct + '%';
-        // 均线腿下一档：把偏离度边界换算成具体净值触发价（只描述均线这一腿——档位是两腿合成的）
+        // 均线腿下一档：把偏离度边界换算成具体净值触发价（基金档位只由均线腿决定）
         let buyNextStr = '';
         if (r.dev !== null && r.ma60 && r.ma120) {
           const maAvg = (r.ma60 + r.ma120) / 2;
@@ -1078,8 +1070,8 @@ export async function handle(
           else if (r.dev < 3) buyNextStr = '｜均线腿下一档：净值跌至 ' + (maAvg * 0.95).toFixed(4) + '（-5% 档）';
           else buyNextStr = '｜均线腿回归中性：净值回落至 ' + (maAvg * 1.03).toFixed(4) + '（+3% 内）';
         }
-        const statusStr = '净值 ' + r.nav + '（' + r.navDate + '）｜较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + pctStr + (r.streak !== null ? '｜连续 ' + r.streak + ' 日站上60日线' : '') + benchmarkStr + buyNextStr;
-        // 动作文案按档位标签走：档位已是「均线偏离 + 估值百分位」两腿合成，不再按 dev 单腿推断
+        const statusStr = '净值 ' + r.nav + '（' + r.navDate + '）｜较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (r.streak !== null ? '｜连续 ' + r.streak + ' 日站上60日线' : '') + benchmarkStr + buyNextStr;
+        // 动作文案按档位标签走：基金档位由均线偏离单腿决定（2026-10-28 起估值分位已下线）
         let actionStr: string;
         if (r.label.includes('QDII溢价')) actionStr = '溢价率过高，暂停买入，等待溢价回落';
         else if (r.label.includes('仓位超限')) actionStr = '主题仓位已达上限，停止买入该主题；浮盈可按止盈档分批兑现';
@@ -1089,7 +1081,7 @@ export async function handle(
         else if (r.label === '减半') actionStr = '放缓定投节奏，关注止盈档位';
         else if (r.label === '双倍') actionStr = '加大买入，积极拉低成本';
         else if (r.label === '加强') actionStr = '维持或加大定投节奏';
-        else if (r.dev === null && (r.pct === null || r.pct === undefined)) actionStr = '自动获取净值/均线数据后即可分析';
+        else if (r.dev === null) actionStr = '自动获取净值/均线数据后即可分析';
         else actionStr = '按计划定投，持有不动';
         // 已达档时不再写「下一止盈档」：nextTier 取的是第一个未执行档，+60% 时会写成 +20%，与上方卖出标志自相矛盾
         const tierNote = r.sell ? '｜已达到 +' + r.sell.tier.ret + '% 止盈档'
