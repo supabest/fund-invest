@@ -302,10 +302,9 @@ function sellMarkHtml(a: { ret: number; tier: { ret: number; sell: number } } | 
     + '🔴 达到止盈档：+' + a.ret.toFixed(1) + '% ≥ +' + a.tier.ret + '% 档 → 建议卖出 ' + a.tier.sell + '% 份额</div>';
 }
 // 股票加仓计划：档位比例按「整体持仓市值」计（2026-10-29 用户裁决：不是定投基数），
-// A 股按整手 100 股向下折算——不足一手时只报目标金额，绝不四舍五入出虚构手数
-export function stockAddPlan(mv: number, price: number, add: number): { want: number; lots: number; amount: number; lotSize: number; ratio: number } | null {
-  if (!(mv > 0) || !(price > 0) || !(add > 0)) return null;
-  const lotSize = 100;
+// 按标的整手股数向下折算（A股 100、港股按标的读）——不足一手时只报目标金额，绝不四舍五入出虚构手数
+export function stockAddPlan(mv: number, price: number, add: number, lotSize = 100): { want: number; lots: number; amount: number; lotSize: number; ratio: number } | null {
+  if (!(mv > 0) || !(price > 0) || !(add > 0) || !(lotSize > 0)) return null;
   const want = mv * add / 100;
   const lots = Math.floor(want / (price * lotSize) + 1e-9);
   const amount = lots * price * lotSize;
@@ -567,6 +566,22 @@ export function parseTxKline(json: unknown, symbol: string): { date: string; clo
   return closes.length ? { date, close, closes } : null;
 }
 
+// 港股每手股数：腾讯行情 qt.gtimg.cn/q=hk00005 的第 61 个字段（0 基 60）。
+// 实测 2026-10-28：00005=400、00700=100、00939=1000、01299=200、00016=500、02318=500。
+// 港股每手股数因股而异（拆股/并股会变）⇒ 必须按标的读，不许按 100 猜；脏值一律 null，让调用方退回「不给金额」。
+// 两种形态都要认：原始响应 v_hk00005="..." 与去掉赋值外壳的纯字段串（浏览器 window 变量），
+// 否则同一条报价在两端会得出不同结论
+export function lotFromTxQuote(text: string): number | null {
+  const body = String(text || '');
+  const m = /"([^"]*)"/.exec(body);
+  const f = (m ? m[1] : body).split('~');
+  if (f.length < 61) return null;
+  const raw = String(f[60]).trim();
+  if (!/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  return n > 0 ? n : null;
+}
+
 // 取数失败的归因串：旧实现只留 lastErr，于是"8 个镜像怎么死的""兜底有没有源"全丢在日志里，
 // 而日志本身拿不到（Edge console 无抽取通道）⇒ 现网 NDX 静默停更一个月无人可查。
 // 长度封顶 140：调用方按 140 截断进 summary/台账，超了会互相吃掉。
@@ -650,6 +665,21 @@ export async function handle(
       await new Promise(res => setTimeout(res, 1200 * (i + 1)));
     }
     throw lastErr;
+  };
+  // 港股每手股数（同一轮批处理里同代码只取一次）：取不到返回 null，由调用方回落；
+  // A股不走这里（每手固定 100）
+  const hkLotCache = new Map<string, number | null>();
+  const fetchHkLot = async (code: string): Promise<number | null> => {
+    if (hkLotCache.has(code)) return hkLotCache.get(code)!;
+    let lot: number | null = null;
+    try {
+      const r = await fetchRetry('https://qt.gtimg.cn/q=hk' + code, { 'User-Agent': 'Mozilla/5.0' }, 2, 5000);
+      lot = lotFromTxQuote(await r.text());
+    } catch (e) {
+      logFailure('取数', '港股 ' + code + ' 每手股数获取失败', e);
+    }
+    hkLotCache.set(code, lot);
+    return lot;
   };
   const fetchKline = async (secid: string, fqt: number, lmt: number): Promise<{ date: string; close: number; closes: number[]; name: string }> => {
     // 归因位：镜像段试了几个、死法是什么、有没有被预算提前切断、兜底问到哪个 symbol。
@@ -953,7 +983,9 @@ export async function handle(
           const taken = s.profitTaken || [];
           const nextTier = tiers.find((x: any) => !taken.includes(x.ret)) || null;
           const sLadder = dipLadder(s, close, readPct(s));
-          const addPlan = sLadder ? stockAddPlan(sMv, close, sLadder.add) : null;
+          // 手数：A股主板固定 100；港股按标的读（腾讯行情），取不到再回落页面同步来的 lotSize，仍无则不给金额
+          const lotSize = /^\d{5}$/.test(code) ? ((await fetchHkLot(code)) || Number(s.lotSize) || 0) : 100;
+          const addPlan = sLadder ? stockAddPlan(sMv, close, sLadder.add, lotSize) : null;
           (stockReport[userId] = stockReport[userId] || []).push({
             code, name: sname || code, close, date: k.date, dev, ma60, ma120, below,
             tier: tier.label + (dev === null ? '（数据不足）' : ''), ret, nextTier,

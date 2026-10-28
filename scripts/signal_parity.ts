@@ -48,7 +48,7 @@ const EXPORT_NAMES = [
   'marketLevel', 'DD_STEPS', 'ddAddPct', 'pctTier', 'drawdownFrom', 'dualSignal',
   'computeDeviation', 'effectiveCost', 'computeReturn', 'themeMarketValue', 'themeCapAmount', 'fundBenchKey',
   'baseSignal', 'evalFundSignal', 'fmtWan', 'fmtSigned', 'fmtMoney', 'fmtPct',
-  'dipAlertStock', 'dipAlertFundLadder', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml',
+  'dipAlertStock', 'dipAlertFundLadder', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml', 'stockLotSizeOf', 'lotFromTxQuote',
   '__setState',
 ];
 
@@ -122,7 +122,9 @@ export const buyBannerHtml = F.buyBannerHtml as (
   list: Array<{ kind: string; dd?: number; add?: number; ret?: number; target?: number; shout: boolean }>,
 ) => string;
 export type AddPlan = { want: number; lots: number; amount: number; lotSize: number; ratio: number };
-export const stockAddPlan = F.stockAddPlan as (mv: number, price: number, add: number) => AddPlan | null;
+export const stockAddPlan = F.stockAddPlan as (mv: number, price: number, add: number, lotSize?: number) => AddPlan | null;
+export const stockLotSizeOf = F.stockLotSizeOf as (s: { code?: unknown; lotSize?: unknown }) => number;
+export const lotFromTxQuote = F.lotFromTxQuote as (text: string) => number | null;
 export const stockBuyBannerHtml = F.stockBuyBannerHtml as (
   d: { dd: number; add: number }, plan: AddPlan | null,
 ) => string;

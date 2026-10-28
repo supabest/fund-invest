@@ -2731,14 +2731,36 @@ function dipAlertStock(s){
   return {dd, add};
 }
 // 股票加仓计划：档位比例按「整体持仓市值」计（2026-10-29 用户裁决：不是定投基数），
-// A 股按整手 100 股向下折算——不足一手时只报目标金额，绝不四舍五入出虚构手数
-function stockAddPlan(mv, price, add){
+// 按标的整手股数向下折算（A股 100、港股按标的读）——不足一手时只报目标金额，绝不四舍五入出虚构手数
+function stockAddPlan(mv, price, add, lotSize){
   if(!(mv > 0) || !(price > 0) || !(add > 0)) return null;
-  const lotSize = 100;
+  if(lotSize === undefined) lotSize = 100;              // 调用方没给 ⇒ 按 A 股口径
+  if(!(lotSize > 0)) return null;                        // 港股手数未知 ⇒ 不给金额，不猜
   const want = mv * add / 100;
   const lots = Math.floor(want / (price * lotSize) + 1e-9);
   const amount = lots * price * lotSize;
   return { want, lots, amount, lotSize, ratio: amount / mv * 100 };
+}
+// A股主板每手固定 100 股；港股每手股数因股而异（拆股会变），只认按标的取回来并存下的 lotSize，
+// 没有就返回 0（上层据此不给金额，而不是按 100 编一个错的）
+function stockLotSizeOf(s){
+  const code = String((s && s.code) || '').trim();
+  if(!/^\d{5}$/.test(code)) return 100;
+  const n = parseInt((s && s.lotSize), 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+// 腾讯港股行情第 61 个字段（0 基 60）即每手股数；脏值/旧格式一律 null（与邮件侧同一套解析口径）。
+// 两种形态都要认：原始响应 v_hk00005="..."（邮件侧 fetch 到的文本）与 <script> 执行后的
+// window.v_hk00005（已去掉赋值外壳与引号）
+function lotFromTxQuote(text){
+  const body = String(text||'');
+  const m = /"([^"]*)"/.exec(body);
+  const f = (m ? m[1] : body).split('~');
+  if(f.length < 61) return null;
+  const raw = String(f[60]).trim();
+  if(!/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  return n > 0 ? n : null;
 }
 function stockBuyBannerHtml(d, plan){
   const head = `🟢 抄底：较52周高点回撤 ${d.dd.toFixed(1)}% 已达 +${d.add}% 加仓档 → `;
@@ -2988,7 +3010,7 @@ function renderStockSection(){
     const nextTier = nextProfitTier(s);    const pillCls = dev===null ? 'pill-normal' : (dev<=-5 ? 'pill-strong' : (dev>=3 ? 'pill-half' : 'pill-normal'));
     const sAlert = profitAlertFromRet(ret, s);
     const sDip = dipAlertStock(s);
-    const sPlan = sDip ? stockAddPlan(stockMvOf(s), parseFloat(s.currentPrice)||0, sDip.add) : null;
+    const sPlan = sDip ? stockAddPlan(stockMvOf(s), parseFloat(s.currentPrice)||0, sDip.add, stockLotSizeOf(s)) : null;
     const card = document.createElement('div');
     card.className = 'fund-card';
     card.innerHTML = `
@@ -3136,7 +3158,7 @@ function autoFetchStockData(id){
   if(!/^\d{5,6}$/.test(code)){ setStatus('请先填写 5-6 位代码（A股6位/港股5位）', 'var(--brick)'); return; }
   const secid = secidOf(code);
   setStatus('正在获取行情（多线路自动重试）…');
-  fetchKlineJsonp(secid, 1, 260).then(j=>{
+  fetchKlineJsonp(secid, 1, 260).then(async j=>{
     const rows = j.data.klines.map(kl=>{ const [dd,cc]=kl.split(','); return { date:dd, close:parseFloat(cc) }; });
     const closes = rows.map(x=>x.close);
     const cur = rows[rows.length-1];
@@ -3162,6 +3184,9 @@ function autoFetchStockData(id){
     if(ma120!==null) target.ma120 = ma120;
     if(high52w!==null) target.high52w = high52w;
     target.belowStreak = below;
+    // 港股每手股数按标的取（A股固定 100，不发请求）；取不到就留空——卡片宁可不给金额，也不按 100 编
+    const lot = /^\d{5}$/.test(code) ? await fetchHkLot(code) : null;
+    if(lot) target.lotSize = lot;
     const jname = (j.data && j.data.name) || '';
     const nameInput = body ? body.querySelector('[data-sk="name"]') : null;
     if(jname && nameInput && (!nameInput.value.trim() || /^\d+$/.test(nameInput.value.trim()))) nameInput.value = jname;
@@ -3173,7 +3198,7 @@ function autoFetchStockData(id){
       if(hInput && high52w!==null) hInput.value = high52w.toFixed(3);
       setStatus('行情已获取，正在取估值分位…');
       // K线与估值分位是两条独立请求：分位挂了不能把已拿到的行情吞掉，所以拼在同一句话里分别口径
-      const klineTxt = '已获取 '+jname+' '+cur.date+' 收盘价 '+cur.close.toFixed(2)+(ma60?'，MA60='+ma60.toFixed(2):'')+(ma120?'，MA120='+ma120.toFixed(2):'')+(high52w?'，52周高点='+high52w.toFixed(2):'');
+      const klineTxt = '已获取 '+jname+' '+cur.date+' 收盘价 '+cur.close.toFixed(2)+(ma60?'，MA60='+ma60.toFixed(2):'')+(ma120?'，MA120='+ma120.toFixed(2):'')+(high52w?'，52周高点='+high52w.toFixed(2):'')+(/^\d{5}$/.test(code)?(lot?'，每手 '+lot+' 股':'，每手股数未取到（暂不显示加仓金额）'):'');
       refreshValuationPct(target, {force:true}).then(function(v){
         if(v.changed) saveStocks();
         var m = target.valPctMeta;
@@ -3578,6 +3603,23 @@ async function autoRefreshFunds(){
   }
   return updated;
 }
+// 港股每手股数：腾讯行情 qt.gtimg.cn/q=hk00005 的第 61 个字段（0 基 60；实测 00005=400、00939=1000、
+// 01299=200、00016/02318=500、00700/00388=100）。手数因股而异且拆股会变 ⇒ 按标的读、落到本地状态；
+// A股主板固定 100，调用方别拿 A股代码来调（多打一次请求没有意义）
+function fetchHkLot(code){
+  return new Promise(function(resolve){
+    const key = 'v_hk' + code;
+    let done = false;
+    const finish = function(v){ if(done) return; done = true; try{ delete window[key]; }catch(e){} try{ el.remove(); }catch(e){} resolve(v); };
+    const el = document.createElement('script');
+    el.charset = 'gbk';   // 腾讯行情是 GBK；数字段不受影响，但别让中文名把解码搞乱
+    el.src = 'https://qt.gtimg.cn/q=hk' + code;
+    el.onload = function(){ finish(lotFromTxQuote(window[key])); };
+    el.onerror = function(){ finish(null); };
+    document.head.appendChild(el);
+    setTimeout(function(){ finish(null); }, 8000);
+  });
+}
 async function autoRefreshStocks(){
   const targets = stocks.filter(s=>/^\d{5,6}$/.test(String(s.code||'').trim()));
   let updated = 0;
@@ -3605,6 +3647,13 @@ async function autoRefreshStocks(){
       updated++;
     }catch(e){}
   }
+  // 港股手数单独一遍：与价格解耦（K线没动、拆股后手数也可能变），A股固定 100 不发请求
+  let lots = 0;
+  for(const s of targets){
+    if(!/^\d{5}$/.test(String(s.code||'').trim())) continue;
+    const lot = await fetchHkLot(String(s.code).trim());
+    if(lot && lot !== Number(s.lotSize)){ s.lotSize = lot; lots++; }
+  }
   // 估值分位单独一遍循环：上面那两次 continue（K 线没动 / 表单正打开）都不构成「今天不取分位」的理由 ——
   // 分位只受自己的当日缓存约束（valPctNeedFetch 在 refreshValuationPct 里裁决），跨日才重取。
   // 串行 + 250ms 节流是本轮实测换来的：并发打东财正是 push2 被 WAF 掐的那条路（连打 18 次即断）。
@@ -3618,7 +3667,7 @@ async function autoRefreshStocks(){
       if(!v.cached) await new Promise(function(r){ setTimeout(r, EM_VAL_THROTTLE_MS); });   // 命中当日缓存的不占节流
     }catch(e){}
   }
-  return { prices: updated, valuations: valUpdated };
+  return { prices: updated, valuations: valUpdated, lots };
 }
 let autoRefreshRunning = false;
 let autoRefreshAt = 0;
@@ -3626,17 +3675,17 @@ async function autoRefreshAll(force){
   if(autoRefreshRunning) return;
   if(!force && Date.now()-autoRefreshAt < 60000) return; // 限频：60秒内不重复跑（focus 重入保护）
   autoRefreshRunning = true; autoRefreshAt = Date.now();
-  let fN = 0, sN = 0, vN = 0;
+  let fN = 0, sN = 0, vN = 0, lN = 0;
   try{ fN = await autoRefreshFunds(); }catch(e){}
-  try{ const r = await autoRefreshStocks(); sN = r.prices; vN = r.valuations; }catch(e){}
+  try{ const r = await autoRefreshStocks(); sN = r.prices; vN = r.valuations; lN = r.lots || 0; }catch(e){}
   loadSectorRotation().catch(()=>{}); // 修复轮2（评审 I1 ②）：仍在刷新序列末尾触发（不新起定时器），但改为 fire-and-forget —— 卡片结果非 saveFunds/Toast 所需，不再把 autoRefreshRunning 锁在≤ 10 个串行 RT 上；同时在飞请求由 sectorReqGuard 序号守卫防竞态
   autoRefreshRunning = false;
-  if(fN + sN + vN > 0){
+  if(fN + sN + vN + lN > 0){
     await saveFunds();
-    if(sN + vN > 0) await saveStocks();
+    if(sN + vN + lN > 0) await saveStocks();
     render();
     ensureBenchmarkData();
-    showToast('已自动获取 '+fN+' 只基金净值、'+sN+' 只股票行情'+(vN>0?'、'+vN+' 只估值分位':'')+'（均线与连续天数按完整历史回算）');
+    showToast('已自动获取 '+fN+' 只基金净值、'+sN+' 只股票行情'+(vN>0?'、'+vN+' 只估值分位':'')+(lN>0?'、'+lN+' 只港股每手股数':'')+'（均线与连续天数按完整历史回算）');
   }
 }
 

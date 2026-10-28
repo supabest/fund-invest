@@ -10,7 +10,7 @@ Deno.env.set("SUPABASE_URL", "https://fake.supabase.co");
 Deno.env.set("SB_SERVICE_KEY", "svc-placeholder");
 const { handle, holdingsSummaryHtml, fundDipAlert, dipBannerHtml, runRow, txSource, parseTxKline, klineFailNote,
   ddAddPct, drawdownFrom, dipLadder, sellAlert, retChipHtml, baseSignalLabel,
-  evalFundSignalServer, stockAddPlan } = await import("./index.ts");
+  evalFundSignalServer, stockAddPlan, lotFromTxQuote } = await import("./index.ts");
 
 const SB = "https://fake.supabase.co";
 const TOKEN = "test-token";
@@ -597,6 +597,12 @@ Deno.test("D：台账写库自身失败不改判 —— daily_update_run 500 时
 function txJson(symbol: string, rows: unknown[]): string {
   return JSON.stringify({ code: 0, msg: "", data: { [symbol]: { qfqday: rows, qt: {} } } });
 }
+// 腾讯港股行情样本：第 61 个字段（0 基 60）是每手股数，其余位置填 0 占位
+function txQuote(symbol: string, lot: string): string {
+  const f = new Array(78).fill("0");
+  f[0] = "100"; f[1] = "测试港股"; f[2] = symbol.slice(2); f[60] = lot;
+  return 'v_' + symbol + '="' + f.join("~") + '";';
+}
 const TX_STOCK_ROWS = [
   ["2026-10-23", "17.680", "18.320", "18.320", "17.590", "927042.000"],
   ["2026-10-26", "18.210", "18.270", "18.380", "17.850", "622222.000"],
@@ -987,6 +993,33 @@ Deno.test("stockAddPlan：整体持仓占比 × 档位 → 按整手（100 股�
   assertEquals(stockAddPlan(9035, 18.07, 0), null);
 });
 
+Deno.test("lotFromTxQuote：腾讯港股行情第 61 个字段即每手股数，脏值不猜", () => {
+  assertEquals(lotFromTxQuote(txQuote("hk00005", "400")), 400);
+  assertEquals(lotFromTxQuote(txQuote("hk00939", "1000")), 1000);
+  assertEquals(lotFromTxQuote(txQuote("hk00700", "0")), null, "0 手不是有效手数");
+  assertEquals(lotFromTxQuote(txQuote("hk00700", "")), null);
+  assertEquals(lotFromTxQuote(txQuote("hk00700", "abc")), null);
+  assertEquals(lotFromTxQuote(txQuote("hk00700", "12.5")), null, "小数手数是脏数据 → 不猜");
+  assertEquals(lotFromTxQuote(""), null);
+  assertEquals(lotFromTxQuote("v_hk00700="), null);
+  assertEquals(lotFromTxQuote('v_hk00700="100~腾讯~00700"'), null, "字段不够长（旧格式）不猜 100");
+});
+
+Deno.test("stockAddPlan：港股按标的整手股数折算（400/500/1000 股一手），手数未知不编造金额", () => {
+  // 2000 股 × 10 = 20,000；+30% ⇒ 目标 6,000；每手 500 股 = 5,000 元 ⇒ 1 手（实付占持仓 25%）
+  const p = stockAddPlan(20000, 10, 30, 500)!;
+  assertEquals(p.want, 6000);
+  assertEquals(p.lots, 1);
+  assertEquals(p.amount, 5000);
+  assertEquals(p.ratio, 25);
+  assertEquals(p.lotSize, 500);
+  assertEquals(stockAddPlan(20000, 10, 30, 1000)!.lots, 0, "每手 1000 股时 6,000 元不足一手");
+  assertEquals(stockAddPlan(20000, 10, 30, 0), null, "手数未知 → 不编造金额");
+  assertEquals(stockAddPlan(20000, 10, 30, -400), null);
+  assertEquals(stockAddPlan(20000, 10, 30, NaN), null);
+  assertEquals(stockAddPlan(20000, 10, 30)!.lotSize, 100, "不传时按 A 股 100 股一手");
+});
+
 Deno.test("sellAlert：达到止盈档且未执行才报，已执行不重复报", () => {
   const f = { profitTiers: [{ ret: 10, sell: 30 }, { ret: 20, sell: 30 }, { ret: 35, sell: 20 }, { ret: 50, sell: 20 }], profitTaken: [] };
   assertEquals(sellAlert(12, f), { ret: 12, tier: { ret: 10, sell: 30 } });
@@ -1295,6 +1328,132 @@ Deno.test("邮件接线：目标加仓额不足一手时如实说「不足 1 手
     assertEquals(seg.includes("目标加仓 ¥723，不足 1 手（每手 100 股）"), true, "不足一手要如实说：" + seg.slice(0, 400));
     assertEquals(seg.includes("0 手"), false, "不许写「买 0 手」这种空指令");
     assertEquals(/NaN|Infinity|undefined/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：港股按腾讯行情里的每手股数折算——00005 每手 400 股，2000 股报 2 手", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      // 2000 股 × 18.07 = 36,140；高点 30 ⇒ 回撤 39.8%（+40 档）⇒ 目标 14,456；每手 400 股 = 7,228 元 ⇒ 2 手
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: { funds: [], stocks: [{ code: "00005", name: "汇丰控股", shares: 2000, cost: 30, high52w: 30 }] },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("qt.gtimg.cn")) return Promise.resolve(new Response(txQuote("hk00005", "400"), { status: 200 }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("hk00005", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    assertEquals(mail.includes("建议买入 2 手（800 股）≈ ¥14,456（占持仓 40.0%）"), true,
+      "港股手数要按标的读（400 股/手）：" + mail.slice(mail.indexOf("【00005】"), mail.indexOf("【00005】") + 400));
+    assertEquals(/NaN|Infinity|undefined/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：腾讯手数取不到时回落状态里存的 lotSize（页面同步来的），不瞎猜 100", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: { funds: [], stocks: [{ code: "00005", name: "汇丰控股", shares: 2000, cost: 30, high52w: 30, lotSize: 400 }] },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("qt.gtimg.cn")) return Promise.resolve(new Response("bad gateway", { status: 502 }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("hk00005", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    assertEquals(mail.includes("建议买入 2 手（800 股）≈ ¥14,456（占持仓 40.0%）"), true,
+      "回落链：腾讯 → 状态里的 lotSize → 无金额；本用例应命中状态值 400");
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：港股手数全网都取不到时只给「建议买入」，不按 100 股编金额", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: { funds: [], stocks: [{ code: "00005", name: "汇丰控股", shares: 2000, cost: 30, high52w: 30 }] },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("qt.gtimg.cn")) return Promise.resolve(new Response("", { status: 500 }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("hk00005", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    const seg = mail.slice(mail.indexOf("【00005】"));
+    assertEquals(seg.includes("建议买入"), true);
+    assertEquals(seg.includes("手（"), false, "手数未知时不许出现手数");
+    assertEquals(/¥\d/.test(seg), false, "手数未知时不许给金额");
+    assertEquals(/NaN|Infinity|undefined/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：A股每手固定 100 股，不去腾讯多打一次行情请求", async () => {
+  const real = globalThis.fetch;
+  const urls: string[] = [];
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    urls.push(url);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: { funds: [], stocks: [{ code: "600031", name: "三一重工", shares: 500, cost: 30, high52w: 30 }] },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    assertEquals(urls.some(u => u.includes("qt.gtimg.cn")), false, "A股手数固定 100，无需额外请求");
+    assertEquals(mail.includes("建议买入 2 手（200 股）≈ ¥3,614（占持仓 40.0%）"), true);
   } finally {
     globalThis.fetch = real;
     logs.restore();

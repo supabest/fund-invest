@@ -20,6 +20,7 @@ import {
   dipAlertStock as pageDipAlertStock, dipAlertFundLadder as pageDipFundLadder,
   buyBannerHtml as pageBuyBanner,
   stockAddPlan as pageStockAddPlan, stockBuyBannerHtml as pageStockBuyBanner,
+  stockLotSizeOf as pageStockLotSizeOf, lotFromTxQuote as pageLotFromTxQuote,
 } from "./signal_parity.ts";
 
 Deno.env.set("DAILY_UPDATE_DISABLE_SERVE", "1");
@@ -367,6 +368,63 @@ Deno.test("股票加仓计划：整体持仓占比 × 档位比例，按整手�
   assertEquals(pageStockAddPlan(9035, 18.07, 0), null);
 });
 
+Deno.test("港股整手股数：手数按标的取（100/200/400/500/1000），未知不编金额，双端逐格一致", () => {
+  const lots = [0, -400, 100, 200, 400, 500, 1000];
+  for (const lot of lots) {
+    for (const mv of [0, 1807, 20000, 123456.78]) {
+      for (const price of [0, 3.33, 10, 135.6]) {
+        for (const add of [0, 30, 40, 60]) {
+          assertEquals(pageStockAddPlan(mv, price, add, lot), D.stockAddPlan(mv, price, add, lot),
+            `双端必须同值：lot=${lot} mv=${mv} price=${price} add=${add}`);
+        }
+      }
+    }
+  }
+  // 语义钉死：20,000 元持仓、+30% ⇒ 目标 6,000；每手 500 股 = 5,000 ⇒ 1 手，实付占持仓 25%
+  const hk = pageStockAddPlan(20000, 10, 30, 500)!;
+  assertEquals(hk.lots, 1);
+  assertEquals(hk.amount, 5000);
+  assertEquals(hk.ratio, 25);
+  assertEquals(hk.lotSize, 500);
+  assertEquals(pageStockAddPlan(20000, 10, 30, 1000)!.lots, 0, "每手 1000 股时 6,000 元不足一手");
+  assertEquals(pageStockAddPlan(20000, 10, 30, 0), null, "手数未知 → 不给金额");
+  assertEquals(pageStockAddPlan(20000, 10, 30)!.lotSize, 100, "不传时按 A 股 100 股一手");
+  // 手数解析：A股固定 100；港股读状态里的 lotSize（页面同步/夜间任务写入），没有就是 0（不给金额）
+  assertEquals(pageStockLotSizeOf({ code: "600031" }), 100, "A股主板每手 100");
+  assertEquals(pageStockLotSizeOf({ code: "600031", lotSize: 400 }), 100, "A股不受港股字段影响");
+  assertEquals(pageStockLotSizeOf({ code: "00005", lotSize: 400 }), 400);
+  assertEquals(pageStockLotSizeOf({ code: "00005", lotSize: "500" }), 500, "状态里可能是字符串");
+  assertEquals(pageStockLotSizeOf({ code: "00005" }), 0, "港股手数未知 → 0 → 不给金额");
+  assertEquals(pageStockLotSizeOf({ code: "00005", lotSize: "abc" }), 0);
+  assertEquals(pageStockLotSizeOf({ code: "00005", lotSize: -1 }), 0);
+  assertEquals(pageStockLotSizeOf({}), 100, "空记录按 A 股口径");
+});
+
+Deno.test("腾讯港股行情解析：第 61 字段是每手股数，脏值/旧格式双端同判 null", () => {
+  const quote = (lot: string, len = 78) => {
+    const f = new Array(len).fill("0");
+    f[0] = "100"; f[1] = "测试港股"; f[2] = "00005"; f[60] = lot;
+    return 'v_hk00005="' + f.join("~") + '";';
+  };
+  const samples = [quote("400"), quote("1000"), quote("0"), quote(""), quote("abc"), quote("12.5"), quote(" 400 "), quote("400", 60), "", "garbage", 'v_hk00700="100~腾讯~00700"'];
+  for (const s of samples) {
+    assertEquals(pageLotFromTxQuote(s), D.lotFromTxQuote(s), "双端解析口径必须一致：" + JSON.stringify(s));
+  }
+  assertEquals(pageLotFromTxQuote(quote("400")), 400);
+  assertEquals(pageLotFromTxQuote(quote("1000")), 1000);
+  assertEquals(pageLotFromTxQuote(quote("0")), null, "0 手不是有效手数");
+  assertEquals(pageLotFromTxQuote(quote("12.5")), null, "小数手数是脏数据");
+  assertEquals(pageLotFromTxQuote(quote(" 400 ")), 400, "两侧空白允许");
+  // 只到第 60 个字段（没有 0 基 60）的旧格式：不猜 100
+  assertEquals(pageLotFromTxQuote('v_hk00005="' + new Array(60).fill("0").join("~") + '"'), null);
+  assertEquals(D.lotFromTxQuote('v_hk00005="' + new Array(60).fill("0").join("~") + '"'), null);
+  // 浏览器里 <script> 执行后 window.v_hk00005 已是去引号的字符串（DOM 实测踩过）：
+  // 解析器必须两种形态都认，否则页面永远取不到手数
+  const bare = new Array(78).fill("0"); bare[0] = "100"; bare[1] = "汇丰控股"; bare[60] = "400";
+  assertEquals(pageLotFromTxQuote(bare.join("~")), 400, "去引号的纯字段串（浏览器 window 变量）也要能解析");
+  assertEquals(D.lotFromTxQuote(bare.join("~")), 400, "双端口径一致");
+});
+
 Deno.test("股票抄底横幅：整手时写手数+按手金额，不足一手如实说，缺持仓数据回落纯建议", () => {
   const dip = { dd: 39.8, add: 40 };
   const ok = pageStockBuyBanner(dip, pageStockAddPlan(9035, 18.07, 40));
@@ -393,9 +451,15 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
     "页面基金腿复用 dipAlertStock，但必须显式把估值分位置空（基金侧已取消该指标）");
   assert(/const sDip = dipAlertStock\(s\);/.test(html), "页面股票腿调用同一个 dipAlertStock");
   // 股票加仓金额必须走同一套纯函数（档位比例 × 整体持仓市值 → 整手），不许在模板里手写折算
-  assert(/const sPlan = sDip \? stockAddPlan\(stockMvOf\(s\), parseFloat\(s\.currentPrice\)\|\|0, sDip\.add\) : null;/.test(html),
-    "页面股票卡片必须用 stockAddPlan(stockMvOf(s), 现价, sDip.add) 算加仓计划");
+  assert(/const sPlan = sDip \? stockAddPlan\(stockMvOf\(s\), parseFloat\(s\.currentPrice\)\|\|0, sDip\.add, stockLotSizeOf\(s\)\) : null;/.test(html),
+    "页面股票卡片必须用 stockAddPlan(stockMvOf(s), 现价, sDip.add, stockLotSizeOf(s)) 算加仓计划");
   assert(/stockBuyBannerHtml\(sDip, sPlan\)/.test(html), "页面股票抄底横幅必须由 stockBuyBannerHtml(sDip, sPlan) 渲染");
+  // 港股手数必须真的去取（否则 stockLotSizeOf 永远为 0，卡片永远不出金额）：按标的读腾讯行情第 61 字段
+  assert(/function fetchHkLot\(code\)\{/.test(html), "页面必须有港股每手股数取数函数 fetchHkLot");
+  assert(/https:\/\/qt\.gtimg\.cn\/q=hk' \+ code/.test(html), "fetchHkLot 必须打腾讯港股行情（第 61 字段是每手股数）");
+  assert(/if\(!\/\^\\d\{5\}\$\/\.test\(String\(s\.code\|\|''\)\.trim\(\)\)\) continue;[\s\S]{0,200}await fetchHkLot\(String\(s\.code\)\.trim\(\)\)/.test(html),
+    "autoRefreshStocks 必须为 5 位（港股）代码取手数，A股跳过");
+  assert(/s\.lotSize = lot;/.test(html), "取到的手数必须落到本地状态（saveStocks 同步到云端，夜间邮件据此回落）");
   // 基金侧取消估值分位：表单不再有这个输入、卡片双信号条不再读它
   assert(/data-k="valuationPercentile"/.test(html) === false, "基金表单不得再有估值分位输入框");
   assert(/dualSignalHtml\(f, parseFloat\(f\.currentNav\)\|\|0, parseFloat\(f\.baseAmount\)\|\|0, false\)/.test(html),
@@ -418,8 +482,10 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
     "邮件基金腿必须走统一门槛的 dipLadder，且不传分位（基金侧无高估否决）");
   assert(/const sLadder = dipLadder\(s, close, readPct\(s\)\);/.test(server),
     "邮件股票腿必须走统一门槛的 dipLadder（股票侧保留高估否决）");
-  assert(/const addPlan = sLadder \? stockAddPlan\(sMv, close, sLadder\.add\) : null;/.test(server),
-    "邮件股票腿必须按整体持仓市值（sMv）折算整手计划");
+  assert(/const addPlan = sLadder \? stockAddPlan\(sMv, close, sLadder\.add, lotSize\) : null;/.test(server),
+    "邮件股票腿必须按整体持仓市值（sMv）与标的整手股数折算");
+  assert(/const lotSize = \/\^\\d\{5\}\$\/\.test\(code\) \? \(\(await fetchHkLot\(code\)\) \|\| Number\(s\.lotSize\) \|\| 0\) : 100;/.test(server),
+    "港股手数必须按标的读（腾讯行情 → 状态 lotSize → 0），A股固定 100");
   assert(/buyMarkHtml\(r\.ladder, r\.addPlan\)/.test(server), "股票邮件卡片必须把整手计划传给 buyMarkHtml");
   assert(/buyMarkHtml\(r\.multiplier > 0 \? r\.ladder : null\)/.test(server),
     "基金邮件卡片不得传整手计划（基金按定投基数倍数，不按手）");
