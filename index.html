@@ -483,7 +483,7 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" async></script>
+<script src="./supabase-js.js" async></script>
 <script>
 const STORE_KEY = 'dinvest_funds_v1';
 const THEME_CAP_KEY = 'dinvest_theme_caps_v1';
@@ -493,7 +493,9 @@ const SETTINGS_KEY = 'dinvest_settings_v1';
 const GOAL = 200000;
 
 // Supabase 云同步配置（publishable key 设计为公开嵌入页面，安全靠登录+行级权限）
-const SUPABASE_URL = 'https://sfauluwxmdginezbluvo.supabase.co';
+// 直连地址只在 Pages 之外用；Pages 上 supabaseBaseUrl 会改成同源 /sb（国内直连常被断）
+const SUPABASE_DIRECT = 'https://sfauluwxmdginezbluvo.supabase.co';
+const SUPABASE_URL = supabaseBaseUrl(location.hostname, location.origin, SUPABASE_DIRECT);
 const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_ogx_OZOqR0tEgr24Dt1DSg_VZasrzuM';
 const TABLE_NAME = 'dingtou_state';
 
@@ -2347,6 +2349,16 @@ function loginMsg(text, color){
 // ==== SIGNAL_PURE_BEGIN ====
 // 基金/大盘信号引擎纯函数块：被 scripts/signal_parity.ts 逐字抽取，与 daily-update 的服务端实现做双端一致性比对。
 // 块内含 DOM 辅助函数（renderMktStrip 等），它们只被页面调用；抽取执行时不需要真实 DOM。
+// Supabase 基址分派：国内运营商常把浏览器 → *.supabase.co 断掉，而 Pages 自己的域是通的，
+// 所以 Pages 上改走同源 /sb/*（cloudflare/functions/sb/[[path]].ts 反代）。
+// 只在真正的 .pages.dev 项目域下切换：本地 http.server 与 Vercel 那份没有这个函数，直连才不至于把登录打死。
+function supabaseBaseUrl(host, origin, direct){
+  const h = String(host || '');
+  const d = String(direct || '');
+  if(!/\.pages\.dev$/i.test(h)) return d;
+  const o = String(origin || '').replace(/\/+$/, '');
+  return o ? o + '/sb' : d;
+}
 // 大盘档位：阈值按指数波动设定（波动大的指数放宽），dev 为较双均线平均偏离
 function marketLevel(dev, th){
   th = th || [-8,-3,3,8];

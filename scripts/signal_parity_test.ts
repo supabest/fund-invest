@@ -21,6 +21,7 @@ import {
   buyBannerHtml as pageBuyBanner,
   stockAddPlan as pageStockAddPlan, stockBuyBannerHtml as pageStockBuyBanner,
   stockLotSizeOf as pageStockLotSizeOf, lotFromTxQuote as pageLotFromTxQuote,
+  supabaseBaseUrl as pageSupabaseBaseUrl,
 } from "./signal_parity.ts";
 
 Deno.env.set("DAILY_UPDATE_DISABLE_SERVE", "1");
@@ -493,4 +494,34 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
   // 2026-10-28 用户裁决：「暂停」只代表用户当前在该基金的定投状态，不是系统指令
   assert(/暂不新增|仅状态提示/.test(html) === false, "页面抄底横幅不得把用户的定投暂停状态写成系统指令");
   assert(/暂不新增|仅状态提示/.test(server) === false, "邮件抄底横幅不得把用户的定投暂停状态写成系统指令");
+
+  // --- 2026-10-29 国内可达性：Supabase 走 Pages 同源反代 + SDK 自托管 ---
+  assert(/cdn\.jsdelivr\.net/.test(html) === false, "页面不得再从 jsDelivr 加载 SDK（国内常被断，且是第三方单点）");
+  assert(/<script src="\.\/supabase-js\.js"/.test(html), "supabase-js 必须自托管（同源 ./supabase-js.js）");
+  assert(/const SUPABASE_URL = supabaseBaseUrl\(location\.hostname, location\.origin, SUPABASE_DIRECT\);/.test(html),
+    "SUPABASE_URL 必须由 supabaseBaseUrl 按域名分派，不许写死：否则 Pages 上仍会直连 *.supabase.co");
+  const vendor = await Deno.readTextFile(new URL("../supabase-js.js", import.meta.url));
+  assert(/var supabase=/.test(vendor), "自托管的 SDK 必须是 UMD 构建（暴露全局 supabase）");
+  assert(/supabase-js@2\.\d+\.\d+/.test(vendor), "自托管文件必须留明确版本号，升级时才有据可查");
+  const fn = await Deno.readTextFile(new URL("../cloudflare/functions/sb/[[path]].ts", import.meta.url));
+  assert(/export const onRequest/.test(fn), "Pages Function 必须导出 onRequest（否则 /sb/* 全部 404）");
+  assert(/buildUpstreamUrl\(/.test(fn), "Pages Function 必须走被测试的 buildUpstreamUrl（白名单与穿越防护都在那里）");
+});
+
+Deno.test("国内可达性：Supabase 基址按域名分派（Pages 走同源 /sb 反代，其余直连）", () => {
+  const direct = "https://sfauluwxmdginezbluvo.supabase.co";
+  assertEquals(pageSupabaseBaseUrl("fund-invest888.pages.dev", "https://fund-invest888.pages.dev", direct),
+    "https://fund-invest888.pages.dev/sb");
+  assertEquals(pageSupabaseBaseUrl("b7b48496.fund-invest888.pages.dev", "https://b7b48496.fund-invest888.pages.dev", direct),
+    "https://b7b48496.fund-invest888.pages.dev/sb", "预览部署的子域同样走反代");
+  assertEquals(pageSupabaseBaseUrl("fund-invest888.vercel.app", "https://fund-invest888.vercel.app", direct), direct,
+    "Vercel 那份没有 Pages Function，必须直连（否则登录直接打死）");
+  assertEquals(pageSupabaseBaseUrl("localhost", "http://localhost:8765", direct), direct, "本地静态服务同理");
+  assertEquals(pageSupabaseBaseUrl("", "", direct), direct);
+  // 子串伪装不得骗过判定（只认真正的 .pages.dev 结尾）
+  assertEquals(pageSupabaseBaseUrl("pages.dev.evil.example", "https://pages.dev.evil.example", direct), direct);
+  assertEquals(pageSupabaseBaseUrl("xpages.dev", "https://xpages.dev", direct), direct);
+  assertEquals(pageSupabaseBaseUrl("PAGES.DEV", "https://PAGES.DEV", direct), direct, "裸域名不是 Pages 项目域");
+  // 末尾斜杠不许把路径叠成 //sb
+  assertEquals(pageSupabaseBaseUrl("a.pages.dev", "https://a.pages.dev/", direct), "https://a.pages.dev/sb");
 });

@@ -49,6 +49,7 @@ const EXPORT_NAMES = [
   'computeDeviation', 'effectiveCost', 'computeReturn', 'themeMarketValue', 'themeCapAmount', 'fundBenchKey',
   'baseSignal', 'evalFundSignal', 'fmtWan', 'fmtSigned', 'fmtMoney', 'fmtPct',
   'dipAlertStock', 'dipAlertFundLadder', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml', 'stockLotSizeOf', 'lotFromTxQuote',
+  'supabaseBaseUrl',
   '__setState',
 ];
 
@@ -125,6 +126,8 @@ export type AddPlan = { want: number; lots: number; amount: number; lotSize: num
 export const stockAddPlan = F.stockAddPlan as (mv: number, price: number, add: number, lotSize?: number) => AddPlan | null;
 export const stockLotSizeOf = F.stockLotSizeOf as (s: { code?: unknown; lotSize?: unknown }) => number;
 export const lotFromTxQuote = F.lotFromTxQuote as (text: string) => number | null;
+/** Supabase 基址分派：Pages 项目域走同源 /sb 反代，其余（Vercel/本地）直连。 */
+export const supabaseBaseUrl = F.supabaseBaseUrl as (host: string, origin: string, direct: string) => string;
 export const stockBuyBannerHtml = F.stockBuyBannerHtml as (
   d: { dd: number; add: number }, plan: AddPlan | null,
 ) => string;
