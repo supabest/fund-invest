@@ -506,6 +506,15 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
   const fn = await Deno.readTextFile(new URL("../cloudflare/functions/sb/[[path]].ts", import.meta.url));
   assert(/export const onRequest/.test(fn), "Pages Function 必须导出 onRequest（否则 /sb/* 全部 404）");
   assert(/buildUpstreamUrl\(/.test(fn), "Pages Function 必须走被测试的 buildUpstreamUrl（白名单与穿越防护都在那里）");
+
+  // --- 2026-10-29 免登录（用户裁定 A）：只记住邮箱，密码/令牌一律不落盘 ---
+  assert(/const LOGIN_EMAIL_KEY = 'dinvest_login_email';/.test(html), "记住登录邮箱需要一个独立的本地 key");
+  assert(/document\.getElementById\('loginEmail'\)\.value = lastLoginEmail\(\);/.test(html),
+    "登录弹窗必须回填上次邮箱：每次都清空等于白抵消浏览器钥匙串的自动填充");
+  assert(/rememberLoginEmail\(sbUser\.email\)/.test(html), "登录成功与恢复会话后都要记住该邮箱");
+  assert(/loginPass['"]\)\.value\s*=\s*''/.test(html), "密码框每次打开必须清空，不许回填");
+  assert(/localStorage\.setItem\([^)]*loginPass/.test(html) === false, "密码不得写进 localStorage");
+  assert(/leening222@126\.com/.test(html) === false, "账号不得硬编码进页面（站点公开，源码即凭据）");
 });
 
 Deno.test("国内可达性：Supabase 基址按域名分派（Pages 走同源 /sb 反代，其余直连）", () => {

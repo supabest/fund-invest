@@ -490,6 +490,7 @@ const THEME_CAP_KEY = 'dinvest_theme_caps_v1';
 const SYNC_TS_KEY = 'dinvest_sync_ts_v1';
 const STOCKS_KEY = 'dinvest_stocks_v1';
 const SETTINGS_KEY = 'dinvest_settings_v1';
+const LOGIN_EMAIL_KEY = 'dinvest_login_email';   // 只记邮箱：会话靠 SDK 自持久化，密码不落盘
 const GOAL = 200000;
 
 // Supabase 云同步配置（publishable key 设计为公开嵌入页面，安全靠登录+行级权限）
@@ -689,6 +690,7 @@ function initCloud(tries){
   }catch(e){ setSyncUI(); return; }
   sb.auth.getSession().then(({data})=>{
     sbUser = (data && data.session && data.session.user) || null;
+    if(sbUser) rememberLoginEmail(sbUser.email);
     setSyncUI();
     if(sbUser) syncOnOpen();
     else autoRefreshAll(); // 未登录：本地数据不会被子覆盖，直接刷新
@@ -696,6 +698,7 @@ function initCloud(tries){
   sb.auth.onAuthStateChange((_event, session)=>{
     const wasLoggedOut = !sbUser;
     sbUser = (session && session.user) || null;
+    if(sbUser) rememberLoginEmail(sbUser.email);
     setSyncUI();
     if(sbUser && wasLoggedOut){
       closeLoginModal();
@@ -2332,11 +2335,19 @@ async function pushCloud(silent){
 }
 
 // ---------- 登录 ----------
+function rememberLoginEmail(email){
+  const v = String(email || '').trim();
+  if(!v) return;
+  try{ localStorage.setItem(LOGIN_EMAIL_KEY, v); }catch(e){}
+}
+function lastLoginEmail(){
+  try{ return localStorage.getItem(LOGIN_EMAIL_KEY) || ''; }catch(e){ return ''; }
+}
 function openLoginModal(){
   document.getElementById('loginModalBackdrop').classList.add('open');
   document.getElementById('loginMsg').textContent='';
   document.getElementById('loginMsg').style.color='var(--muted)';
-  document.getElementById('loginEmail').value='';
+  document.getElementById('loginEmail').value = lastLoginEmail();  // 回填上次邮箱，钥匙串才能一键完成
   document.getElementById('loginPass').value='';
 }
 function closeLoginModal(){ document.getElementById('loginModalBackdrop').classList.remove('open'); }
