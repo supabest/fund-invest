@@ -2764,6 +2764,21 @@ function stockAddPlan(mv, price, add, lotSize){
   const amount = lots * price * lotSize;
   return { want, lots, amount, lotSize, ratio: amount / mv * 100 };
 }
+// 股票止盈计划：档位比例 × 持仓股数 → 整手向下取整（A股 100、港股按标的读）。
+// 不足一手时 lots=0：横幅只陈述目标股数，不出「卖 0 手」或「至少 1 手」这类指令
+// （2026-10-30 用户裁决：与买入侧同一条规矩——取整后的偏离不包装成指令）
+function stockSellPlan(shares, price, sellPct, lotSize){
+  const sh = Number(shares) || 0;
+  const px = Number(price) || 0;
+  const pct = Number(sellPct) || 0;
+  if(lotSize === undefined) lotSize = 100;
+  const lot = Number(lotSize) || 0;
+  if(!(sh > 0) || !(px > 0) || !(pct > 0) || !(lot > 0)) return null;
+  const wantShares = sh * pct / 100;
+  const lots = Math.floor(wantShares / lot + 1e-9);
+  const qty = lots * lot;
+  return { wantShares, lots, qty, amount: qty * px, lotSize: lot, ratio: qty / sh * 100, sell: pct };
+}
 // A股主板每手固定 100 股；港股每手股数因股而异（拆股会变），只认按标的取回来并存下的 lotSize，
 // 没有就返回 0（上层据此不给金额，而不是按 100 编一个错的）
 function stockLotSizeOf(s){
@@ -2802,10 +2817,18 @@ function buyBannerHtml(list){
   const anyShout = list.some(d=>d.shout);
   return `<div class="trade-banner buy">🟢 抄底信号 · ${parts.join('；')}${anyShout ? ' → 主信号非暂停，建议加仓/多投' : ''}</div>`;
 }
-// ==== LADDER_PURE_END ====
+// 基金止盈横幅：份额可小数赎回，保持百分比口径
 function sellBannerHtml(a){
   return `<div class="trade-banner sell">⚠️ 达到止盈档：${a.ret>=0?'+':''}${a.ret.toFixed(1)}% ≥ +${a.tier.ret}% 档 → 建议卖出 ${a.tier.sell}% 份额</div>`;
 }
+// 股票止盈横幅：比例换算成整手再给指令；不足一手只陈述目标，不给「卖 0 手」或「至少 1 手」
+function stockSellBannerHtml(a, plan){
+  const head = `⚠️ 达到止盈档：${a.ret>=0?'+':''}${a.ret.toFixed(1)}% ≥ +${a.tier.ret}% 档 → `;
+  if(!plan) return `<div class="trade-banner sell">${head}建议卖出 ${a.tier.sell}%（持仓/现价/每手股数不全，未折算手数）</div>`;
+  if(plan.lots < 1) return `<div class="trade-banner sell">${head}目标卖出 ${a.tier.sell}%（约 ${Math.round(plan.wantShares)} 股），不足 1 手（每手 ${plan.lotSize} 股）</div>`;
+  return `<div class="trade-banner sell">${head}建议卖出 ${plan.lots} 手（${plan.qty} 股）≈ ${fmtMoney(plan.amount)}（占持仓 ${plan.ratio.toFixed(1)}%，目标 ${a.tier.sell}%）</div>`;
+}
+// ==== LADDER_PURE_END ====
 
 function pillClass(level){
   switch(level){
@@ -3034,6 +3057,8 @@ function renderStockSection(){
     const sAlert = profitAlertFromRet(ret, s);
     const sDip = dipAlertStock(s);
     const sPlan = sDip ? stockAddPlan(stockMvOf(s), parseFloat(s.currentPrice)||0, sDip.add, stockLotSizeOf(s)) : null;
+    // 止盈：档位比例 → 股数 → 整手；缺股数/现价/港股手数时不给手数，只报比例
+    const sSellPlan = sAlert ? stockSellPlan(parseFloat(s.shares)||0, parseFloat(s.currentPrice)||0, sAlert.tier.sell, stockLotSizeOf(s)) : null;
     const card = document.createElement('div');
     card.className = 'fund-card';
     card.innerHTML = `
@@ -3054,7 +3079,7 @@ function renderStockSection(){
       </div>
       <div class="signal-price">现价 ${s.currentPrice||'--'}${s.ma60?' · MA60 '+Number(s.ma60).toFixed(2):''}${s.ma120?' · MA120 '+Number(s.ma120).toFixed(2):''}</div>
       ${dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0)}
-      ${sAlert ? sellBannerHtml(sAlert) : ''}
+      ${sAlert ? stockSellBannerHtml(sAlert, sSellPlan) : ''}
       ${sDip ? stockBuyBannerHtml(sDip, sPlan) : ''}
       <div class="fund-body" id="sbody-${s.id}"></div>
     `;

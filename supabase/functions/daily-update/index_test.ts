@@ -1262,10 +1262,47 @@ Deno.test("邮件接线：股票达止盈档时同样写「已达到」，不与
   try {
     const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
     assertEquals(res.status, 200);
-    assertEquals(mail.includes("建议卖出 50% 份额"), true, "+80.7% 命中 80% 档（卖 50%）");
+    // 100 股持仓 × 50% = 50 股，不足 1 手（2026-10-30 用户裁决：只陈述目标，不给卖出指令）
+    assertEquals(mail.includes("目标卖出 50%（约 50 股），不足 1 手（每手 100 股）"), true,
+      "+80.7% 命中 80% 档（卖 50%），50 股不足一手");
+    assertEquals(mail.includes("建议卖出"), false, "不足一手不许出现卖出指令");
     const seg = mail.slice(mail.indexOf("【600031】"));
     assertEquals(seg.includes("已达到 +80% 止盈档"), true);
     assertEquals(seg.includes("下一止盈档"), false, "已达 80% 档时不许再写「下一止盈档 +20%」");
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：股票止盈档折算成整手——写出手数、股数、按手金额与占持仓比例", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      // 400 股 × 50% 档 = 200 股 = 2 手；收盘 18.07 ⇒ 200 × 18.07 = ¥3,614，占持仓 50%
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: { funds: [], stocks: [{ code: "600031", name: "三一重工", shares: 400, cost: 10 }] },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    const seg = mail.slice(mail.indexOf("【600031】"));
+    assertEquals(seg.includes("建议卖出 2 手（200 股）"), true, "手数与股数都要写：" + seg.slice(0, 200));
+    assertEquals(seg.includes("¥3,614"), true, "按手计的金额要写");
+    assertEquals(seg.includes("占持仓 50.0%"), true, "要说清占持仓比例");
+    assertEquals(seg.includes("目标 50%"), true, "档位目标要可见，取整偏离不藏起来");
+    assertEquals(/NaN|Infinity/.test(mail), false);
   } finally {
     globalThis.fetch = real;
     logs.restore();

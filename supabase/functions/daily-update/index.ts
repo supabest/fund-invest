@@ -296,10 +296,22 @@ export function retChipHtml(ret: number | null): string {
 }
 
 // 卡片顶部的买卖标志：止盈档与回撤加仓档各一条，未触发返回空串（不留空壳）。
-function sellMarkHtml(a: { ret: number; tier: { ret: number; sell: number } } | null): string {
+// plan 省略 = 基金（份额可小数赎回，保持百分比）；plan 为 null = 股票但缺股数/现价/手数，只报比例。
+export function sellMarkHtml(
+  a: { ret: number; tier: { ret: number; sell: number } } | null,
+  plan?: { wantShares: number; lots: number; qty: number; amount: number; lotSize: number; ratio: number } | null,
+): string {
   if (!a) return '';
+  const head = '🔴 达到止盈档：+' + a.ret.toFixed(1) + '% ≥ +' + a.tier.ret + '% 档 → ';
+  const tail = plan === undefined
+    ? '建议卖出 ' + a.tier.sell + '% 份额'
+    : !plan
+      ? '建议卖出 ' + a.tier.sell + '%（持仓/现价/每手股数不全，未折算手数）'
+      : plan.lots < 1
+        ? '目标卖出 ' + a.tier.sell + '%（约 ' + Math.round(plan.wantShares) + ' 股），不足 1 手（每手 ' + plan.lotSize + ' 股）'
+        : '建议卖出 ' + plan.lots + ' 手（' + plan.qty + ' 股）≈ ' + money(plan.amount) + '（占持仓 ' + plan.ratio.toFixed(1) + '%，目标 ' + a.tier.sell + '%）';
   return '<div style="margin:6px 0;padding:8px 10px;background:#B14A341A;border-left:3px solid ' + C_DOWN + ';border-radius:6px;color:' + C_DOWN + ';font-weight:700;">'
-    + '🔴 达到止盈档：+' + a.ret.toFixed(1) + '% ≥ +' + a.tier.ret + '% 档 → 建议卖出 ' + a.tier.sell + '% 份额</div>';
+    + head + tail + '</div>';
 }
 // 股票加仓计划：档位比例按「整体持仓市值」计（2026-10-29 用户裁决：不是定投基数），
 // 按标的整手股数向下折算（A股 100、港股按标的读）——不足一手时只报目标金额，绝不四舍五入出虚构手数
@@ -309,6 +321,20 @@ export function stockAddPlan(mv: number, price: number, add: number, lotSize = 1
   const lots = Math.floor(want / (price * lotSize) + 1e-9);
   const amount = lots * price * lotSize;
   return { want, lots, amount, lotSize, ratio: amount / mv * 100 };
+}
+// 股票止盈计划：档位比例 × 持仓股数 → 整手向下取整（A股 100、港股按标的读）。
+// 不足一手时 lots=0：横幅只陈述目标股数，不出「卖 0 手」或「至少 1 手」这类指令
+// （2026-10-30 用户裁决，与买入侧同一条规矩；页面 stockSellPlan 同式）
+export function stockSellPlan(shares: number, price: number, sellPct: number, lotSize = 100): { wantShares: number; lots: number; qty: number; amount: number; lotSize: number; ratio: number; sell: number } | null {
+  const sh = Number(shares) || 0;
+  const px = Number(price) || 0;
+  const pct = Number(sellPct) || 0;
+  const lot = Number(lotSize) || 0;
+  if (!(sh > 0) || !(px > 0) || !(pct > 0) || !(lot > 0)) return null;
+  const wantShares = sh * pct / 100;
+  const lots = Math.floor(wantShares / lot + 1e-9);
+  const qty = lots * lot;
+  return { wantShares, lots, qty, amount: qty * px, lotSize: lot, ratio: qty / sh * 100, sell: pct };
 }
 function buyMarkHtml(l: { dd: number; add: number } | null, plan?: { want: number; lots: number; amount: number; lotSize: number; ratio: number } | null): string {
   if (!l) return '';
@@ -986,10 +1012,12 @@ export async function handle(
           // 手数：A股主板固定 100；港股按标的读（腾讯行情），取不到再回落页面同步来的 lotSize，仍无则不给金额
           const lotSize = /^\d{5}$/.test(code) ? ((await fetchHkLot(code)) || Number(s.lotSize) || 0) : 100;
           const addPlan = sLadder ? stockAddPlan(sMv, close, sLadder.add, lotSize) : null;
+          const sell = sellAlert(ret, s);
+          const sellPlan = sell ? stockSellPlan(sShare, close, sell.tier.sell, lotSize) : null;
           (stockReport[userId] = stockReport[userId] || []).push({
             code, name: sname || code, close, date: k.date, dev, ma60, ma120, below,
             tier: tier.label + (dev === null ? '（数据不足）' : ''), ret, nextTier,
-            sell: sellAlert(ret, s), ladder: sLadder, addPlan
+            sell, sellPlan, ladder: sLadder, addPlan
           });
 
           await post('stock_history', 'user_id,code,price_date', [{ user_id: userId, code, price_date: k.date, close, ma20, ma60, ma120, dev_pct: dev }]);
@@ -1165,7 +1193,7 @@ export async function handle(
         const profitStr = r.ret === null ? '' : ('当前收益率 ' + fmtSigned(r.ret) + tierNote);
         return '<li style="margin:12px 0;padding:10px 12px;background:#FAF8F2;border-radius:8px;">'
           + '<b>【' + r.code + '】' + r.name + '</b> ' + retChipHtml(r.ret)
-          + sellMarkHtml(r.sell)
+          + sellMarkHtml(r.sell, r.sellPlan)
           + buyMarkHtml(r.ladder, r.addPlan)
           + '<div style="margin:4px 0;">📊 买入参考：<b style="color:#A87C2E;">' + r.tier + '</b> · 现价 ' + r.close + '（' + r.date + '）</div>'
           + '<div style="color:#707C8C;font-size:13px;">📈 较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (trendStr ? '｜' + trendStr : '') + '</div>'

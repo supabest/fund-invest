@@ -20,6 +20,8 @@ import {
   dipAlertStock as pageDipAlertStock, dipAlertFundLadder as pageDipFundLadder,
   buyBannerHtml as pageBuyBanner,
   stockAddPlan as pageStockAddPlan, stockBuyBannerHtml as pageStockBuyBanner,
+  stockSellPlan as pageStockSellPlan, stockSellBannerHtml as pageStockSellBanner,
+  sellBannerHtml as pageSellBanner,
   stockLotSizeOf as pageStockLotSizeOf, lotFromTxQuote as pageLotFromTxQuote,
   supabaseBaseUrl as pageSupabaseBaseUrl,
 } from "./signal_parity.ts";
@@ -440,6 +442,69 @@ Deno.test("股票抄底横幅：整手时写手数+按手金额，不足一手�
   assert(/NaN|Infinity|undefined/.test(ok + tiny + noPos) === false);
 });
 
+Deno.test("股票止盈计划：档位比例 × 持仓股数 → 整手向下取整，双端逐格一致", () => {
+  const cases: Array<[number, number, number, number]> = [
+    [300, 28.5, 10, 100],    // 002415 现场：10% = 30 股，不足 1 手
+    [1500, 10, 10, 100],     // 150 股 → 1 手（向下取整，不四舍五入）
+    [1000, 10, 20, 100],     // 200 股 → 2 手
+    [1000, 10, 50, 100],     // 500 股 → 5 手
+    [999, 7.3, 30, 100],     // 299.7 股 → 2 手
+    [100, 10, 100, 100],     // 满仓档：100 股 → 1 手
+    [2000, 50, 30, 500],     // 港股每手 500：600 股 → 1 手
+    [1000, 50, 20, 500],     // 港股每手 500：200 股 → 0 手
+  ];
+  for (const [sh, px, pct, lot] of cases) {
+    assertEquals(pageStockSellPlan(sh, px, pct, lot), D.stockSellPlan(sh, px, pct, lot),
+      `双端口径必须一致：${sh} 股 × ${pct}% / 每手 ${lot}`);
+    const p = pageStockSellPlan(sh, px, pct, lot)!;
+    assert(p.qty <= sh, "卖出股数不得超过持仓");
+    assert(p.qty % lot === 0, "可成交股数必须是整手的倍数");
+  }
+  const tiny = pageStockSellPlan(300, 28.5, 10, 100)!;
+  assertEquals(tiny.lots, 0);
+  assertEquals(tiny.wantShares, 30, "不足一手时仍要报出目标股数");
+  assertEquals(tiny.qty, 0);
+  assertEquals(tiny.amount, 0);
+  const one = pageStockSellPlan(1500, 10, 10, 100)!;
+  assertEquals([one.lots, one.qty, one.amount], [1, 100, 1000]);
+  assert(Math.abs(one.ratio - 6.6666667) < 1e-6, "占持仓比例按实际卖出股数反算，不按目标比例");
+  assertEquals(pageStockSellPlan(20000, 10, 10)!.lotSize, 100, "不传手数时按 A 股 100 股");
+  assertEquals(pageStockSellPlan(300, 28.5, 10, 0), null, "港股手数未知 → 不给手数，不猜 100");
+  assertEquals(pageStockSellPlan(0, 28.5, 10, 100), null, "没填股数 → 无从折算");
+  assertEquals(pageStockSellPlan(300, 0, 10, 100), null, "没现价 → 不给金额");
+  assertEquals(pageStockSellPlan(300, 28.5, 0, 100), null, "档位比例缺失 → 不给计划");
+});
+
+Deno.test("股票止盈横幅：整手写手数/股数/金额，不足一手只陈述目标、绝不出指令", () => {
+  const a = { ret: 36.4, tier: { ret: 20, sell: 10 } };
+  const ok = pageStockSellBanner(a, pageStockSellPlan(1500, 10, 10, 100));
+  assert(ok.includes("建议卖出 1 手（100 股）"), "手数与股数都要写：" + ok);
+  assert(ok.includes("¥1,000"), "按手计的金额要写：" + ok);
+  assert(ok.includes("占持仓 6.7%"), "要说清这是占持仓的比例：" + ok);
+  assert(ok.includes("目标 10%"), "档位目标是 10%，向下取整后的偏离要可见：" + ok);
+  const tiny = pageStockSellBanner(a, pageStockSellPlan(300, 28.5, 10, 100));
+  assert(tiny.includes("目标卖出 10%（约 30 股），不足 1 手（每手 100 股）"), tiny);
+  assert(tiny.includes("建议卖出") === false, "不足一手不许给卖出指令（2026-10-30 用户裁决）");
+  assert(tiny.includes("0 手") === false, "不许出现「卖 0 手」这种空指令");
+  const noPos = pageStockSellBanner(a, null);
+  assert(noPos.includes("未折算手数"), "缺股数/手数要如实说，且不给手数：" + noPos);
+  assert(/NaN|Infinity|undefined/.test(ok + tiny + noPos) === false);
+  // 夜间邮件同一套文案（页面与邮件不许各说各的）
+  const sOk = D.sellMarkHtml(a, D.stockSellPlan(1500, 10, 10, 100));
+  const sTiny = D.sellMarkHtml(a, D.stockSellPlan(300, 28.5, 10, 100));
+  for (const frag of ["建议卖出 1 手（100 股）", "¥1,000", "占持仓 6.7%", "目标 10%"]) {
+    assert(sOk.includes(frag), "邮件侧缺「" + frag + "」：" + sOk);
+  }
+  assert(sTiny.includes("目标卖出 10%（约 30 股），不足 1 手（每手 100 股）"), sTiny);
+  assert(sTiny.includes("建议卖出") === false, "邮件侧不足一手同样不许给指令");
+});
+
+Deno.test("基金止盈横幅维持百分比份额（基金份额可小数赎回，不折算手数）", () => {
+  const a = { ret: 36.4, tier: { ret: 20, sell: 10 } };
+  assert(pageSellBanner(a).includes("建议卖出 10% 份额"), pageSellBanner(a));
+  assert(D.sellMarkHtml(a).includes("建议卖出 10% 份额"), D.sellMarkHtml(a));
+});
+
 Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对的函数（防「测试绿但生产走岔路」）", async () => {
   const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
   assert(/const sig = evalFundSignal\(f\);/.test(html), "页面基金卡片必须调用 evalFundSignal(f)");
@@ -506,6 +571,16 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
   const fn = await Deno.readTextFile(new URL("../cloudflare/functions/sb/[[path]].ts", import.meta.url));
   assert(/export const onRequest/.test(fn), "Pages Function 必须导出 onRequest（否则 /sb/* 全部 404）");
   assert(/buildUpstreamUrl\(/.test(fn), "Pages Function 必须走被测试的 buildUpstreamUrl（白名单与穿越防护都在那里）");
+
+  // --- 2026-10-30 止盈要按可成交单位说：股票必须折算整手，基金维持百分比份额 ---
+  assert(/const sSellPlan = sAlert \? stockSellPlan\(parseFloat\(s\.shares\)\|\|0, parseFloat\(s\.currentPrice\)\|\|0, sAlert\.tier\.sell, stockLotSizeOf\(s\)\) : null;/.test(html),
+    "页面股票卡必须用 stockSellPlan(股数, 现价, 档位比例, stockLotSizeOf(s)) 折算手数");
+  assert(/stockSellBannerHtml\(sAlert, sSellPlan\)/.test(html), "页面股票止盈横幅必须由 stockSellBannerHtml(sAlert, sSellPlan) 渲染");
+  assert(/sellBannerHtml\(alert\)/.test(html), "基金卡仍走百分比口径的 sellBannerHtml(alert)");
+  assert(/const sellPlan = sell \? stockSellPlan\(sShare, close, sell\.tier\.sell, lotSize\) : null;/.test(server),
+    "夜间股票路径必须用 stockSellPlan(sShare, close, 档位比例, lotSize) 折算手数");
+  assert(/sellMarkHtml\(r\.sell, r\.sellPlan\)/.test(server), "邮件股票段必须把整手计划传给 sellMarkHtml");
+  assert(/sellMarkHtml\(r\.sell\)/.test(server), "邮件基金段仍走百分比口径（不传计划）");
 
   // --- 2026-10-29 免登录（用户裁定 A）：只记住邮箱，密码/令牌一律不落盘 ---
   assert(/const LOGIN_EMAIL_KEY = 'dinvest_login_email';/.test(html), "记住登录邮箱需要一个独立的本地 key");
