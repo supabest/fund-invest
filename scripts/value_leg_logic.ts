@@ -10,7 +10,8 @@ const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter
   'valPctNeedFetch', 'valPctApply', 'valPctHtml', 'valPctMerge', 'valPctLockNote',
   'TREND_LABEL_CN', 'TREND_NA_CN',
   'INCOME_INDUSTRIES', 'INCOME_DY_MIN', 'INCOME_DY5_MIN', 'INCOME_ROIC_MIN', 'INCOME_LIMIT',
-  'incomeChannelOf', 'renderIncomeList', 'foldCardHtml'];
+  'incomeChannelOf', 'renderIncomeList', 'foldCardHtml',
+  'ROIC_GATE_PCT', 'valueMedian', 'valueIndStatsOf', 'valueMoatVetoHtml', 'valueVetoHtml'];
 
 async function load(): Promise<Record<string, unknown>> {
   const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
@@ -27,7 +28,7 @@ export const VALUE_TABLE = NS.VALUE_TABLE as Record<string, string>;
 export const valueFmtPct = NS.valueFmtPct as (v: number | null, d?: number) => string;
 export const valueTierLabel = NS.valueTierLabel as (t: string | null) => string;
 export const valuePillHtml = NS.valuePillHtml as (row: Record<string, unknown> | null) => string;
-export const valueGateHtml = NS.valueGateHtml as (row: Record<string, unknown> | null) => string;
+export const valueGateHtml = NS.valueGateHtml as (row: Record<string, unknown> | null, indByL2?: Record<string, { med: number; n: number }> | null) => string;
 export const renderValueTop10 = NS.renderValueTop10 as (state: { batch: string; top10: Record<string, unknown>[] } | null, trendMap?: Record<string, Record<string, unknown>> | null) => string;
 export const SWAP_GAP = NS.SWAP_GAP as number;
 export const divergeLists = NS.divergeLists as (rows: Record<string, unknown>[]) => { wronged: Record<string, unknown>[]; rich: Record<string, unknown>[] };
@@ -98,3 +99,10 @@ export type IncomeRow = Record<string, unknown> & { alreadyQualified?: boolean; 
 export const incomeChannelOf = NS.incomeChannelOf as (rows: Record<string, unknown>[]) => { list: IncomeRow[]; total: number };
 export const renderIncomeList = NS.renderIncomeList as (state: { batch: string; list: IncomeRow[]; total: number } | null) => string;
 export const foldCardHtml = NS.foldCardHtml as (key: string, titleInner: string, bodyHtml: string) => string;
+// 2026-10-30：否决理由的人话版。门槛常量与引擎 ROIC_GATE 同值（测试读引擎源码钉住）。
+export const ROIC_GATE_PCT = NS.ROIC_GATE_PCT as number;
+export const valueMedian = NS.valueMedian as (vals: (number | null | undefined)[]) => number | null;
+export type IndRef = { med: number; n: number };
+export const valueIndStatsOf = NS.valueIndStatsOf as (rows: Record<string, unknown>[]) => Record<string, IndRef>;
+export const valueMoatVetoHtml = NS.valueMoatVetoHtml as (row: Record<string, unknown> | null, indByL2?: Record<string, IndRef> | null) => string;
+export const valueVetoHtml = NS.valueVetoHtml as (row: Record<string, unknown> | null, indByL2?: Record<string, IndRef> | null) => string;

@@ -9,7 +9,8 @@ import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueT
   trendNaWhy, trendStaleHtml, trendStaleDays, fetchStatBump, trendPick,
   EM_VAL_MIN_ROWS, valPctSupported, emValUrl, valuationPctFromRows, valPctCaliber, valPctNaWhy,
   valPctNeedFetch, valPctApply, valPctHtml, valPctMerge, valPctLockNote,
-  incomeChannelOf, renderIncomeList, foldCardHtml } from "./value_leg_logic.ts";
+  incomeChannelOf, renderIncomeList, foldCardHtml,
+  valueMedian, valueIndStatsOf, ROIC_GATE_PCT } from "./value_leg_logic.ts";
 
 const row = { code:'600031', name:'潍柴', vq:78.4, tier:'qualified', confidence:'A', vetoed:false,
   owner_yield:6.2, margin_of_safety:4.35, cn10y:1.85, roic_med:18.0, v_moat:80, v_cash:70, v_safety:75, v_health:66,
@@ -970,8 +971,8 @@ Deno.test('接线守卫：收益型名单独立取数（不得复用只含精选
   }
   // legFilter 只取「精选池 + 持仓」，与独立通道「白名单行业 × 全市场」的总体不符——用了就是同名不同总体
   assertEquals(body.includes('legFilter('), false, '收益型名单不得用 legFilter');
-  assertEquals(/Promise\.all\(\[loadStockScores\(\), loadStockValue\(\), loadIncomeWatch\(\)\]\)/.test(html), true,
-    '三腿取数必须同一批并行，否则首屏回流/竞态');
+  assertEquals(/Promise\.all\(\[[^\]]*loadIncomeWatch\(\)[^\]]*\]\)/.test(html), true,
+    '收益型取数必须与首屏同一批并行，否则回流/竞态');
   const vi = html.indexOf('renderValueTop10(valueState, trendCache)');
   const ii = html.indexOf('renderIncomeList(incomeState)');
   assertEquals(vi >= 0 && ii > vi, true, '收益型卡片必须接在价值 Top10 之后');
@@ -985,6 +986,83 @@ Deno.test('高杠杆标记：>90% 才亮，恰好 90% 不亮；debt 缺失只影
   const na = incomeChannelOf([{ ...incRow, code:'lna', debt_ratio: null }]);
   assertEquals(na.total, 1);
   assertEquals(na.list[0].highLeverage, false);
+});
+
+Deno.test('valueMedian / valueIndStatsOf：行业中位只吃有效 roic_med，n=有效行数', () => {
+  assertEquals(valueMedian([]), null);
+  assertEquals(valueMedian([5, null, 7]), 6);
+  assertEquals(valueMedian([7]), 7);
+  assertEquals(valueMedian([1, 3, 9, 20]), 6);          // 偶数取中间两数均值
+  const s = valueIndStatsOf([
+    { ths_l2: '汽车零部件', roic_med: 4 }, { ths_l2: '汽车零部件', roic_med: 6 },
+    { ths_l2: '汽车零部件', roic_med: 20 }, { ths_l2: '汽车零部件', roic_med: null },
+    { ths_l2: '白酒', roic_med: 15 }, { ths_l2: null, roic_med: 99 },
+  ]);
+  assertEquals(s['汽车零部件'], { med: 6, n: 3 });     // null 不计入分母，也不当 0
+  assertEquals(s['白酒'], { med: 15, n: 1 });
+  assertEquals(s[undefined as never], undefined);        // 缺行业不造「无名行业」
+  assertEquals(Object.keys(s).length, 2);
+});
+
+Deno.test('价值否决文案：无护城河证据 → 本股 ROIC 数值 + 8% 门槛 + 同行业中位，不再是一句「无证据」', () => {
+  const veto = { ...row, tier: 'vetoed', veto_reasons: ['无护城河证据'], ths_l2: '汽车零部件',
+    roic_med: 7.654586, roic_cur: 7.654586, roic_min3: 7.012263 };
+  const h = valueGateHtml(veto, { '汽车零部件': { med: 6.9027, n: 215 } });
+  for (const t of ['⛔ 硬否决', 'ROIC 未达 8%', 'ROIC 中位 7.7%', '当期 7.7%', '近3年最低 7.0%',
+    '门槛 8%', '同行业中位 6.9%', '汽车零部件 n=215']) {
+    assertEquals(h.includes(t), true, '缺少：' + t);
+  }
+  // 7.65 高于同业中位 6.90：必须说清「高于同行但未过绝对门槛」，否则读者会以为数据自相矛盾
+  assertEquals(h.includes('高于同行业中位，仍未过门槛'), true);
+  // 原句会让人读成「找不到数据」，不许再出现
+  assertEquals(h.includes('无护城河证据'), false, '原句「无护城河证据」必须换掉');
+});
+
+Deno.test('价值否决文案：缺行业参考时只讲本股与门槛；低于同业中位时换说法；不得出现 NA 冒充数值', () => {
+  const veto = { ...row, tier: 'vetoed', veto_reasons: ['无护城河证据'], ths_l2: '汽车零部件',
+    roic_med: 5.2, roic_cur: 3.1, roic_min3: null };
+  const noInd = valueGateHtml(veto, null);
+  assertEquals(noInd.includes('同行业中位'), false);
+  assertEquals(noInd.includes('ROIC 中位 5.2%'), true);
+  assertEquals(noInd.includes('当期 3.1%'), true);
+  assertEquals(noInd.includes('近3年最低'), false);      // 缺值不硬造一行
+  assertEquals(noInd.includes('NA'), false);
+  const below = valueGateHtml(veto, { '汽车零部件': { med: 9.5, n: 215 } });
+  assertEquals(below.includes('本股也低于同行业中位'), true);
+});
+
+Deno.test('价值否决文案：金融股（roic_med 天然 NA）走 ROE 说法，不把 NA 当数值展示', () => {
+  const fin = { ...row, tier: 'vetoed', veto_reasons: ['无护城河证据'], roic_med: null, roic_cur: null, roic_min3: null };
+  const h = valueGateHtml(fin, { '银行': { med: 6.1, n: 42 } });
+  assertEquals(h.includes('ROE'), true);
+  assertEquals(h.includes('金融股'), true);
+  assertEquals(h.includes('金融股按 ROE 对标'), true);
+  assertEquals(h.includes('ROIC 未达'), false);   // 金融股用的不是 ROIC 口径，别混说
+});
+
+Deno.test('价值否决文案：其它否决原因原样可见（不被护城河改写吞掉）', () => {
+  const h = valueGateHtml({ ...row, tier: 'vetoed', veto_reasons: ['资不抵债', '商誉/净资产>50%'] });
+  assertEquals(h.includes('资不抵债'), true);
+  assertEquals(h.includes('商誉/净资产&gt;50%'), true);   // 原因串经 escapeHtml，'>' 变实体
+});
+
+Deno.test('ROIC_GATE_PCT 与引擎 ROIC_GATE 同值（改一端必须改另一端）', async () => {
+  const engine = await Deno.readTextFile(new URL('../supabase/functions/stock-value/value_engine.ts', import.meta.url));
+  const m = engine.match(/const ROIC_GATE = (\d+(?:\.\d+)?)/);
+  assertEquals(m !== null, true, '引擎里找不到 ROIC_GATE');
+  assertEquals(ROIC_GATE_PCT, Number(m![1]), '前端门槛文案与引擎判定漂移');
+});
+
+Deno.test('接线守卫：行业参照是独立只读取数，挂进首屏 Promise.all，并传给价值门禁卡', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  assertEquals(html.includes('function loadValueIndustryRef('), true, '缺行业参照取数');
+  const s = html.indexOf('function loadValueIndustryRef(');
+  const body = html.slice(s, html.indexOf('\n}\n', s));
+  assertEquals(body.includes(".select('ths_l2,roic_med')"), true, '只取两列，别把整表拉回来');
+  assertEquals(body.includes('valueIndStatsOf('), true, '中位计算必须走纯函数');
+  const all = html.match(/Promise\.all\(\[[^\]]*\]\)/g) || [];
+  assertEquals(all.some(x => x.includes('loadValueIndustryRef()')), true, '未并入首屏并行取数');
+  assertEquals(html.includes('valueGateHtml(vRowForSwap, valueIndRef'), true, '门禁卡没拿到行业参照');
 });
 
 // ==== 三张榜单卡折叠（2026-10-30 用户要求：默认收起、记住选择）====

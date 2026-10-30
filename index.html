@@ -719,7 +719,7 @@ function initCloud(tries){
     if(sbUser && Date.now()-lastPullAt > 60000) syncOnOpen();
   });
   // 评分表 anon 可读、全局共享，客户端就绪即拉一次；失败仅降级不阻塞页面
-  Promise.all([loadStockScores(), loadStockValue(), loadIncomeWatch()]).then(()=>{ render(); loadTrendBadges(); });
+  Promise.all([loadStockScores(), loadStockValue(), loadIncomeWatch(), loadValueIndustryRef()]).then(()=>{ render(); loadTrendBadges(); });
   loadFundamentals().then(()=>renderStockSection());
   setSyncUI();
 }
@@ -800,8 +800,30 @@ async function loadIncomeWatch(){
   }catch(e){ console.warn('income watch load failed', e); }
 }
 
-function scoreStars(f){ return f>=90?'★★★★★':f>=80?'★★★★☆':f>=70?'★★★★':f>=60?'★★★':f>=50?'★★':'★'; }
+// 价值门禁的行业参照（2026-10-30 用户要求）：否决理由要能看懂「本股多少、门槛多少、同业多少」，
+// 不能只丢一句「无护城河证据」让人误以为缺数据。只取 ths_l2 + roic_med 两列的全市场行，
+// 按 L2 汇总中位；按 code 升序翻页保证分页稳定（与 nulls 修饰符无关）。
+let valueIndRef = null;   // { batch, byL2: { l2: { med, n } } }
+async function loadValueIndustryRef(){
+  if(!cloudReady || !sb) return;
+  try{
+    const { data: b, error: be } = await sb.from('stock_value').select('batch_date')
+      .order('batch_date',{ascending:false}).limit(1).maybeSingle();
+    if(be || !b) return;
+    const rows = [];
+    for(let i=0;i<LEG_MAX_PAGES;i++){
+      const [from,to] = legRange(i);
+      const { data: page, error } = await sb.from('stock_value').select('ths_l2,roic_med')
+        .eq('batch_date', b.batch_date).order(legTiebreakCol(), {ascending:true}).range(from,to);
+      if(error || !page) return;
+      rows.push(...page);
+      if(!legHasMore(page.length)) break;
+    }
+    valueIndRef = { batch: b.batch_date, byL2: valueIndStatsOf(rows) };
+  }catch(e){ console.warn('industry ref load failed', e); }
+}
 
+function scoreStars(f){ return f>=90?'★★★★★':f>=80?'★★★★☆':f>=70?'★★★★':f>=60?'★★★':f>=50?'★★':'★'; }
 function renderScoreTop10(){
   if(!scoreState)
     return scoreTried ? `<div class="signal-strip"><span class="signal-pill pill-normal">评分批次尚未生成（夜间批处理上线后自动出现）</span></div>` : '';
@@ -901,10 +923,68 @@ function valuePillHtml(row){
   const pctPos = (row.pool_n && row.pool_rank) ? ' 池内 P' + Math.max(1, Math.round(100 - row.pool_rank/row.pool_n*100)) : '';
   return '<span class="score-pill">价值 '+Number(row.vq).toFixed(1)+pctPos+'</span>';
 }
-function valueGateHtml(row){
+// 否决原因的人话版（2026-10-30 用户：原句「无护城河证据」会让人读成「找不到数据」）：
+// 先给本股数值，再给门槛，最后给同行业中位作参照——门槛是绝对资本成本锚，不随行业浮动，
+// 所以同行业只作「仅供参考」的比较，不能暗示「高于同行就合格」。
+var ROIC_GATE_PCT = 8;   // 与 supabase/functions/stock-value/value_engine.ts 的 ROIC_GATE 同值（测试钉住）
+function valueNumOrNull(v){
+  return (v === null || v === undefined || isNaN(Number(v))) ? null : Number(v);
+}
+function valueMedian(vals){
+  var a = (vals || []).map(valueNumOrNull).filter(function(v){ return v !== null; });
+  if(!a.length) return null;
+  a.sort(function(x, y){ return x - y; });
+  var m = Math.floor(a.length / 2);
+  return a.length % 2 ? a[m] : (a[m-1] + a[m]) / 2;
+}
+// 全市场行业参照：按 ths_l2 汇总 roic_med 的中位与有效行数（null 不计入分母，绝不当 0）
+function valueIndStatsOf(rows){
+  var acc = {};
+  (rows || []).forEach(function(r){
+    if(!r) return;
+    var k = r.ths_l2, v = valueNumOrNull(r.roic_med);
+    if(k === null || k === undefined || k === '' || v === null) return;
+    (acc[k] = acc[k] || []).push(v);
+  });
+  var out = {};
+  Object.keys(acc).forEach(function(k){
+    out[k] = { med: Math.round(valueMedian(acc[k]) / 0.01) / 100, n: acc[k].length };
+  });
+  return out;
+}
+function valueMoatVetoHtml(row, indByL2){
+  var med = valueNumOrNull(row && row.roic_med);
+  if(med === null){
+    return '<div class="score-warn">⛔ 硬否决：金融股按 ROE 对标，ROE 低于 '+ROIC_GATE_PCT+'% 资本成本门槛</div>';
+  }
+  var cur = valueNumOrNull(row.roic_cur), min3 = valueNumOrNull(row.roic_min3);
+  var own = '本股 ROIC 中位 ' + valueFmtPct(med);
+  if(cur !== null) own += ' · 当期 ' + valueFmtPct(cur);
+  if(min3 !== null) own += ' · 近3年最低 ' + valueFmtPct(min3);
+  var out = '<div class="score-warn">⛔ 硬否决：ROIC 未达 '+ROIC_GATE_PCT+'% 资本成本门槛</div>'
+    + '<div class="score-warn" style="color:var(--muted)">' + own + '（门槛 '+ROIC_GATE_PCT+'% 是资本成本锚，不随行业浮动）</div>';
+  var ind = (indByL2 && row.ths_l2) ? indByL2[row.ths_l2] : null;
+  var im = ind ? valueNumOrNull(ind.med) : null;
+  if(im !== null){
+    out += '<div class="score-warn" style="color:var(--muted)">同行业中位 ' + valueFmtPct(im)
+      + '（' + escapeHtml(String(row.ths_l2)) + ' n=' + Number(ind.n || 0) + '，仅参考）'
+      + (med > im ? '——本股高于同行业中位，仍未过门槛' : '——本股也低于同行业中位') + '</div>';
+  }
+  return out;
+}
+function valueVetoHtml(row, indByL2){
+  var reasons = (row && row.veto_reasons) || [];
+  if(!reasons.length) return '';
+  var moat = reasons.indexOf('无护城河证据') >= 0;
+  var others = reasons.filter(function(x){ return x !== '无护城河证据'; });
+  var out = others.length ? '<div class="score-warn">⛔ 硬否决：'+escapeHtml(others.join('、'))+'</div>' : '';
+  if(moat) out += valueMoatVetoHtml(row, indByL2);
+  return out;
+}
+function valueGateHtml(row, indByL2){
   if(!row) return '';
   const bar = (v,l)=>'<div class="score-bar"><span>'+l+'</span><i style="--w:'+Math.max(0,Math.min(100, v==null?0:Number(v)))+'%"></i><em>'+(v==null?'NA':Number(v).toFixed(0))+'</em></div>';
-  const veto = (row.veto_reasons||[]).length ? '<div class="score-warn">⛔ 硬否决：'+escapeHtml(row.veto_reasons.join('、'))+'</div>' : '';
+  const veto = valueVetoHtml(row, indByL2);
   const mos = row.margin_of_safety===null||row.margin_of_safety===undefined
     ? (row.rf_fallback ? '无风险利率口径缺失 → 改用绝对下限（rf_fallback）' : 'NA')
     : valueFmtPp(row.margin_of_safety, 2)+'（owner yield '+valueFmtPct(row.owner_yield)+' − 十年国债 '+valueFmtPct(row.cn10y, 2)+'）';
@@ -3241,7 +3321,7 @@ function stockFormHtml(s){
     : '';
   return `
     ${scoreDetailHtml(s)}
-    ${valueGateHtml(valueState ? valueState.rows.get(String(s.code||'').trim()) : null)}
+    ${valueGateHtml(vRowForSwap, valueIndRef ? valueIndRef.byL2 : null)}
     ${swapLineHtml}
     ${researchReportHtml(fundamentals.get(String(s.code)) || null)}
     <div class="field-grid">
