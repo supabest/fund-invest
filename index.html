@@ -1957,6 +1957,11 @@ function sectorFoldState(collapsed){
     ? { label: '展开 ▾', bodyShown: false }
     : { label: '收起 ▴', bodyShown: true };
 }
+// 存储值 → 折叠态的唯一判据：只认 '0' 为展开，其余（含无此键的 null、读失败兜底）一律收起。
+// 2026-10-30 起默认收起：判断「是否点过收起」与「默认态」分开，才不会被空存储读成展开。
+function sectorPrefCollapsed(raw){
+  return raw !== '0';
+}
 // 股票页「板块轮动概览」条取数（2026-10-07）：直接复用基金页同一 sectorState 行数据，走与
 // sectorCardHtml **完全同源**的排序/计数（sectorRankLists + sectorSummaryCounts），只摘精简三行所需——
 // 概要三数 + 60 日最强 upN 个 + 60 日最弱 downN 个。纯只读、不新造数据源、不改任何排序，杜绝两处数字打架。
@@ -2009,15 +2014,15 @@ function sectorUnderwaterView(days, dd){
 const SECTOR_DOWN_PREVIEW = 20; // 调整榜默认预览条数（本批次 74 条，移动端不至于冗长）
 let sectorLastRows = [];       // 上一次渲染的行（展开/收起重绘使用，也供控制台合成行验证 stale 分支）
 // 折叠态跨刷新记忆：与 dinvest_tab 同一范式（读写各自 try/catch 包住）——
-// 无痕模式/存储被禁时静默降级为默认展开，不能因此白屏。localStorage 按访问地址隔离。
+// 无痕模式/存储被禁时静默降级为默认收起，不能因此白屏。localStorage 按访问地址隔离。
 const SECTOR_COLLAPSED_KEY = 'dinvest_sector_collapsed';
 function sectorReadCollapsedPref(){
-  try{ return localStorage.getItem(SECTOR_COLLAPSED_KEY) === '1'; }catch(e){ return false; }
+  try{ return sectorPrefCollapsed(localStorage.getItem(SECTOR_COLLAPSED_KEY)); }catch(e){ return true; }
 }
 function sectorWriteCollapsedPref(v){
   try{ localStorage.setItem(SECTOR_COLLAPSED_KEY, v ? '1' : '0'); }catch(e){}
 }
-// collapsed 默认 false = 默认展开（无存储或读失败时 sectorReadCollapsedPref 返回 false）
+// 默认收起（2026-10-30 用户要求）；存了 '0' 的用户保持展开——默认态与记忆互不覆盖
 let sectorUi = { showAllDown:false, showEntangled:false, collapsed:sectorReadCollapsedPref() }; // 修复轮1：累积中行已并入各榜，不再单独成组
 const sectorReqGuard = sectorCreateReqGuard(); // 修复轮2（评审 I1）：loadSectorRotation 请求序号守卫（允许同时在飞多个请求，只有最新者可写状态/渲染）
 

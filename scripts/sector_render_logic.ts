@@ -151,6 +151,7 @@ const EXPORT_NAMES = [
   "sectorThemeSummaries", "sectorNum", "fmtRatioPct", "fmtPoints", "fmtScoreVal",
   "fmtVr", "fmtProsperity", "prosperityBand", "sectorLabelDots", "matchApproxPools",
   "sectorBuildAccCounts", "sectorIsStaleReq", "sectorCreateReqGuard", "sectorFoldState",
+  "sectorPrefCollapsed",
   "sectorStockOverview", "sectorLegCompleteness", "sectorUnderwaterView",
 ];
 
@@ -274,6 +275,10 @@ export function sectorCreateReqGuard(): SectorReqGuard {
 // 不存在第二份「折叠时显示什么」的副本；实现体唯一住在 index.html SECTOR_PURE 块。
 export function sectorFoldState(collapsed: unknown): SectorFoldState {
   return fn("sectorFoldState")(collapsed) as SectorFoldState;
+}
+// 2026-10-30：默认收起。存储值 → 折叠态的唯一判据（只认 '0' 为展开），默认态不散落在读写两处。
+export function sectorPrefCollapsed(raw: unknown): boolean {
+  return fn("sectorPrefCollapsed")(raw) as boolean;
 }
 // 2026-10-07：股票页「板块轮动概览」条取数——复用基金页同一 sectorState 行与同源排序/计数。
 // 实现体唯一住在 index.html SECTOR_PURE 块，本模块只抽出不复制。

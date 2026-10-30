@@ -445,9 +445,9 @@ Deno.test("sectorFoldState: 两态精确值 —— 展开={收起 ▴,可见}，
   assertEquals(P.sectorFoldState(true), { label: "展开 ▾", bodyShown: false });
 });
 
-Deno.test("sectorFoldState: 默认展开不依赖调用方传对值 —— undefined/null/false/0/'' 均归展开", () => {
-  // 「默认展开」是用户选定行为；扇入 false 分支必须包含所有非 true 值，
-  // 否则存储无该键（getItem 返回 null）时会意外进折叠态。
+Deno.test("sectorFoldState: 扇入只看布尔 true —— undefined/null/false/0/'' 均归展开（默认态由 sectorPrefCollapsed 决定）", () => {
+  // sectorFoldState 只回答「传进来的折叠标志是什么」；应用的默认态在 sectorPrefCollapsed，
+  // 那里把空存储归收起。两者分工，避免有人把默认值塞进扇入分支。
   for (const v of [undefined, null, false, 0, ""]) {
     assertEquals(P.sectorFoldState(v).bodyShown, true, "非 true 应展开，实为 " + String(v));
     assertEquals(P.sectorFoldState(v).label, "收起 ▴");
@@ -461,6 +461,26 @@ Deno.test("sectorFoldState: 严格 === true —— 字符串 '1'/'true'/'yes' �
     assertEquals(P.sectorFoldState(v).bodyShown, true, "非布尔 true 不应折叠，实为 " + String(v));
   }
   assertEquals(P.sectorFoldState(true).bodyShown, false);
+});
+
+Deno.test("板块轮动默认收起（2026-10-30 用户要求）：无存储→收起，'1'→收起，'0'→展开", () => {
+  assertEquals(P.sectorPrefCollapsed(null), true, "从未点过必须默认收起");
+  assertEquals(P.sectorPrefCollapsed(undefined), true);
+  assertEquals(P.sectorPrefCollapsed("1"), true);
+  assertEquals(P.sectorPrefCollapsed("0"), false, "存了 '0' 就必须展开，否则用户上次的展开选择被吞");
+  for (const v of ["", "true", "yes", "false", "2"]) {
+    assertEquals(P.sectorPrefCollapsed(v), true, "非 '0' 一律回落默认收起，实为 " + JSON.stringify(v));
+  }
+});
+
+Deno.test("接线守卫：sectorUi.collapsed 初值走 sectorPrefCollapsed，localStorage 抛错也回落收起", async () => {
+  const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
+  const s = html.indexOf("function sectorReadCollapsedPref(");
+  assertEquals(s >= 0, true, "缺 sectorReadCollapsedPref");
+  const body = html.slice(s, html.indexOf("\n}\n", s));
+  assertEquals(body.includes("sectorPrefCollapsed("), true, "读存储必须经纯函数，阈值/默认态只有一处");
+  assertEquals(/catch\(e\)\{\s*return true;/.test(body), true, "读失败必须回落收起（默认值不能藏在 try 外的旧口径）");
+  assertEquals(html.includes("collapsed:sectorReadCollapsedPref()"), true, "sectorUi 初值未接存储");
 });
 
 // ---------- Task 5：行业景气度展示（纯函数，仅展示、不参与排序） ----------
