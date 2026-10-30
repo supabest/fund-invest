@@ -1058,12 +1058,12 @@ function renderDivergeBoard(state){
   var all = [];
   state.rows.forEach(function(r){ all.push(r); });
   var d = divergeLists(all);
-  return '<div class="fund-card"><div class="score-card-title">分歧榜 · 两套分数不一致的地方'
-    + '<span style="font-weight:400;font-size:11.5px;color:var(--muted)">批次 ' + escapeHtml(String(state.batch)) + '</span></div>'
-    + (d.wronged.length ? d.wronged.slice(0, 5).map(function(r){ return divergeRowHtml(r, '被错杀'); }).join('') : '')
+  return foldCardHtml('diverge', '分歧榜 · 两套分数不一致的地方'
+    + '<span style="font-weight:400;font-size:11.5px;color:var(--muted)">批次 ' + escapeHtml(String(state.batch)) + '</span>',
+    (d.wronged.length ? d.wronged.slice(0, 5).map(function(r){ return divergeRowHtml(r, '被错杀'); }).join('') : '')
     + (d.rich.length ? d.rich.slice(0, 5).map(function(r){ return divergeRowHtml(r, '虚高'); }).join('') : '')
     + (d.wronged.length + d.rich.length === 0 ? '<div class="score-row" style="color:var(--muted)">本批次无显著分歧样本（两套分数同向）</div>' : '')
-    + '<div class="score-card-note">分歧榜只展示两套口径哪里不一致，不构成买卖建议。</div></div>';
+    + '<div class="score-card-note">分歧榜只展示两套口径哪里不一致，不构成买卖建议。</div>');
 }
 // ---- 两条腿 REST 查询构造（2026-10-13 Step 9 预检修复单：缺陷 A + 缺陷 B）----
 // A：PostgREST 未指定 nulls 修饰符时走 PG 默认 DESC NULLS FIRST，而引擎不变式（value_engine.ts:211）

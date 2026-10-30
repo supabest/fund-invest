@@ -1039,6 +1039,27 @@ Deno.test('接线守卫（体级）：回放要真的按存储开关卡片，判
     '只能把 "1" 当展开：否则上次收起过的卡片刷新后会自己打开');
 });
 
+Deno.test('分歧榜也走折叠壳（默认收起），正文与零命中提示不被折叠改口径', () => {
+  const g = renderDivergeBoard({ batch: '2026-10-11', rows: new Map() });
+  assertEquals(g.includes('data-fold-key="diverge"'), true, '分歧榜未接折叠');
+  assertEquals(g.includes('fold-open'), false, '分歧榜默认必须收起');
+  assertEquals(g.includes('aria-expanded="false"'), true);
+  assertEquals(g.includes('分歧榜 · 两套分数不一致的地方'), true, '标题被折叠壳改丢');
+  assertEquals(g.includes('本批次无显著分歧样本'), true, '零命中提示必须在折叠正文里保留');
+  assertEquals(g.includes('不构成买卖建议'), true, '免责说明不能丢');
+  // 有样本时正文照旧进折叠体（5 行才能让首位 vq 落到 P80）
+  const hit = renderDivergeBoard({ batch: '2026-10-11', rows: new Map([
+    ['c1', { code: 'c1', name: '甲', vq: 90, main_final: 50, confidence: 'A', in_pool: true }],
+    ['c2', { code: 'c2', name: '乙', vq: 80, main_final: 60, confidence: 'A', in_pool: true }],
+    ['c3', { code: 'c3', name: '丙', vq: 70, main_final: 70, confidence: 'A', in_pool: true }],
+    ['c4', { code: 'c4', name: '丁', vq: 60, main_final: 80, confidence: 'A', in_pool: true }],
+    ['c5', { code: 'c5', name: '戊', vq: 50, main_final: 90, confidence: 'A', in_pool: true }],
+  ]) });
+  assertEquals(hit.includes('data-fold-key="diverge"'), true);
+  assertEquals(hit.includes('被错杀'), true);
+  assertEquals(hit.includes('虚高'), true);
+});
+
 Deno.test('接线守卫：折叠按钮必须有委托点击监听（卡片是渲染后动态插入的，不能只在创建时绑）', async () => {
   const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
   const s = html.indexOf("document.addEventListener('click', function(e){");
