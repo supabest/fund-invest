@@ -553,6 +553,9 @@ let scoreTried = false; // 已尝试拉取；纯本地未接云时不展示占�
 // 价值腿（stock_value 最新批次）：与 scoreState 同范式——null=未生成/读取失败 → 卡片优雅降级
 let valueState = null;   // { batch, rows: Map<bareCode,row>, top10: row[] }；null=未生成/读取失败 → 卡片优雅降级
 let valueTried = false;
+// 收益型观察名单（独立通道）：总体是「白名单行业 × 全市场」，与 valueState 的「精选池+持仓」不同 → 必须单独取数
+let incomeState = null;  // { batch, list: row[], total }；null=未生成/读取失败
+let incomeTried = false;
 
 // 板块轮动（sector_rotation_daily 最新批次）：与 scoreState 同范式——null=尚未生成/读取失败，卡片优雅降级
 let sectorState = null; // { batch, rows, accCounts: Map<pk_etf,n>, poolPools: {l1,l2,batch} }
@@ -710,7 +713,7 @@ function initCloud(tries){
     if(sbUser && Date.now()-lastPullAt > 60000) syncOnOpen();
   });
   // 评分表 anon 可读、全局共享，客户端就绪即拉一次；失败仅降级不阻塞页面
-  Promise.all([loadStockScores(), loadStockValue()]).then(()=>{ render(); loadTrendBadges(); });
+  Promise.all([loadStockScores(), loadStockValue(), loadIncomeWatch()]).then(()=>{ render(); loadTrendBadges(); });
   loadFundamentals().then(()=>renderStockSection());
   setSyncUI();
 }
@@ -763,6 +766,32 @@ async function loadStockValue(){
     valueState = { batch, rows: new Map(data.map(r=>[String(r.code), r])),
       top10: data.filter(r=>r.in_pool && r.tier==='qualified' && r.confidence==='A') };
   }catch(e){ console.warn('value load failed', e); }
+}
+
+// 收益型观察名单（独立通道）：只读、同一张 stock_value、同一批次，但筛的是白名单行业的全市场行（含池外），
+// 所以不能复用 loadStockValue 的 legFilter（那只取精选池+持仓）。阈值筛选交给纯函数 incomeChannelOf，
+// 这里只取候选集；排序 nullslast + 翻页的理由与价值腿相同（PostgREST 默认 NULLS FIRST + 1000 行截断）。
+async function loadIncomeWatch(){
+  if(!cloudReady || !sb) return;
+  incomeTried = true;
+  try{
+    const { data: b, error: be } = await sb.from('stock_value').select('batch_date')
+      .order('batch_date',{ascending:false}).limit(1).maybeSingle();
+    if(be || !b) return;
+    const batch = b.batch_date;
+    const data = [];
+    for(let i=0;i<LEG_MAX_PAGES;i++){
+      const [from,to] = legRange(i);
+      const { data: page, error } = await sb.from('stock_value').select('*')
+        .eq('batch_date', batch).in('ths_l2', INCOME_INDUSTRIES)
+        .order('div_yield', legOrderOpts()).order(legTiebreakCol(), {ascending:true}).range(from,to);
+      if(error || !page) return;
+      data.push(...page);
+      if(!legHasMore(page.length)) break;
+    }
+    const ch = incomeChannelOf(data);
+    incomeState = { batch, list: ch.list, total: ch.total };
+  }catch(e){ console.warn('income watch load failed', e); }
 }
 
 function scoreStars(f){ return f>=90?'★★★★★':f>=80?'★★★★☆':f>=70?'★★★★':f>=60?'★★★':f>=50?'★★':'★'; }
@@ -871,6 +900,54 @@ function renderValueTop10(state, trendMap){
       +'</span></div>').join('')
       : '<div class="score-row" style="color:var(--muted)">本批次无 A 级合格标的</div>')
     +'<div class="score-card-note">门禁用绝对阈值（值不值得拥有），排序用行业内百分位（合格者中谁更靠前）；不构成买卖建议。</div></div>';
+}
+
+// ---- 收益型观察名单（2026-10-30 用户裁定：B 不改门禁，改并列的独立通道）----
+// 通道 ≠ 门禁例外：门禁回答「值不值」（ROIC 8% 是 WACC 锚），放行会等于让「股息高但资本回报一般」冒充合格；
+// 通道只回答「这条路在什么条件下值得看」，与价值榜并列、互不替代（同一只可两边都在，打标区分）。
+// 阈值有分布依据（2026-10-30 全市场实测）：股息率 4.0 ≈ P95（3.99）、5年股息 2.5 ≈ P90（2.69）、ROIC 中位 3.0 ≈ P25（3.26）。
+// 白名单 = 分红是常态、现金流可预测的行业；名单外股息再高也不进——那更可能是一次性卖资产而非可持续回报。
+var INCOME_INDUSTRIES = ['电力','燃气','公路铁路运输','港口航运','机场航运','环境治理','建筑装饰'];
+var INCOME_DY_MIN = 4;
+var INCOME_DY5_MIN = 2.5;
+var INCOME_ROIC_MIN = 3;
+var INCOME_LIMIT = 15;
+
+function incomeNum(v){ return (v === null || v === undefined || isNaN(Number(v))) ? null : Number(v); }
+function incomeChannelOf(rows){
+  var list = [];
+  (rows || []).forEach(function(r){
+    if (!r) return;
+    if (INCOME_INDUSTRIES.indexOf(String(r.ths_l2 || '')) < 0) return;
+    var dy = incomeNum(r.div_yield), dy5 = incomeNum(r.div_yield_5y), roic = incomeNum(r.roic_med), debt = incomeNum(r.debt_ratio);
+    if (dy === null || dy < INCOME_DY_MIN) return;          // 缺数据 = 剔除：不当 0，也不当通过
+    if (dy5 === null || dy5 < INCOME_DY5_MIN) return;
+    if (roic === null || roic < INCOME_ROIC_MIN) return;
+    list.push({ ...r, alreadyQualified: r.tier === 'qualified', highLeverage: debt !== null && debt > 0.9 });
+  });
+  list.sort(function(a, b){ return Number(b.div_yield) - Number(a.div_yield); });
+  return { list: list, total: list.length };
+}
+function renderIncomeList(state){
+  if (!state || !state.list) return '';
+  var list = state.list.slice(0, INCOME_LIMIT);
+  return '<div class="fund-card"><div class="score-card-title">收益型观察名单 · 独立通道 '
+    +'<span style="font-weight:400;font-size:11.5px;color:var(--muted)">共 '+Number(state.total)+' 只 · 批次 '+escapeHtml(String(state.batch))+'</span></div>'
+    + (list.length ? '' : '<div class="score-row" style="color:var(--muted)">本批次无符合三筛的标的（这不是「通道不存在」）</div>')
+    + list.map(function(r, i){
+      var debt = incomeNum(r.debt_ratio);
+      return '<div class="score-row" data-code="'+escapeHtml(String(r.code))+'">'
+        +'<span style="color:var(--muted);width:24px">#'+(i+1)+'</span><b>'+escapeHtml(r.name || '')+'</b>'
+        +'<span style="color:var(--muted);font-size:11.5px">'+escapeHtml(String(r.code))+'</span>'
+        +'<span class="score-pill">股息 '+valueFmtPct(r.div_yield, 2)+'</span>'
+        + (r.alreadyQualified ? '<span class="score-pill">已在价值榜</span>' : '')
+        + (r.highLeverage ? '<span class="score-pill score-pill-warn">高杠杆</span>' : '')
+        +'<span style="color:var(--muted);font-size:11px">'+escapeHtml(String(r.ths_l2 || ''))
+        +' · 5年股息 '+valueFmtPct(r.div_yield_5y, 2)+' · ROIC中位 '+valueFmtPct(r.roic_med)
+        +' · 有息负债率 '+(debt === null ? 'NA' : (debt * 100).toFixed(0)+'%')
+        +'</span></div>';
+    }).join('')
+    +'<div class="score-card-note">本通道不套用 8% 护城河门禁：股息率≥'+INCOME_DY_MIN+'%、5年股息≥'+INCOME_DY5_MIN+'%、ROIC中位≥'+INCOME_ROIC_MIN+'% 三筛，杠杆只提示不拦；与价值榜并列，不构成买卖建议。</div></div>';
 }
 
 // ==== 以下续写：分歧榜与换仓逻辑（Task 8）====
@@ -3040,6 +3117,9 @@ function renderStockSection(){
   // 价值 Top10 紧随评分 Top10；未生成时的降级文案在调用点判定（VALUE_PURE 纯逻辑不读全局）
   list.insertAdjacentHTML('beforeend', valueState ? renderValueTop10(valueState, trendCache)
     : (valueTried ? '<div class="signal-strip"><span class="signal-pill pill-normal">价值批次尚未生成（夜间批处理上线后自动出现）</span></div>' : ''));
+  // 收益型观察名单：独立通道，紧随价值 Top10；零命中由纯函数出卡说明，未生成时在这里降级
+  list.insertAdjacentHTML('beforeend', incomeState ? renderIncomeList(incomeState)
+    : (incomeTried ? '<div class="signal-strip"><span class="signal-pill pill-normal">收益型名单待价值批次生成后出现</span></div>' : ''));
   // Task 7 在 renderStockSection 里插的价值 Top10 语句之后，同一口径的降级（纯函数不读全局）：
   list.insertAdjacentHTML('beforeend', valueState ? renderDivergeBoard(valueState)
     : (valueTried ? '<div class="signal-strip"><span class="signal-pill pill-normal">分歧榜待价值批次生成后出现</span></div>' : ''));

@@ -8,7 +8,8 @@ import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueT
   TREND_LABEL_CN, TREND_NA_CN,
   trendNaWhy, trendStaleHtml, trendStaleDays, fetchStatBump, trendPick,
   EM_VAL_MIN_ROWS, valPctSupported, emValUrl, valuationPctFromRows, valPctCaliber, valPctNaWhy,
-  valPctNeedFetch, valPctApply, valPctHtml, valPctMerge, valPctLockNote } from "./value_leg_logic.ts";
+  valPctNeedFetch, valPctApply, valPctHtml, valPctMerge, valPctLockNote,
+  incomeChannelOf, renderIncomeList } from "./value_leg_logic.ts";
 
 const row = { code:'600031', name:'潍柴', vq:78.4, tier:'qualified', confidence:'A', vetoed:false,
   owner_yield:6.2, margin_of_safety:4.35, cn10y:1.85, roic_med:18.0, v_moat:80, v_cash:70, v_safety:75, v_health:66,
@@ -893,4 +894,95 @@ Deno.test('自动值与在用值不一致时必须当面说清谁在驱动信号
   assertEquals(valPctLockNote(null, auto), '', '没填分位时主文案已经说「未填估值百分位」，这里不重复');
   assertEquals(valPctLockNote(85, { ...auto, na: 'failed' }), '', 'NA 没有自动值可比，不许造「自动算得 null」这种脏话');
   assertEquals(valPctLockNote(85, null), '', '从没取过数 = 不存在第二口径，没什么要说');
+});
+
+// ==== 收益型观察名单（2026-10-30 用户裁定：独立通道，不套用 8% 护城河门禁；前 15；保留打标）====
+const incRow = { code:'600900', name:'长江电力', ths_l2:'电力',
+  div_yield:4.6, div_yield_5y:3.2, roic_med:6.1, debt_ratio:0.55, tier:'vetoed' };
+
+Deno.test('收益型名单：四道筛子逐格生效（行业白名单 / 股息率≥4 / 5年股息≥2.5 / ROIC≥3）', () => {
+  const out = incomeChannelOf([
+    incRow,
+    { ...incRow, code:'x_ind', ths_l2:'白酒' },
+    { ...incRow, code:'x_dy', div_yield:3.9 },
+    { ...incRow, code:'x_dy5', div_yield_5y:2.4 },
+    { ...incRow, code:'x_roic', roic_med:2.9 },
+  ]);
+  assertEquals(out.total, 1);
+  assertEquals(out.list.map(r => r.code), ['600900']);
+});
+
+Deno.test('收益型名单：阈值是闭区间，恰好等于门槛必须入选（4 / 2.5 / 3 均二进制精确）', () => {
+  const out = incomeChannelOf([{ ...incRow, div_yield:4, div_yield_5y:2.5, roic_med:3 }]);
+  assertEquals(out.total, 1);
+});
+
+Deno.test('收益型名单：缺失字段整行剔除，不得当 0、也不得当通过', () => {
+  const out = incomeChannelOf([
+    incRow,
+    { ...incRow, code:'n_dy', div_yield:null },
+    { ...incRow, code:'n_dy5', div_yield_5y:undefined },
+    { ...incRow, code:'n_roic', roic_med:null },
+    { ...incRow, code:'n_ind', ths_l2:null },
+  ]);
+  assertEquals(out.total, 1);
+  assertEquals(out.list[0].code, '600900');
+});
+
+Deno.test('收益型名单：按股息率降序、页面只取前 15、已在价值榜与高杠杆各自打标', () => {
+  const rows = Array.from({ length: 18 }, (_, i) => ({ ...incRow, code: 'c' + String(i).padStart(2, '0'), div_yield: 6 - i * 0.1 }));
+  rows[0] = { ...rows[0], tier: 'qualified' };          // c00 已在价值榜
+  rows[1] = { ...rows[1], debt_ratio: 0.95 };           // c01 高杠杆
+  const out = incomeChannelOf(rows);
+  assertEquals(out.total, 18);
+  assertEquals(out.list[0].code, 'c00');
+  assertEquals(out.list[0].alreadyQualified, true);
+  assertEquals(out.list[0].highLeverage, false);        // 未触发也必须显式给 false，别让渲染层读 undefined
+  assertEquals(out.list[1].highLeverage, true);
+  const html = renderIncomeList({ batch: '2026-10-11', list: out.list, total: out.total });
+  assertEquals((html.match(/class="score-row"/g) || []).length, 15);
+  assertEquals(html.includes('共 18 只'), true);
+  assertEquals(html.includes('已在价值榜'), true);
+  assertEquals(html.includes('高杠杆'), true);
+  assertEquals(html.includes('c17'), false);            // 第 16~18 只被截掉
+  assertEquals(html.includes('不构成买卖建议'), true);
+});
+
+Deno.test('renderIncomeList：null → 空串（降级文案由调用点决定）；有批次但零命中必须出卡说明，不得静默消失；脚注点明不套 8% 门禁', () => {
+  assertEquals(renderIncomeList(null), '');
+  const empty = renderIncomeList({ batch: '2026-10-11', list: [], total: 0 });
+  assertEquals(empty.includes('本批次无符合'), true);   // 空榜 ≠ 无此功能：静默消失正是仓库记过的降级
+  assertEquals(empty.includes('不构成买卖建议'), true);
+  const html = renderIncomeList({ batch: '2026-10-11', list: [incRow as never], total: 1 });
+  assertEquals(html.includes('8%'), true);
+  assertEquals(html.includes('杠杆'), true);
+});
+
+Deno.test('接线守卫：收益型名单独立取数（不得复用只含精选池+持仓的 valueState），并接进并行加载与渲染点', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const start = html.indexOf('async function loadIncomeWatch(');
+  assertEquals(start >= 0, true, 'loadIncomeWatch 不存在');
+  const end = html.indexOf('\n}\n', start);
+  assertEquals(end > start, true, 'loadIncomeWatch 函数体边界未找到');
+  const body = html.slice(start, end);
+  for (const t of ['stock_value', "in('ths_l2'", 'legOrderOpts(', 'legRange(', 'legHasMore(', 'legTiebreakCol(', 'incomeChannelOf(']) {
+    assertEquals(body.includes(t), true, 'loadIncomeWatch 缺少：' + t);
+  }
+  // legFilter 只取「精选池 + 持仓」，与独立通道「白名单行业 × 全市场」的总体不符——用了就是同名不同总体
+  assertEquals(body.includes('legFilter('), false, '收益型名单不得用 legFilter');
+  assertEquals(/Promise\.all\(\[loadStockScores\(\), loadStockValue\(\), loadIncomeWatch\(\)\]\)/.test(html), true,
+    '三腿取数必须同一批并行，否则首屏回流/竞态');
+  const vi = html.indexOf('renderValueTop10(valueState, trendCache)');
+  const ii = html.indexOf('renderIncomeList(incomeState)');
+  assertEquals(vi >= 0 && ii > vi, true, '收益型卡片必须接在价值 Top10 之后');
+});
+
+Deno.test('高杠杆标记：>90% 才亮，恰好 90% 不亮；debt 缺失只影响标记、不影响入选', () => {
+  const at90 = incomeChannelOf([{ ...incRow, code:'l90', debt_ratio: 0.9 }]);
+  const at91 = incomeChannelOf([{ ...incRow, code:'l91', debt_ratio: 0.91 }]);
+  assertEquals(at90.list[0].highLeverage, false);
+  assertEquals(at91.list[0].highLeverage, true);
+  const na = incomeChannelOf([{ ...incRow, code:'lna', debt_ratio: null }]);
+  assertEquals(na.total, 1);
+  assertEquals(na.list[0].highLeverage, false);
 });

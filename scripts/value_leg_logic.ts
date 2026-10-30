@@ -8,7 +8,9 @@ const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter
   'AUTH_TIMEOUT_MS', 'authErrHint',
   'EM_VAL_MIN_ROWS', 'valPctSupported', 'emValUrl', 'valuationPctFromRows', 'valPctCaliber', 'valPctNaWhy',
   'valPctNeedFetch', 'valPctApply', 'valPctHtml', 'valPctMerge', 'valPctLockNote',
-  'TREND_LABEL_CN', 'TREND_NA_CN'];
+  'TREND_LABEL_CN', 'TREND_NA_CN',
+  'INCOME_INDUSTRIES', 'INCOME_DY_MIN', 'INCOME_DY5_MIN', 'INCOME_ROIC_MIN', 'INCOME_LIMIT',
+  'incomeChannelOf', 'renderIncomeList'];
 
 async function load(): Promise<Record<string, unknown>> {
   const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
@@ -85,3 +87,13 @@ export const valPctHtml = NS.valPctHtml as (meta: ValPctMeta | null, today?: str
 // deno-lint-ignore no-explicit-any
 export const valPctMerge = NS.valPctMerge as (prev: Record<string, any> | null, fresh: Record<string, any>) => Record<string, any> | null;
 export const valPctLockNote = NS.valPctLockNote as (used: number | string | null, meta: ValPctMeta | null) => string;
+
+// ---- 收益型观察名单（2026-10-30 用户裁定：独立通道，非门禁例外）----
+export const INCOME_INDUSTRIES = NS.INCOME_INDUSTRIES as string[];
+export const INCOME_DY_MIN = NS.INCOME_DY_MIN as number;
+export const INCOME_DY5_MIN = NS.INCOME_DY5_MIN as number;
+export const INCOME_ROIC_MIN = NS.INCOME_ROIC_MIN as number;
+export const INCOME_LIMIT = NS.INCOME_LIMIT as number;
+export type IncomeRow = Record<string, unknown> & { alreadyQualified?: boolean; highLeverage?: boolean };
+export const incomeChannelOf = NS.incomeChannelOf as (rows: Record<string, unknown>[]) => { list: IncomeRow[]; total: number };
+export const renderIncomeList = NS.renderIncomeList as (state: { batch: string; list: IncomeRow[]; total: number } | null) => string;
