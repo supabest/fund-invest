@@ -9,7 +9,7 @@ import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueT
   trendNaWhy, trendStaleHtml, trendStaleDays, fetchStatBump, trendPick,
   EM_VAL_MIN_ROWS, valPctSupported, emValUrl, valuationPctFromRows, valPctCaliber, valPctNaWhy,
   valPctNeedFetch, valPctApply, valPctHtml, valPctMerge, valPctLockNote,
-  incomeChannelOf, renderIncomeList } from "./value_leg_logic.ts";
+  incomeChannelOf, renderIncomeList, foldCardHtml } from "./value_leg_logic.ts";
 
 const row = { code:'600031', name:'潍柴', vq:78.4, tier:'qualified', confidence:'A', vetoed:false,
   owner_yield:6.2, margin_of_safety:4.35, cn10y:1.85, roic_med:18.0, v_moat:80, v_cash:70, v_safety:75, v_health:66,
@@ -985,4 +985,66 @@ Deno.test('高杠杆标记：>90% 才亮，恰好 90% 不亮；debt 缺失只影
   const na = incomeChannelOf([{ ...incRow, code:'lna', debt_ratio: null }]);
   assertEquals(na.total, 1);
   assertEquals(na.list[0].highLeverage, false);
+});
+
+// ==== 三张榜单卡折叠（2026-10-30 用户要求：默认收起、记住选择）====
+Deno.test('foldCardHtml：卡片带折叠键、默认收起（无 fold-open）、按钮初始为「展开」，键值转义', () => {
+  const h = foldCardHtml('income', '收益型观察名单', '<div class="x">正文</div>');
+  assertEquals(h.includes('class="fund-card fold-card"'), true);
+  assertEquals(h.includes('data-fold-key="income"'), true);
+  assertEquals(h.includes('fold-btn'), true);
+  assertEquals(h.includes('aria-expanded="false"'), true);
+  assertEquals(h.includes('展开'), true);
+  assertEquals(h.includes('fold-open'), false);
+  assertEquals(h.includes('<div class="fold-body"><div class="x">正文</div></div>'), true);
+  assertEquals(foldCardHtml('a"b', 't', 'b').includes('data-fold-key="a&quot;b"'), true);
+});
+
+Deno.test('三张榜单卡都必须走折叠壳：价值/收益型（纯函数内），精选池由接线守卫钉住', () => {
+  const v = renderValueTop10({ batch: '2026-10-11', top10: [row] as never[] });
+  assertEquals(v.includes('data-fold-key="value"'), true);
+  assertEquals(v.includes('fold-open'), false);
+  const i = renderIncomeList({ batch: '2026-10-11', list: [incRow as never], total: 1 });
+  assertEquals(i.includes('data-fold-key="income"'), true);
+  assertEquals(i.includes('fold-open'), false);
+});
+
+Deno.test('接线守卫：默认收起靠 CSS（无 fold-open 即隐藏），展开状态由点击写入 localStorage 并在渲染后回放', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  assertEquals(/\.fold-card \.fold-body\{display:none;?\}/.test(html), true, '缺少默认收起 CSS');
+  assertEquals(/\.fold-card\.fold-open \.fold-body\{display:block;?\}/.test(html), true, '缺少展开态 CSS');
+  assertEquals(html.includes("localStorage.getItem('dinvest_fold_'"), true, '读不到上次选择');
+  assertEquals(html.includes("localStorage.setItem('dinvest_fold_'"), true, '写过不存＝记不住');
+  assertEquals(html.includes('function applyFoldState('), true, '缺回放函数');
+  assertEquals(html.includes('.fold-card[data-fold-key]'), true, '回放必须覆盖所有折叠卡');
+  // 渲染收尾必须回放，否则展开过的卡片刷新后「看着收起」但按钮说「收起」
+  const start = html.indexOf('function renderStockSection(');
+  const applyAt = html.indexOf('applyFoldState(list)', start);
+  assertEquals(start >= 0 && applyAt > start, true, 'renderStockSection 里没调用 applyFoldState(list)');
+  // 精选池卡也要折叠（它在纯块之外，只能源码级钉住）
+  assertEquals(html.includes("foldCardHtml('score'"), true, '精选池 Top10 未接折叠');
+});
+
+Deno.test('接线守卫（体级）：回放要真的按存储开关卡片，判定只认 "1"（"0" 必须继续收起）', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const fs = html.indexOf('function applyFoldState(');
+  assertEquals(fs >= 0, true);
+  const fbody = html.slice(fs, html.indexOf('\n}\n', fs));
+  for (const t of ['foldOpenOf(', 'classList.toggle(', ".textContent = open ? '收起' : '展开'", 'aria-expanded']) {
+    assertEquals(fbody.includes(t), true, 'applyFoldState 缺少：' + t);
+  }
+  const rs = html.indexOf('function foldOpenOf(');
+  const rbody = html.slice(rs, html.indexOf('\n}\n', rs));
+  assertEquals(rbody.includes("localStorage.getItem('dinvest_fold_'+key)==='1'"), true,
+    '只能把 "1" 当展开：否则上次收起过的卡片刷新后会自己打开');
+});
+
+Deno.test('接线守卫：折叠按钮必须有委托点击监听（卡片是渲染后动态插入的，不能只在创建时绑）', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const s = html.indexOf("document.addEventListener('click', function(e){");
+  assertEquals(s >= 0, true, '缺委托点击监听');
+  const body = html.slice(s, html.indexOf('\n});', s));
+  for (const t of [".closest('.fold-btn')", "classList.contains('fold-open')", "localStorage.setItem('dinvest_fold_"]) {
+    assertEquals(body.includes(t), true, '点击监听缺少：' + t);
+  }
 });

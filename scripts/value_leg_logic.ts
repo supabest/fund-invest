@@ -10,7 +10,7 @@ const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter
   'valPctNeedFetch', 'valPctApply', 'valPctHtml', 'valPctMerge', 'valPctLockNote',
   'TREND_LABEL_CN', 'TREND_NA_CN',
   'INCOME_INDUSTRIES', 'INCOME_DY_MIN', 'INCOME_DY5_MIN', 'INCOME_ROIC_MIN', 'INCOME_LIMIT',
-  'incomeChannelOf', 'renderIncomeList'];
+  'incomeChannelOf', 'renderIncomeList', 'foldCardHtml'];
 
 async function load(): Promise<Record<string, unknown>> {
   const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
@@ -97,3 +97,4 @@ export const INCOME_LIMIT = NS.INCOME_LIMIT as number;
 export type IncomeRow = Record<string, unknown> & { alreadyQualified?: boolean; highLeverage?: boolean };
 export const incomeChannelOf = NS.incomeChannelOf as (rows: Record<string, unknown>[]) => { list: IncomeRow[]; total: number };
 export const renderIncomeList = NS.renderIncomeList as (state: { batch: string; list: IncomeRow[]; total: number } | null) => string;
+export const foldCardHtml = NS.foldCardHtml as (key: string, titleInner: string, bodyHtml: string) => string;
