@@ -341,6 +341,87 @@ Deno.test("接线：抄底横幅真进邮件，位置在日期之后、持仓概
   }
 });
 
+Deno.test("接线：股票成本安全垫并进同一条抄底横幅，卡片 📈 行同步写出安全垫", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      // 股票 成本 24 / 收盘 18.07 ⇒ -24.7%，安全垫填 24 ⇒ 早已跌穿（夹具离边界有富余，不受浮点影响）
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: {
+          funds: [],
+          stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 24, targetDrawdown: 24 }],
+        },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    const iDip = mail.indexOf("抄底提示");
+    const iHold = mail.indexOf("持仓概览");
+    assertEquals(iDip > 0, true, "只有成本腿的股票也必须点亮横幅（纯函数绿了不代表接上了）");
+    assertEquals(iDip < iHold, true, "位置：抄底横幅仍在持仓概览之前");
+    const banner = mail.slice(iDip, iHold);
+    assertEquals(banner.includes("【600031】三一重工 收益 -24.7% 已跌破 -24% 安全垫"), true, "股票要和基金一样并进这一条：" + banner.slice(0, 400));
+    assertEquals(banner.includes("建议加仓/多投"), true, "均线只有 3 根 ⇒ dev null ⇒ 不按高位压指令");
+    const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
+    assertEquals(stockSeg.includes("已跌破 -24% 成本安全垫"), true, "📈 行如实补一句事实，与横幅同判据");
+    assertEquals(/NaN|Infinity/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("接线：股票踩线但均线明显高位（dev≥+10%）→ 横幅只报事实，不发买入指令", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      // 成本 30 / 收盘 20 ⇒ -33.3%，安全垫 30 ⇒ 已跌穿：事实要说，指令不许发
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: { stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 30, targetDrawdown: 30 }] },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) {
+      // 129 根 10.0 + 最新 20.0 ⇒ MA60 ≈10.17、MA120 ≈10.08 ⇒ dev ≈+97.5% ⇒ 邮件口径「明显高位」
+      return Promise.resolve(new Response(txJson("sh600031", txRowsCloses(new Array(129).fill(10).concat([20]))), { status: 200 }));
+    }
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    const banner = mail.slice(mail.indexOf("抄底提示"), mail.indexOf("持仓概览"));
+    assertEquals(banner.includes("【600031】三一重工 收益 -33.3% 已跌破 -30% 安全垫"), true, "事实仍要如实写出：" + banner.slice(0, 400));
+    assertEquals(banner.includes("建议加仓"), false, "明显高位不许喊加仓");
+    assertEquals(banner.includes("→"), false, "删掉指令后不留悬空箭头");
+    const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
+    assertEquals(stockSeg.includes("已跌破 -30% 成本安全垫"), true);
+    assertEquals(stockSeg.includes("明显高位"), true, "区间口径与仲裁同源（都是 dev≥+10%）");
+    assertEquals(/NaN|Infinity/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
 Deno.test("并发预取后单项失败仍隔离：坏基金不拖倒好基金，也不整链失败", async () => {
   // 并发改造最容易引入的回归是"一个 worker 抛错把整池炸掉"，这条就是钉这个边界。
   const real = globalThis.fetch;
@@ -609,6 +690,15 @@ const TX_STOCK_ROWS = [
   ["2026-10-27", "18.170", "18.070", "18.280", "18.020", "454393.000"],
   ["畸形行"],
 ];
+
+// 腾讯兜底源的 K 线夹具：按收盘价序列造完整 6 列。MA60/MA120 要有 ≥60/120 根才出得来 dev，
+// 「明显高位」这条仲裁只能靠长序列触发，短夹具永远测不到。
+function txRowsCloses(closes: number[]): unknown[] {
+  return closes.map((c, i) => [
+    new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10),
+    c.toFixed(3), c.toFixed(3), c.toFixed(3), c.toFixed(3), "1000.000",
+  ]);
+}
 
 // 一只 A股 + 一只基准为 HS300 的基金：一条链路同时压到股票腿与指数腿
 function aLegStates() {

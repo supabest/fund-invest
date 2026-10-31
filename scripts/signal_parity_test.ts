@@ -18,6 +18,7 @@ import {
   marketLevel as pageMarketLevel, baseSignal, evalFundSignal, fundBenchKey, computeDeviation,
   computeReturn as pageComputeReturn, dualSignal, pctTier, setState,
   dipAlertStock as pageDipAlertStock, dipAlertFundLadder as pageDipFundLadder,
+  dipAlertStockCost as pageDipStockCost,
   buyBannerHtml as pageBuyBanner,
   stockAddPlan as pageStockAddPlan, stockBuyBannerHtml as pageStockBuyBanner,
   stockSellPlan as pageStockSellPlan, stockSellBannerHtml as pageStockSellBanner,
@@ -333,6 +334,83 @@ Deno.test("抄底横幅：用户的定投暂停状态不再被写成「暂不新
   assertEquals(cost.includes("暂不新增"), false);
 });
 
+// ── 股票侧「目标跌幅安全垫」（2026-10-31 加）：与基金 dipAlertFund 同判据的成本口径腿 ──
+// 阈值来自股票表单新增的 s.targetDrawdown（每只自填，未填永不亮，不替用户定数）；
+// 股票侧没有「暂停定投」概念，喊买仲裁改用既有的均线档边界 dev≥+10%（邮件里就叫「明显高位」）。
+Deno.test("股票成本安全垫：未填/脏值/0/缺成本/缺现价都不亮，恰好踩线必亮，明显高位只陈述", () => {
+  const s = (tdd: unknown, cost = 10, price = 8) => ({ targetDrawdown: tdd, cost, currentPrice: price });
+  assertEquals(pageDipStockCost(s(""), 0), null, "未填不亮");
+  assertEquals(pageDipStockCost(s(null), 0), null);
+  assertEquals(pageDipStockCost(s(undefined), 0), null);
+  assertEquals(pageDipStockCost(s(0), 0), null, "0 按未填：否则任何浮亏都算跌穿 -0%");
+  assertEquals(pageDipStockCost(s("abc"), 0), null, "脏值按未填，绝不输出 NaN% 安全垫");
+  assertEquals(pageDipStockCost(s(20, 0, 8), 0), null, "缺成本不亮");
+  assertEquals(pageDipStockCost(s(20, 10, 0), 0), null, "缺现价不亮");
+  assertEquals(pageDipStockCost(s(20, 10, 8.1), 0), null, "收益 -19% 尚未跌穿 -20%");
+  const hit = pageDipStockCost(s(20, 10, 8), 0)!;
+  assertEquals(hit.kind, "cost");
+  assertEquals(hit.target, -20);
+  assertEquals(hit.ret.toFixed(1), "-20.0", "恰好踩线要亮（1e-9 容差，同基金口径）");
+  assertEquals(hit.shout, true);
+  assertEquals(pageDipStockCost(s(-20, 10, 7), 0)!.target, -20, "负数输入按绝对值口径，不比反");
+  assertEquals(pageDipStockCost(s(20, 10, 7), 12)!.shout, false, "现价较均线 +12%（明显高位）不给买入指令");
+  assertEquals(pageDipStockCost(s(20, 10, 7), 9.9)!.shout, true, "+9.9% 未到既有高位边界，仍给指令");
+  assertEquals(pageDipStockCost(s(20, 10, 7), null)!.shout, true, "均线缺失时不因未知压掉指令");
+  // 容差必须实测到：24.5 → 19.6 真实跌幅就是 -20%，但浮点算出 -19.999999999999996，严格比较会漏亮
+  const driftRet = (19.6 - 24.5) / 24.5 * 100;
+  assert(driftRet > -20, "夹具本身得是浮点退化格，否则这条测不到 1e-9");
+  assertEquals(pageDipStockCost(s(20, 24.5, 19.6), 0) !== null, true, "浮点退化不能漏亮（页面）");
+  assertEquals(D.stockDipAlert({ targetDrawdown: 20 }, driftRet, 0) !== null, true, "浮点退化不能漏亮（服务端）");
+});
+
+Deno.test("股票成本安全垫双端矩阵：页面 dipAlertStockCost 与服务端 stockDipAlert 逐格一致", () => {
+  const targets: Array<unknown> = ["", null, undefined, 0, 10, 20, 20.5, "abc", -20, "20"];
+  const prices = [10, 9, 8.1, 8, 7.95, 7, 5];
+  const devs: Array<number | null> = [null, -20, -6, 0, 9.9, 10, 25];
+  for (const t of targets) {
+    for (const price of prices) {
+      // 与服务端 stockReturn 同式：成本 10、今夜收盘 price
+      const ret = (price - 10) / 10 * 100;
+      for (const dev of devs) {
+        const page = pageDipStockCost({ targetDrawdown: t, cost: 10, currentPrice: price }, dev);
+        const srv = D.stockDipAlert({ targetDrawdown: t }, ret, dev);
+        const tag = `t=${String(t)} price=${price} dev=${dev}`;
+        assertEquals(page === null, srv === null, `亮灭 ${tag}`);
+        assertEquals(page?.target ?? null, srv?.target ?? null, `阈值 ${tag}`);
+        assertEquals(page?.ret.toFixed(6) ?? null, srv?.ret.toFixed(6) ?? null, `收益 ${tag}`);
+        assertEquals(page?.shout ?? null, srv?.shout ?? null, `喊买仲裁 ${tag}`);
+      }
+    }
+  }
+  // 缺数据这一格：服务端 ret=null（无成本）与页面缺成本/缺现价同判不亮
+  assertEquals(D.stockDipAlert({ targetDrawdown: 20 }, null, 0), null);
+  assertEquals(pageDipStockCost({ targetDrawdown: 20, cost: 0, currentPrice: 8 }, 0), null);
+});
+
+Deno.test("股票抄底横幅：成本腿与市场腿并一条且保留整手指令，只有成本腿时不编金额", () => {
+  const ladder = { dd: 36, add: 40 };
+  const plan = pageStockAddPlan(10000, 10, 40, 100)!;
+  const cost = { kind: "cost", ret: -23.4, target: -20, shout: true };
+  const both = pageStockBuyBanner(ladder, plan, cost);
+  assert(both.includes("成本口径：收益 -23.4% 已跌破 -20% 安全垫"), both);
+  assert(both.includes("较52周高点回撤 36.0% 已达 +40% 加仓档"), both);
+  assert(both.includes("建议买入 4 手"), "两腿都在时仍按档位给整手金额：" + both);
+  const onlyCost = pageStockBuyBanner(null, null, cost);
+  assert(onlyCost.includes("成本口径：收益 -23.4% 已跌破 -20% 安全垫"), onlyCost);
+  assert(onlyCost.includes("可分批买入拉低成本"), onlyCost);
+  assert(onlyCost.includes("¥") === false, `没有回撤档位就没有比例，绝不编金额：${onlyCost}`);
+  assert(onlyCost.includes("手") === false, onlyCost);
+  const hushed = pageStockBuyBanner(null, null, { ...cost, shout: false });
+  assert(hushed.includes("成本口径：收益 -23.4% 已跌破 -20% 安全垫"), hushed);
+  assert(hushed.includes("可分批买入") === false, `明显高位只陈述事实：${hushed}`);
+  assert(hushed.includes("→") === false, `删掉指令后不留悬空箭头：${hushed}`);
+  // 回归：没有成本腿时，市场腿文案一字不改
+  assertEquals(pageStockBuyBanner(ladder, plan), pageStockBuyBanner(ladder, plan, undefined));
+  assert(pageStockBuyBanner(ladder, plan).includes("🟢 抄底：较52周高点回撤 36.0% 已达 +40% 加仓档 → "), pageStockBuyBanner(ladder, plan));
+  assert(pageStockBuyBanner(ladder, plan).includes("成本口径") === false, pageStockBuyBanner(ladder, plan));
+  assertEquals(pageStockBuyBanner(null, null, null), "");
+});
+
 Deno.test("股票加仓计划：整体持仓占比 × 档位比例，按整手（100 股）折算，双端逐格一致", () => {
   const mvs = [0, 1, 500, 1807, 9035, 18070, 123456.78];
   const prices = [0, 3.33, 18.07, 250];
@@ -554,6 +632,25 @@ Deno.test("接线守卫：止盈卡片下一档与已达档走纯函数；标记
   assert(/data-ret="\$\{Number\(ret\)\}"/.test(html), "按钮必须携带档位 ret");
 });
 
+Deno.test("接线守卫：股票安全垫有输入框、保存写 s.targetDrawdown、页面与邮件同判据并进同一横幅", async () => {
+  const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
+  assert(/data-sk="targetDrawdown"/.test(html), "股票表单必须有「目标跌幅安全垫」输入框");
+  assert(/s\.targetDrawdown = get\('targetDrawdown'\)\.value\.trim\(\);/.test(html),
+    "保存必须写回 s.targetDrawdown（空串即未填，与判据的未填分支对齐）");
+  assert(/const dCostStock = dipAlertStockCost\(s, dev\);/.test(html), "股票卡片必须评估成本口径安全垫");
+  assert(/\$\{sDip \|\| dCostStock \? stockBuyBannerHtml\(sDip, sPlan, dCostStock\) : ''\}/.test(html),
+    "只有成本腿亮时也必须出横幅");
+  assert(/\$\{\(sDip\|\|dCostStock\)\?'<span class="trade-badge buy">🟢 抄底<\/span>':''\}/.test(html), "🟢 抄底角标必须同时看两条腿");
+  const server = await Deno.readTextFile(new URL("../supabase/functions/daily-update/index.ts", import.meta.url));
+  assert(/export function stockDipAlert\(/.test(server), "邮件端必须导出同判据的 stockDipAlert（供双端比对）");
+  assert(/const sCostDip = stockDipAlert\(s, ret, dev\);/.test(server), "邮件股票路径必须评估安全垫");
+  assert(/\(stockDips\[userId\] = stockDips\[userId\] \|\| \[\]\)\.push\(\{ code, name: sname \|\| code, \.\.\.sCostDip \}\)/.test(server),
+    "命中的股票必须进 stockDips 汇总");
+  assert(/dipBannerHtml\(\[\.\.\.\(fundDips\[userId\] \|\| \[\]\), \.\.\.\(stockDips\[userId\] \|\| \[\]\)\]\)/.test(server),
+    "顶部「🟢 抄底提示」横幅必须同时列基金与股票（否则邮件里股票永远不出现）");
+  assert(/成本安全垫/.test(server), "股票行必须如实写出成本安全垫状态");
+});
+
 Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对的函数（防「测试绿但生产走岔路」）", async () => {
   const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
   assert(/const sig = evalFundSignal\(f\);/.test(html), "页面基金卡片必须调用 evalFundSignal(f)");
@@ -568,7 +665,7 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
   // 股票加仓金额必须走同一套纯函数（档位比例 × 整体持仓市值 → 整手），不许在模板里手写折算
   assert(/const sPlan = sDip \? stockAddPlan\(stockMvOf\(s\), parseFloat\(s\.currentPrice\)\|\|0, sDip\.add, stockLotSizeOf\(s\)\) : null;/.test(html),
     "页面股票卡片必须用 stockAddPlan(stockMvOf(s), 现价, sDip.add, stockLotSizeOf(s)) 算加仓计划");
-  assert(/stockBuyBannerHtml\(sDip, sPlan\)/.test(html), "页面股票抄底横幅必须由 stockBuyBannerHtml(sDip, sPlan) 渲染");
+  assert(/stockBuyBannerHtml\(sDip, sPlan, dCostStock\)/.test(html), "页面股票抄底横幅必须由 stockBuyBannerHtml(sDip, sPlan, dCostStock) 渲染（成本腿要并进同一条）");
   // 港股手数必须真的去取（否则 stockLotSizeOf 永远为 0，卡片永远不出金额）：按标的读腾讯行情第 61 字段
   assert(/function fetchHkLot\(code\)\{/.test(html), "页面必须有港股每手股数取数函数 fetchHkLot");
   assert(/https:\/\/qt\.gtimg\.cn\/q=hk' \+ code/.test(html), "fetchHkLot 必须打腾讯港股行情（第 61 字段是每手股数）");

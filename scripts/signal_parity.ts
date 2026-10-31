@@ -48,7 +48,7 @@ const EXPORT_NAMES = [
   'marketLevel', 'DD_STEPS', 'ddAddPct', 'pctTier', 'drawdownFrom', 'dualSignal',
   'computeDeviation', 'effectiveCost', 'computeReturn', 'themeMarketValue', 'themeCapAmount', 'fundBenchKey',
   'baseSignal', 'evalFundSignal', 'fmtWan', 'fmtSigned', 'fmtMoney', 'fmtPct',
-  'dipAlertStock', 'dipAlertFundLadder', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml', 'stockLotSizeOf', 'lotFromTxQuote',
+  'dipAlertStock', 'dipAlertFundLadder', 'dipAlertStockCost', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml', 'stockLotSizeOf', 'lotFromTxQuote',
   'sellBannerHtml', 'stockSellPlan', 'stockSellBannerHtml',
   'profitNextTier', 'profitMetaText',
   'supabaseBaseUrl',
@@ -121,6 +121,11 @@ export const dipAlertStock = F.dipAlertStock as (
 export const dipAlertFundLadder = F.dipAlertFundLadder as (
   f: { high52w?: unknown; currentNav?: unknown; valuationPercentile?: unknown }, sig?: { level?: string } | null,
 ) => { kind: string; dd: number; add: number; shout: boolean } | null;
+/** 股票抄底·成本口径（安全垫）：dev 为均线偏离，≥+10%（邮件口径「明显高位」）时 shout=false。 */
+export type StockCostDip = { kind: string; ret: number; target: number; shout: boolean };
+export const dipAlertStockCost = F.dipAlertStockCost as (
+  s: { targetDrawdown?: unknown; cost?: unknown; currentPrice?: unknown }, dev: number | null,
+) => StockCostDip | null;
 export const buyBannerHtml = F.buyBannerHtml as (
   list: Array<{ kind: string; dd?: number; add?: number; ret?: number; target?: number; shout: boolean }>,
 ) => string;
@@ -131,7 +136,7 @@ export const lotFromTxQuote = F.lotFromTxQuote as (text: string) => number | nul
 /** Supabase 基址分派：Pages 项目域走同源 /sb 反代，其余（Vercel/本地）直连。 */
 export const supabaseBaseUrl = F.supabaseBaseUrl as (host: string, origin: string, direct: string) => string;
 export const stockBuyBannerHtml = F.stockBuyBannerHtml as (
-  d: { dd: number; add: number }, plan: AddPlan | null,
+  d: { dd: number; add: number } | null, plan: AddPlan | null, cost?: StockCostDip | null,
 ) => string;
 export type SellPlan = {
   wantShares: number; lots: number; qty: number; amount: number; lotSize: number; ratio: number; sell: number;

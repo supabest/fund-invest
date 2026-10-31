@@ -27,6 +27,11 @@
 //   一个标的就能吃穿 150s 墙钟，兜底若排在镜像轮询之后等于永远走不到。
 //   口径已逐根核对（见 txSource 注释），且**东财仍是首选**：东财给得出数据就绝不问腾讯，判据输入不变。
 //   遗留：日经225 腾讯无源（实测 type error），该基准仍只吃东财，取不到即如实失败。
+// v11 (2026-10-31): 股票侧补「目标跌幅安全垫」成本口径腿（页面同批新增，判据一字不差）。
+//   起因：邮件与页面都只对股票看 52 周回撤，用户自填的成本安全垫只有基金吃得到——浮亏踩线却不提示。
+//   阈值来源：股票表单新增 targetDrawdown（每只自填；未填/脏值/0 一律不亮，不替用户定数）。
+//   仲裁：股票没有「暂停定投」状态可用，改吃本邮件既有的「明显高位」边界 dev≥+10%（与 stockTierLabel 同一条线），
+//   高位只陈述事实、不发买入指令；抄底提示横幅与基金并入同一条，卡片 📈 行只追加事实，不动 👉 动作行。
 // 触发方式: POST /functions/v1/daily-update，Authorization: Bearer <DAILY_UPDATE_TOKEN>
 // 可选 body: {"force":true} 无变化也发送报告
 const GOAL_DEFAULT = 200000;
@@ -248,6 +253,22 @@ export function fundDipAlert(f: any, ret: number | null, sigLevel?: string): Fun
   const target = -Math.abs(tdd);
   if (ret > target + 1e-9) return null;
   return { ret, target, shout: sigLevel !== 'pause' };
+}
+
+// 股票抄底·成本口径：与页面 dipAlertStockCost 同判据（同样挡 NaN/0、同样留 1e-9 踩线容差）。
+// 股票侧没有「暂停定投」可仲裁，改用页面同一条均线档边界：dev≥+10% 即本邮件的「明显高位」，只陈述不喊买。
+export const STOCK_HOT_DEV = 10;
+
+export function stockDipAlert(s: any, ret: number | null, dev: number | null): FundDip | null {
+  const raw = s ? s.targetDrawdown : undefined;
+  if (raw === null || raw === undefined || raw === '') return null;
+  const tdd = parseFloat(String(raw));
+  if (!Number.isFinite(tdd) || tdd === 0) return null;
+  if (ret === null || !Number.isFinite(ret)) return null;
+  const target = -Math.abs(tdd);
+  if (ret > target + 1e-9) return null;
+  const hot = dev !== null && Number.isFinite(dev) && dev >= STOCK_HOT_DEV;
+  return { ret, target, shout: !hot };
 }
 
 // 回撤加仓阶梯：与页面 DD_STEPS（index.html 2562）同表；改表必须双端同步，否则页面与邮件给出不同加仓档。
@@ -957,6 +978,7 @@ export async function handle(
     const stockSignalRows: any[] = [];
     const stockReport: Record<string, any[]> = {};
     const stockHold: Record<string, HoldingsAgg> = {};
+    const stockDips: Record<string, Array<{ code: string; name: string } & FundDip>> = {};
     // 先并发取 K 线，再串行算信号 + 落库（理由同基金：取数才是墙钟大户）。
     const stKMap = new Map<string, { k?: { date: string; close: number; closes: number[]; name: string }; err?: any }>();
     await mapPool(stockUniq, 3, async (code) => {
@@ -1009,6 +1031,8 @@ export async function handle(
           const taken = s.profitTaken || [];
           const nextTier = tiers.find((x: any) => !taken.includes(x.ret)) || null;
           const sLadder = dipLadder(s, close, readPct(s));
+          const sCostDip = stockDipAlert(s, ret, dev);
+          if (sCostDip) (stockDips[userId] = stockDips[userId] || []).push({ code, name: sname || code, ...sCostDip });
           // 手数：A股主板固定 100；港股按标的读（腾讯行情），取不到再回落页面同步来的 lotSize，仍无则不给金额
           const lotSize = /^\d{5}$/.test(code) ? ((await fetchHkLot(code)) || Number(s.lotSize) || 0) : 100;
           const addPlan = sLadder ? stockAddPlan(sMv, close, sLadder.add, lotSize) : null;
@@ -1017,7 +1041,7 @@ export async function handle(
           (stockReport[userId] = stockReport[userId] || []).push({
             code, name: sname || code, close, date: k.date, dev, ma60, ma120, below,
             tier: tier.label + (dev === null ? '（数据不足）' : ''), ret, nextTier,
-            sell, sellPlan, ladder: sLadder, addPlan
+            sell, sellPlan, ladder: sLadder, addPlan, costDip: sCostDip
           });
 
           await post('stock_history', 'user_id,code,price_date', [{ user_id: userId, code, price_date: k.date, close, ma20, ma60, ma120, dev_pct: dev }]);
@@ -1196,7 +1220,8 @@ export async function handle(
           + sellMarkHtml(r.sell, r.sellPlan)
           + buyMarkHtml(r.ladder, r.addPlan)
           + '<div style="margin:4px 0;">📊 买入参考：<b style="color:#A87C2E;">' + r.tier + '</b> · 现价 ' + r.close + '（' + r.date + '）</div>'
-          + '<div style="color:#707C8C;font-size:13px;">📈 较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (trendStr ? '｜' + trendStr : '') + '</div>'
+          + '<div style="color:#707C8C;font-size:13px;">📈 较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (trendStr ? '｜' + trendStr : '')
+          + (r.costDip ? '｜收益 ' + fmtSigned(r.costDip.ret) + ' 已跌破 ' + String(r.costDip.target) + '% 成本安全垫' : '') + '</div>'
           + '<div style="color:#707C8C;font-size:13px;">💰 ' + profitStr + '</div>'
           + '<div style="margin-top:4px;">👉 ' + actionStr + '</div>'
           + '</li>';
@@ -1206,7 +1231,7 @@ export async function handle(
         + '<h2 style="font-size:18px;border-bottom:2px solid #A87C2E;padding-bottom:8px;">定投信号台 · ' + title + '</h2>'
         + '<p style="color:#707C8C;">' + dateStr + ' 收盘数据已自动更新</p>'
         + resumeBannerHtml(fundResume[userId] || [])
-        + dipBannerHtml(fundDips[userId] || [])
+        + dipBannerHtml([...(fundDips[userId] || []), ...(stockDips[userId] || [])])
         + holdingsSummaryHtml(fundHold[userId] || null, stockHold[userId] || null, dateStr)
         + (items.length
           ? '<h3 style="font-size:16px;margin:20px 0 12px;">📢 今日重要提醒</h3><ul style="padding-left:18px;margin:12px 0;">' + items.map(i => '<li style="margin:8px 0;">' + i + '</li>').join('') + '</ul>'

@@ -2966,6 +2966,21 @@ function dipAlertStock(s){
   if(pct!==null && !isNaN(pct) && pct>=80) return null;
   return {dd, add};
 }
+// 股票抄底·成本口径：与基金 dipAlertFund 同判据——跌穿自设「目标跌幅安全垫」才亮（含 1e-9 踩线容差）。
+// 股票侧没有「暂停定投」状态可仲裁，改用既有的均线档边界：dev≥+10% 就是邮件里的「明显高位」，只陈述事实不给买入指令。
+function dipAlertStockCost(s, dev){
+  const raw = s && s.targetDrawdown;
+  if(raw===null || raw===undefined || raw==='') return null;
+  const tdd = parseFloat(String(raw));
+  if(!Number.isFinite(tdd) || tdd===0) return null;   // 脏值/0 一律按未填，绝不输出 NaN% 安全垫
+  const cost = parseFloat(s.cost), price = parseFloat(s.currentPrice);
+  if(!(cost>0) || !(price>0)) return null;
+  const ret = (price-cost)/cost*100;
+  const target = -Math.abs(tdd);
+  if(ret > target + 1e-9) return null;
+  const hot = (dev!==null && dev!==undefined && Number.isFinite(dev) && dev>=10);
+  return {kind:'cost', ret, target, shout: !hot};
+}
 // 股票加仓计划：档位比例按「整体持仓市值」计（2026-10-29 用户裁决：不是定投基数），
 // 按标的整手股数向下折算（A股 100、港股按标的读）——不足一手时只报目标金额，绝不四舍五入出虚构手数
 function stockAddPlan(mv, price, add, lotSize){
@@ -3013,8 +3028,14 @@ function lotFromTxQuote(text){
   const n = Number(raw);
   return n > 0 ? n : null;
 }
-function stockBuyBannerHtml(d, plan){
-  const head = `🟢 抄底：较52周高点回撤 ${d.dd.toFixed(1)}% 已达 +${d.add}% 加仓档 → `;
+function stockBuyBannerHtml(d, plan, cost){
+  const costTxt = cost ? `成本口径：收益 ${cost.ret.toFixed(1)}% 已跌破 ${cost.target}% 安全垫` : '';
+  if(!d){
+    if(!cost) return '';
+    // 只有成本腿时没有回撤档位可换算比例，所以只给「分批」的方向，绝不编一个金额
+    return `<div class="trade-banner buy">🟢 抄底信号 · ${costTxt}${cost.shout ? ' → 可分批买入拉低成本' : ''}</div>`;
+  }
+  const head = `🟢 抄底：${cost ? costTxt+'；' : ''}较52周高点回撤 ${d.dd.toFixed(1)}% 已达 +${d.add}% 加仓档 → `;
   if(!plan) return `<div class="trade-banner buy">${head}建议买入</div>`;
   if(plan.lots < 1) return `<div class="trade-banner buy">${head}目标加仓 ¥${Math.round(plan.want).toLocaleString('en-US')}，不足 1 手（每手 ${plan.lotSize} 股）</div>`;
   return `<div class="trade-banner buy">${head}建议买入 ${plan.lots} 手（${plan.lots * plan.lotSize} 股）≈ ¥${Math.round(plan.amount).toLocaleString('en-US')}（占持仓 ${plan.ratio.toFixed(1)}%）</div>`;
@@ -3300,6 +3321,7 @@ function renderStockSection(){
     const nextTier = nextProfitTier(s, ret);    const pillCls = dev===null ? 'pill-normal' : (dev<=-5 ? 'pill-strong' : (dev>=3 ? 'pill-half' : 'pill-normal'));
     const sAlert = profitAlertFromRet(ret, s);
     const sDip = dipAlertStock(s);
+    const dCostStock = dipAlertStockCost(s, dev);
     const sPlan = sDip ? stockAddPlan(stockMvOf(s), parseFloat(s.currentPrice)||0, sDip.add, stockLotSizeOf(s)) : null;
     // 止盈：档位比例 → 股数 → 整手；缺股数/现价/港股手数时不给手数，只报比例
     const sSellPlan = sAlert ? stockSellPlan(parseFloat(s.shares)||0, parseFloat(s.currentPrice)||0, sAlert.tier.sell, stockLotSizeOf(s)) : null;
@@ -3312,7 +3334,7 @@ function renderStockSection(){
           <div class="fund-meta">${exchangeLabel(s.code)} · ${s.shares||0} 股 · 市值 ${fmtMoney(stockMvOf(s))}${s.priceDate?' · '+s.priceDate:''} · ${profitMetaText(sAlert, nextTier)}</div>
         </div>
         <div class="fund-return ${ret!==null&&ret>=0?'ret-pos':'ret-neg'}">${fmtPct(ret,1)}</div>
-        ${sAlert?'<span class="trade-badge sell">🔴 止盈</span>':''}${sDip?'<span class="trade-badge buy">🟢 抄底</span>':''}
+        ${sAlert?'<span class="trade-badge sell">🔴 止盈</span>':''}${(sDip||dCostStock)?'<span class="trade-badge buy">🟢 抄底</span>':''}
         <div class="chevron" id="schev-${s.id}">▸</div>
       </div>
       <div class="signal-strip">
@@ -3324,7 +3346,7 @@ function renderStockSection(){
       <div class="signal-price">现价 ${s.currentPrice||'--'}${s.ma60?' · MA60 '+Number(s.ma60).toFixed(2):''}${s.ma120?' · MA120 '+Number(s.ma120).toFixed(2):''}</div>
       ${dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0)}
       ${sAlert ? stockSellBannerHtml(sAlert, sSellPlan) + tierDoneBtnHtml('stock', s.id, sAlert.tier.ret) : ''}
-      ${sDip ? stockBuyBannerHtml(sDip, sPlan) : ''}
+      ${sDip || dCostStock ? stockBuyBannerHtml(sDip, sPlan, dCostStock) : ''}
       <div class="fund-body" id="sbody-${s.id}"></div>
     `;
     list.appendChild(card);
@@ -3372,6 +3394,7 @@ function stockFormHtml(s){
       <div class="field"><label>成本价（元/股）</label><input type="number" step="0.001" data-sk="cost" value="${s.cost??''}"></div>
       <div class="field"><label>估值百分位（0-100，可选）</label><input type="number" data-sk="valuationPercentile" value="${s.valuationPercentile??''}"></div>
       <div class="field"><label>52周最高价（可选，自动获取回算）</label><input type="number" step="0.001" data-sk="high52w" value="${s.high52w??''}"></div>
+      <div class="field"><label>目标跌幅安全垫（%，可选，如 20 表示 -20%）</label><input type="number" data-sk="targetDrawdown" value="${s.targetDrawdown??''}"></div>
       <div class="field full"><label>止盈策略（收益率%:卖出%）</label>
         <select data-sk="tierPreset">
           ${(()=>{ const cur = profitTiersText(s); const pk = tierPresetFor(cur);
@@ -3516,6 +3539,7 @@ async function saveStockForm(id){
   s.valuationPercentile = get('valuationPercentile').value;
   const shv = String(get('high52w').value||'').trim();
   if(shv!=='') s.high52w = parseFloat(shv)||0;
+  s.targetDrawdown = get('targetDrawdown').value.trim();
   const ptStock = get('tierPreset');
   const psv = ptStock ? ptStock.value : '';
   if(psv && TIER_PRESETS[psv]){
