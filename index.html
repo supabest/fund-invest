@@ -994,6 +994,47 @@ function valueVetoHtml(row, indByL2){
   if(moat) out += valueMoatVetoHtml(row, indByL2);
   return out;
 }
+// 否决分类（2026-10-31 用户裁定口径）：质地硬伤（资不抵债/商誉/烧钱加杠杆）优先于护城河；
+// 仅「无护城河证据」时按同行业中位分双/单——≤ 中位是「本股和同行一样差」（双否决），
+// > 中位是「本股优于同行、只被 8% 资本成本绝对门槛压住」（单否决）；恰好相等归双，
+// 不许把「和同行一样差」说成「比同行好」。roic_med 为 NA 是金融股（引擎按 ROE 对标）；
+// 没有行业参照则不硬分。
+function valueVetoClass(row, indByL2){
+  var reasons = (row && row.veto_reasons) || [];
+  if(!reasons.length) return null;
+  if(reasons.some(function(x){ return x !== '无护城河证据'; })) return 'quality';
+  var med = valueNumOrNull(row.roic_med);
+  if(med === null) return 'fin';
+  var ind = (indByL2 && row.ths_l2) ? indByL2[row.ths_l2] : null;
+  var im = ind ? valueNumOrNull(ind.med) : null;
+  if(im === null) return 'noind';
+  return med <= im ? 'dual' : 'single';
+}
+var VALUE_VETO_CLASS_CN = { dual:'行业双否决', single:'行业单否决', quality:'质地', fin:'金融 ROE 口径', noind:'无同行业参照' };
+// 抄底灯亮时的价值标注：只标注、不改任何买入指令（2026-10-31 用户裁定）。
+// row=undefined 表示调用点根本没有这一行的概念；row=null 表示查过取不到 ⇒ 未判定，
+// 两者都不许悄悄当成「没有否决」。批次尚未生成时不刷这行（页面别处已有降级语）。
+function valueDipVetoHtml(row, indByL2, hasBatch){
+  if(row === undefined) return '';
+  if(row === null) return hasBatch ? '<div class="trade-banner" style="background:#FBECE8;border-color:#B14A34;color:#8A3928;">⛔ 价值：本批次无该股数据（未判定）</div>' : '';
+  var cls = valueVetoClass(row, indByL2);
+  if(!cls) return '';
+  var why = '';
+  if(cls === 'quality'){
+    why = '：' + escapeHtml(((row.veto_reasons || []).filter(function(x){ return x !== '无护城河证据'; })).join('、'));
+  } else if(cls === 'fin'){
+    why = '：金融股按 ROE 对标，低于 ' + ROIC_GATE_PCT + '% 资本成本门槛';
+  } else {
+    var med = valueNumOrNull(row.roic_med);
+    var ind = (indByL2 && row.ths_l2) ? indByL2[row.ths_l2] : null;
+    var im = ind ? valueNumOrNull(ind.med) : null;
+    if(cls === 'dual') why = '：本股 ROIC ' + valueFmtPct(med) + ' ≤ 同行业中位 ' + valueFmtPct(im);
+    else if(cls === 'single') why = '：本股 ROIC ' + valueFmtPct(med) + ' 高于同行业中位 ' + valueFmtPct(im) + '，仅未过 ' + ROIC_GATE_PCT + '% 资本成本门槛';
+    else why = '：本股 ROIC ' + valueFmtPct(med) + ' 未达 ' + ROIC_GATE_PCT + '% 门槛，且无同行业参照';
+  }
+  return '<div class="trade-banner" style="background:#FBECE8;border-color:#B14A34;color:#8A3928;">⛔ 价值 硬否决·'
+    + VALUE_VETO_CLASS_CN[cls] + why + '（仅标注，不改变本条指令）</div>';
+}
 function valueGateHtml(row, indByL2){
   if(!row) return '';
   const bar = (v,l)=>'<div class="score-bar"><span>'+l+'</span><i style="--w:'+Math.max(0,Math.min(100, v==null?0:Number(v)))+'%"></i><em>'+(v==null?'NA':Number(v).toFixed(0))+'</em></div>';
@@ -2966,13 +3007,19 @@ function dipAlertStock(s){
   if(pct!==null && !isNaN(pct) && pct>=80) return null;
   return {dd, add};
 }
+// 安全垫是否已设：未填/空白/脏值/0 一律算「没设」——0 会被当成 -0% 门槛，任何浮亏都算跌穿，
+// 比不设更危险；负数与小数是有效阈值（判据侧按绝对值口径）。
+function stockPadSet(s){
+  const raw = s && s.targetDrawdown;
+  if(raw===null || raw===undefined || String(raw).trim()==='') return false;
+  const tdd = parseFloat(String(raw));
+  return Number.isFinite(tdd) && tdd!==0;
+}
 // 股票抄底·成本口径：与基金 dipAlertFund 同判据——跌穿自设「目标跌幅安全垫」才亮（含 1e-9 踩线容差）。
 // 股票侧没有「暂停定投」状态可仲裁，改用既有的均线档边界：dev≥+10% 就是邮件里的「明显高位」，只陈述事实不给买入指令。
 function dipAlertStockCost(s, dev){
-  const raw = s && s.targetDrawdown;
-  if(raw===null || raw===undefined || raw==='') return null;
-  const tdd = parseFloat(String(raw));
-  if(!Number.isFinite(tdd) || tdd===0) return null;   // 脏值/0 一律按未填，绝不输出 NaN% 安全垫
+  if(!stockPadSet(s)) return null;
+  const tdd = parseFloat(String(s.targetDrawdown));
   const cost = parseFloat(s.cost), price = parseFloat(s.currentPrice);
   if(!(cost>0) || !(price>0)) return null;
   const ret = (price-cost)/cost*100;
@@ -2980,6 +3027,13 @@ function dipAlertStockCost(s, dev){
   if(ret > target + 1e-9) return null;
   const hot = (dev!==null && dev!==undefined && Number.isFinite(dev) && dev>=10);
   return {kind:'cost', ret, target, shout: !hot};
+}
+// 股票抄底仲裁（2026-10-31 用户裁决）：市场腿（52 周回撤 ≥30%）与安全垫腿必须同时突破才亮灯。
+// 单腿一律不亮；但「回撤已达标而安全垫压根没设」要显式报出来（该字段本日才上线，现存持仓一律为空，
+// 静默闭灯会把「缺数据」读成「市场没给机会」）。灯灭时 shout 恒 false，不留「不亮却喊买」的组合。
+function stockDipGate(ladder, cost, padSet){
+  const light = !!(ladder && cost);
+  return { light, needPad: !!(ladder && !padSet && !cost), shout: light ? !!cost.shout : false };
 }
 // 股票加仓计划：档位比例按「整体持仓市值」计（2026-10-29 用户裁决：不是定投基数），
 // 按标的整手股数向下折算（A股 100、港股按标的读）——不足一手时只报目标金额，绝不四舍五入出虚构手数
@@ -3029,16 +3083,20 @@ function lotFromTxQuote(text){
   return n > 0 ? n : null;
 }
 function stockBuyBannerHtml(d, plan, cost){
-  const costTxt = cost ? `成本口径：收益 ${cost.ret.toFixed(1)}% 已跌破 ${cost.target}% 安全垫` : '';
-  if(!d){
-    if(!cost) return '';
-    // 只有成本腿时没有回撤档位可换算比例，所以只给「分批」的方向，绝不编一个金额
-    return `<div class="trade-banner buy">🟢 抄底信号 · ${costTxt}${cost.shout ? ' → 可分批买入拉低成本' : ''}</div>`;
-  }
-  const head = `🟢 抄底：${cost ? costTxt+'；' : ''}较52周高点回撤 ${d.dd.toFixed(1)}% 已达 +${d.add}% 加仓档 → `;
+  // 2026-10-31 用户裁决：双腿（回撤达档 + 跌穿安全垫）齐备才出横幅，单腿一律空串
+  if(!d || !cost) return '';
+  const costTxt = `成本口径：收益 ${cost.ret.toFixed(1)}% 已跌破 ${cost.target}% 安全垫`;
+  const mktTxt = `较52周高点回撤 ${d.dd.toFixed(1)}% 已达 +${d.add}% 加仓档`;
+  // 明显高位（dev≥+10%）压住指令：事实照说，箭头与买入话术一起删掉，不留悬空「→」
+  if(!cost.shout) return `<div class="trade-banner buy">🟢 抄底信号 · ${costTxt}；${mktTxt}（均线明显高位，只陈述事实）</div>`;
+  const head = `🟢 抄底：${costTxt}；${mktTxt} → `;
   if(!plan) return `<div class="trade-banner buy">${head}建议买入</div>`;
   if(plan.lots < 1) return `<div class="trade-banner buy">${head}目标加仓 ¥${Math.round(plan.want).toLocaleString('en-US')}，不足 1 手（每手 ${plan.lotSize} 股）</div>`;
   return `<div class="trade-banner buy">${head}建议买入 ${plan.lots} 手（${plan.lots * plan.lotSize} 股）≈ ¥${Math.round(plan.amount).toLocaleString('en-US')}（占持仓 ${plan.ratio.toFixed(1)}%）</div>`;
+}
+// 缺腿提示：回撤已达标、但安全垫压根没填时点亮这一条。缺数据必须显式化——否则「灯灭」会被读成「市场没给机会」
+function dipPadHintHtml(){
+  return `<div class="trade-banner" style="background:#FDF6E7;border-color:#A87C2E;">⚠️ 未设目标跌幅安全垫：抄底需「回撤达档 + 跌穿安全垫」双腿齐备，点开卡片在表单里补填后才可能亮灯</div>`;
 }
 // 抄底横幅：成本/市场两口径合并成一条（不再各亮各的）；shout=false 表示当前处于非定投状态——
 // 只陈述事实、不给系统指令（2026-10-28 用户裁决：暂停只是他在这只基金上的定投状态，不是指示）
@@ -3322,7 +3380,11 @@ function renderStockSection(){
     const sAlert = profitAlertFromRet(ret, s);
     const sDip = dipAlertStock(s);
     const dCostStock = dipAlertStockCost(s, dev);
-    const sPlan = sDip ? stockAddPlan(stockMvOf(s), parseFloat(s.currentPrice)||0, sDip.add, stockLotSizeOf(s)) : null;
+    const sDipGate = stockDipGate(sDip, dCostStock, stockPadSet(s));
+    const sPlan = sDipGate.light ? stockAddPlan(stockMvOf(s), parseFloat(s.currentPrice)||0, sDip.add, stockLotSizeOf(s)) : null;
+    // 价值否决只在灯亮时标注一次（用户裁定：只标注，不改指令）；取不到本批次行 = null = 未判定，不等于合格
+    const vRow = valueState ? valueState.rows.get(String(s.code||'').trim()) || null : null;
+    const vetoNote = sDipGate.light ? valueDipVetoHtml(vRow, valueIndRef ? valueIndRef.byL2 : null, !!valueState) : '';
     // 止盈：档位比例 → 股数 → 整手；缺股数/现价/港股手数时不给手数，只报比例
     const sSellPlan = sAlert ? stockSellPlan(parseFloat(s.shares)||0, parseFloat(s.currentPrice)||0, sAlert.tier.sell, stockLotSizeOf(s)) : null;
     const card = document.createElement('div');
@@ -3334,19 +3396,21 @@ function renderStockSection(){
           <div class="fund-meta">${exchangeLabel(s.code)} · ${s.shares||0} 股 · 市值 ${fmtMoney(stockMvOf(s))}${s.priceDate?' · '+s.priceDate:''} · ${profitMetaText(sAlert, nextTier)}</div>
         </div>
         <div class="fund-return ${ret!==null&&ret>=0?'ret-pos':'ret-neg'}">${fmtPct(ret,1)}</div>
-        ${sAlert?'<span class="trade-badge sell">🔴 止盈</span>':''}${(sDip||dCostStock)?'<span class="trade-badge buy">🟢 抄底</span>':''}
+        ${sAlert?'<span class="trade-badge sell">🔴 止盈</span>':''}${sDipGate.light?'<span class="trade-badge buy">🟢 抄底</span>':''}
         <div class="chevron" id="schev-${s.id}">▸</div>
       </div>
       <div class="signal-strip">
         <span class="signal-pill ${pillCls}">买入参考·${tier}</span>
         ${scorePillHtml(s)}
-        ${valuePillHtml(valueState ? valueState.rows.get(String(s.code||'').trim()) : null)}
+        ${valuePillHtml(vRow)}
         ${researchPillHtml(fundamentals.get(String(s.code)) || null)}
       </div>
       <div class="signal-price">现价 ${s.currentPrice||'--'}${s.ma60?' · MA60 '+Number(s.ma60).toFixed(2):''}${s.ma120?' · MA120 '+Number(s.ma120).toFixed(2):''}</div>
       ${dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0)}
       ${sAlert ? stockSellBannerHtml(sAlert, sSellPlan) + tierDoneBtnHtml('stock', s.id, sAlert.tier.ret) : ''}
-      ${sDip || dCostStock ? stockBuyBannerHtml(sDip, sPlan, dCostStock) : ''}
+      ${sDipGate.needPad ? dipPadHintHtml() : ''}
+      ${sDipGate.light ? stockBuyBannerHtml(sDip, sPlan, dCostStock) : ''}
+      ${vetoNote}
       <div class="fund-body" id="sbody-${s.id}"></div>
     `;
     list.appendChild(card);

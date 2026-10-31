@@ -32,6 +32,13 @@
 //   阈值来源：股票表单新增 targetDrawdown（每只自填；未填/脏值/0 一律不亮，不替用户定数）。
 //   仲裁：股票没有「暂停定投」状态可用，改吃本邮件既有的「明显高位」边界 dev≥+10%（与 stockTierLabel 同一条线），
 //   高位只陈述事实、不发买入指令；抄底提示横幅与基金并入同一条，卡片 📈 行只追加事实，不动 👉 动作行。
+// v12 (2026-10-31): 股票抄底改「双信号 AND」——回撤腿与安全垫腿必须同时突破才亮灯（页面同批）。
+//   用户裁定四条：未填安全垫 ⇒ 不亮但显式提示补填（该字段本日才上线，存量持仓一律为空，
+//   静默闭灯会被读成「市场没给机会」）；口径沿用 52 周高点回撤 ≥30%（全历史最深回撤 −30% 几乎恒真，无区分度）；
+//   否决三态只在页面标注、不改任何买入指令；AND 规则双端同步。
+//   顺带修一处 v11 遗留：股票行 🟢 标志此前只看回撤腿，明显高位（dev≥+10%）照样打印「建议买入 N 手」，
+//   与同页「只陈述事实」的口径自相矛盾——现在与页面横幅同吃 sGate.shout。
+//   灯灭时回撤事实与缺腿原因仍写进 📈 行（事实保留，收紧的只是灯）。
 // 触发方式: POST /functions/v1/daily-update，Authorization: Bearer <DAILY_UPDATE_TOKEN>
 // 可选 body: {"force":true} 无变化也发送报告
 const GOAL_DEFAULT = 200000;
@@ -259,16 +266,36 @@ export function fundDipAlert(f: any, ret: number | null, sigLevel?: string): Fun
 // 股票侧没有「暂停定投」可仲裁，改用页面同一条均线档边界：dev≥+10% 即本邮件的「明显高位」，只陈述不喊买。
 export const STOCK_HOT_DEV = 10;
 
-export function stockDipAlert(s: any, ret: number | null, dev: number | null): FundDip | null {
+// 安全垫是否已设：与页面 stockPadSet 同判据——未填/空白/脏值/0 都算没设。
+// 0 尤其危险：会被当成 -0% 门槛，任何浮亏都算跌穿，比不设更糟；负数与小数是有效阈值。
+export function stockPadSet(s: { targetDrawdown?: unknown } | null | undefined): boolean {
   const raw = s ? s.targetDrawdown : undefined;
-  if (raw === null || raw === undefined || raw === '') return null;
+  if (raw === null || raw === undefined || String(raw).trim() === '') return false;
   const tdd = parseFloat(String(raw));
-  if (!Number.isFinite(tdd) || tdd === 0) return null;
+  return Number.isFinite(tdd) && tdd !== 0;
+}
+
+export function stockDipAlert(s: any, ret: number | null, dev: number | null): FundDip | null {
+  if (!stockPadSet(s)) return null;
+  const tdd = parseFloat(String(s.targetDrawdown));
   if (ret === null || !Number.isFinite(ret)) return null;
   const target = -Math.abs(tdd);
   if (ret > target + 1e-9) return null;
   const hot = dev !== null && Number.isFinite(dev) && dev >= STOCK_HOT_DEV;
   return { ret, target, shout: !hot };
+}
+
+// 双信号仲裁（2026-10-31 用户裁决，与页面 stockDipGate 逐格一致）：
+// 市场腿（52 周回撤 ≥30%）与安全垫腿必须同时突破才亮抄底灯；
+// 回撤已达标而安全垫压根没设 ⇒ 灯灭但 needPad=true，邮件必须点名缺的是哪一腿，不许静默。
+export type StockDipGate = { light: boolean; needPad: boolean; shout: boolean };
+export function stockDipGate(
+  ladder: { dd: number; add: number } | null,
+  cost: { shout?: boolean } | null,
+  padSet: boolean,
+): StockDipGate {
+  const light = !!(ladder && cost);
+  return { light, needPad: !!(ladder && !padSet && !cost), shout: light ? !!(cost && cost.shout) : false };
 }
 
 // 回撤加仓阶梯：与页面 DD_STEPS（index.html 2562）同表；改表必须双端同步，否则页面与邮件给出不同加仓档。
@@ -1032,7 +1059,9 @@ export async function handle(
           const nextTier = tiers.find((x: any) => !taken.includes(x.ret)) || null;
           const sLadder = dipLadder(s, close, readPct(s));
           const sCostDip = stockDipAlert(s, ret, dev);
-          if (sCostDip) (stockDips[userId] = stockDips[userId] || []).push({ code, name: sname || code, ...sCostDip });
+          const sGate = stockDipGate(sLadder, sCostDip, stockPadSet(s));
+          // 2026-10-31 用户裁决：双腿（回撤达档 + 跌穿安全垫）齐备才进顶部抄底横幅，与页面同判据
+          if (sGate.light) (stockDips[userId] = stockDips[userId] || []).push({ code, name: sname || code, ...sCostDip! });
           // 手数：A股主板固定 100；港股按标的读（腾讯行情），取不到再回落页面同步来的 lotSize，仍无则不给金额
           const lotSize = /^\d{5}$/.test(code) ? ((await fetchHkLot(code)) || Number(s.lotSize) || 0) : 100;
           const addPlan = sLadder ? stockAddPlan(sMv, close, sLadder.add, lotSize) : null;
@@ -1041,7 +1070,8 @@ export async function handle(
           (stockReport[userId] = stockReport[userId] || []).push({
             code, name: sname || code, close, date: k.date, dev, ma60, ma120, below,
             tier: tier.label + (dev === null ? '（数据不足）' : ''), ret, nextTier,
-            sell, sellPlan, ladder: sLadder, addPlan, costDip: sCostDip
+            sell, sellPlan, ladder: sLadder, addPlan, costDip: sCostDip,
+            dipLight: sGate.light, padMissing: sGate.needPad, dipShout: sGate.shout
           });
 
           await post('stock_history', 'user_id,code,price_date', [{ user_id: userId, code, price_date: k.date, close, ma20, ma60, ma120, dev_pct: dev }]);
@@ -1215,13 +1245,19 @@ export async function handle(
         const tierNote = r.sell ? '｜已达到 +' + r.sell.tier.ret + '% 止盈档'
           : (r.nextTier ? '｜下一止盈档 +' + r.nextTier.ret + '%（卖' + r.nextTier.sell + '%）' : '');
         const profitStr = r.ret === null ? '' : ('当前收益率 ' + fmtSigned(r.ret) + tierNote);
+        // 灯灭时回撤事实仍要如实写出，并点名缺的是哪一腿（2026-10-31 裁决：双腿齐备才亮，缺数据不许静默）
+        const legNote = (r.ladder && !r.dipLight)
+          ? ('｜较52周高点回撤 ' + r.ladder.dd.toFixed(1) + '% 已达 +' + r.ladder.add + '% 档，'
+            + (r.padMissing ? '但未设目标跌幅安全垫（请到页面股票卡片补填）' : '但收益未跌穿成本安全垫')
+            + '——抄底需双腿齐备')
+          : '';
         return '<li style="margin:12px 0;padding:10px 12px;background:#FAF8F2;border-radius:8px;">'
           + '<b>【' + r.code + '】' + r.name + '</b> ' + retChipHtml(r.ret)
           + sellMarkHtml(r.sell, r.sellPlan)
-          + buyMarkHtml(r.ladder, r.addPlan)
+          + buyMarkHtml(r.dipShout ? r.ladder : null, r.dipShout ? r.addPlan : null)
           + '<div style="margin:4px 0;">📊 买入参考：<b style="color:#A87C2E;">' + r.tier + '</b> · 现价 ' + r.close + '（' + r.date + '）</div>'
           + '<div style="color:#707C8C;font-size:13px;">📈 较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (trendStr ? '｜' + trendStr : '')
-          + (r.costDip ? '｜收益 ' + fmtSigned(r.costDip.ret) + ' 已跌破 ' + String(r.costDip.target) + '% 成本安全垫' : '') + '</div>'
+          + (r.costDip ? '｜收益 ' + fmtSigned(r.costDip.ret) + ' 已跌破 ' + String(r.costDip.target) + '% 成本安全垫' : '') + legNote + '</div>'
           + '<div style="color:#707C8C;font-size:13px;">💰 ' + profitStr + '</div>'
           + '<div style="margin-top:4px;">👉 ' + actionStr + '</div>'
           + '</li>';

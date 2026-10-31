@@ -341,7 +341,7 @@ Deno.test("接线：抄底横幅真进邮件，位置在日期之后、持仓概
   }
 });
 
-Deno.test("接线：股票成本安全垫并进同一条抄底横幅，卡片 📈 行同步写出安全垫", async () => {
+Deno.test("接线：股票只有安全垫腿（没有 52 周高点）→ 2026-10-31 起不再进抄底横幅，📈 行仍陈述事实", async () => {
   const real = globalThis.fetch;
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
@@ -349,7 +349,7 @@ Deno.test("接线：股票成本安全垫并进同一条抄底横幅，卡片 �
     if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
     if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
     if (url.includes("dingtou_state")) {
-      // 股票 成本 24 / 收盘 18.07 ⇒ -24.7%，安全垫填 24 ⇒ 早已跌穿（夹具离边界有富余，不受浮点影响）
+      // 股票 成本 24 / 收盘 18.07 ⇒ -24.7%，安全垫填 24 ⇒ 成本腿已破；但 high52w 缺失 ⇒ 回撤腿无从成立
       return Promise.resolve(Response.json([{
         user_id: "u1",
         data: {
@@ -367,16 +367,90 @@ Deno.test("接线：股票成本安全垫并进同一条抄底横幅，卡片 �
   try {
     const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
     assertEquals(res.status, 200);
+    assertEquals(mail.includes("抄底提示"), false, "单腿（只有成本腿）不得点亮顶部横幅：" + mail.slice(0, 600));
+    const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
+    assertEquals(stockSeg.includes("已跌破 -24% 成本安全垫"), true, "灯灭了事实也不能消失（📈 行仍要如实写出安全垫）");
+    assertEquals(stockSeg.includes("建议买入"), false, "灯灭时不得留 🟢 买入标志");
+    assertEquals(/NaN|Infinity/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("接线：回撤与安全垫双腿齐备才点亮横幅，股票进同一条并给整手指令", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      // 成本 24 / 收盘 18.07 ⇒ 收益 -24.7%（破 -24 安全垫）；高点 30 ⇒ 回撤 39.8%（+40 档）——双腿同时成立
+      // 500 股 ⇒ 目标 3,614 元 = 2 手，指令要有可成交单位
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: {
+          funds: [],
+          stocks: [{ code: "600031", name: "三一重工", shares: 500, cost: 24, targetDrawdown: 24, high52w: 30 }],
+        },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
     const iDip = mail.indexOf("抄底提示");
     const iHold = mail.indexOf("持仓概览");
-    assertEquals(iDip > 0, true, "只有成本腿的股票也必须点亮横幅（纯函数绿了不代表接上了）");
+    assertEquals(iDip > 0, true, "双腿齐备必须点亮横幅（纯函数绿了不代表接上了）");
     assertEquals(iDip < iHold, true, "位置：抄底横幅仍在持仓概览之前");
     const banner = mail.slice(iDip, iHold);
     assertEquals(banner.includes("【600031】三一重工 收益 -24.7% 已跌破 -24% 安全垫"), true, "股票要和基金一样并进这一条：" + banner.slice(0, 400));
     assertEquals(banner.includes("建议加仓/多投"), true, "均线只有 3 根 ⇒ dev null ⇒ 不按高位压指令");
     const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
     assertEquals(stockSeg.includes("已跌破 -24% 成本安全垫"), true, "📈 行如实补一句事实，与横幅同判据");
+    assertEquals(stockSeg.includes("建议买入 2 手（200 股）"), true, "灯亮时整手指令照旧：" + stockSeg.slice(0, 400));
     assertEquals(/NaN|Infinity/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("接线：回撤达档但未设安全垫 → 灯灭，但必须写明缺的是哪一腿（不许静默）", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      // 没有 targetDrawdown（今天之前的存量持仓都是这样）：回撤 39.8% 已达标，但双信号规则下不能亮
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: { funds: [], stocks: [{ code: "600031", name: "三一重工", shares: 500, cost: 24, high52w: 30 }] },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    assertEquals(mail.includes("抄底提示"), false, "缺安全垫时顶部横幅不得出现（缺数据不等于有信号）");
+    const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
+    assertEquals(stockSeg.includes("未设目标跌幅安全垫"), true, "必须点名缺的是哪一腿：" + stockSeg.slice(0, 500));
+    assertEquals(stockSeg.includes("39.8%"), true, "回撤事实仍要如实写出（灯灭了也不能把数据藏起来）");
+    assertEquals(stockSeg.includes("建议买入"), false, "灯灭就不许留 🟢 买入标志");
+    assertEquals(/NaN|Infinity|undefined/.test(mail), false);
   } finally {
     globalThis.fetch = real;
     logs.restore();
@@ -390,10 +464,11 @@ Deno.test("接线：股票踩线但均线明显高位（dev≥+10%）→ 横幅�
     const method = (init?.method ?? "GET").toUpperCase();
     if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
     if (url.includes("dingtou_state")) {
-      // 成本 30 / 收盘 20 ⇒ -33.3%，安全垫 30 ⇒ 已跌穿：事实要说，指令不许发
+      // 成本 30 / 收盘 20 ⇒ -33.3%，安全垫 30 ⇒ 已跌穿；高点 30 ⇒ 回撤 33.3% ⇒ 双腿齐备，灯亮
+      // 本条只验高位仲裁：事实要说，指令不许发
       return Promise.resolve(Response.json([{
         user_id: "u1",
-        data: { stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 30, targetDrawdown: 30 }] },
+        data: { stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 30, targetDrawdown: 30, high52w: 30 }] },
       }]));
     }
     if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
@@ -415,6 +490,10 @@ Deno.test("接线：股票踩线但均线明显高位（dev≥+10%）→ 横幅�
     const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
     assertEquals(stockSeg.includes("已跌破 -30% 成本安全垫"), true);
     assertEquals(stockSeg.includes("明显高位"), true, "区间口径与仲裁同源（都是 dev≥+10%）");
+    // 断言用「加仓档」而不是「建议买入」：本例 100 股 × 收盘 20 ⇒ 目标额不足一手，
+    // 旧断言写的 建议买入 恰好是那条话术不会出现的分支，变异检验会假活（整条 🟢 标志才是判据）
+    assertEquals(stockSeg.includes("加仓档"), false, "明显高位时整条 🟢 标志（含档位与金额）必须收掉");
+    assertEquals(stockSeg.includes("→ 建议买入"), false, "卡片 🟢 标志同样被高位压住（灯亮≠一定发指令）");
     assertEquals(/NaN|Infinity/.test(mail), false);
   } finally {
     globalThis.fetch = real;
@@ -1229,7 +1308,7 @@ Deno.test("邮件接线：非暂停的基金与股票在回撤达 +30% 加仓档
         user_id: "u1",
         data: {
           funds: [{ fundCode: "000001", name: "测试基金", benchmark: "", marketValue: 160, shares: 100, costBasis: 1.6, high52w: 2.5 }],
-          stocks: [{ code: "600031", name: "三一重工", shares: 500, cost: 20, high52w: 30 }],
+          stocks: [{ code: "600031", name: "三一重工", shares: 500, cost: 20, high52w: 30, targetDrawdown: 8 }],
         },
       }]));
     }
@@ -1409,7 +1488,7 @@ Deno.test("邮件接线：股票回撤加仓档折算成整手——写出手数
       // 500 股 × 18.07 = 9,035；高点 30 ⇒ 回撤 39.8%（+40% 档）⇒ 目标 3,614 元，正合 2 手
       return Promise.resolve(Response.json([{
         user_id: "u1",
-        data: { funds: [], stocks: [{ code: "600031", name: "三一重工", shares: 500, cost: 30, high52w: 30 }] },
+        data: { funds: [], stocks: [{ code: "600031", name: "三一重工", shares: 500, cost: 30, high52w: 30, targetDrawdown: 30 }] },
       }]));
     }
     if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
@@ -1439,7 +1518,7 @@ Deno.test("邮件接线：目标加仓额不足一手时如实说「不足 1 手
       // 100 股 × 18.07 = 1,807；+40% ⇒ 目标 722.8 元 < 一手 1,807 元
       return Promise.resolve(Response.json([{
         user_id: "u1",
-        data: { funds: [], stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 30, high52w: 30 }] },
+        data: { funds: [], stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 30, high52w: 30, targetDrawdown: 30 }] },
       }]));
     }
     if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
@@ -1471,7 +1550,7 @@ Deno.test("邮件接线：港股按腾讯行情里的每手股数折算——000
       // 2000 股 × 18.07 = 36,140；高点 30 ⇒ 回撤 39.8%（+40 档）⇒ 目标 14,456；每手 400 股 = 7,228 元 ⇒ 2 手
       return Promise.resolve(Response.json([{
         user_id: "u1",
-        data: { funds: [], stocks: [{ code: "00005", name: "汇丰控股", shares: 2000, cost: 30, high52w: 30 }] },
+        data: { funds: [], stocks: [{ code: "00005", name: "汇丰控股", shares: 2000, cost: 30, high52w: 30, targetDrawdown: 30 }] },
       }]));
     }
     if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
@@ -1502,7 +1581,7 @@ Deno.test("邮件接线：腾讯手数取不到时回落状态里存的 lotSize�
     if (url.includes("dingtou_state")) {
       return Promise.resolve(Response.json([{
         user_id: "u1",
-        data: { funds: [], stocks: [{ code: "00005", name: "汇丰控股", shares: 2000, cost: 30, high52w: 30, lotSize: 400 }] },
+        data: { funds: [], stocks: [{ code: "00005", name: "汇丰控股", shares: 2000, cost: 30, high52w: 30, targetDrawdown: 30, lotSize: 400 }] },
       }]));
     }
     if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
@@ -1532,7 +1611,7 @@ Deno.test("邮件接线：港股手数全网都取不到时只给「建议买入
     if (url.includes("dingtou_state")) {
       return Promise.resolve(Response.json([{
         user_id: "u1",
-        data: { funds: [], stocks: [{ code: "00005", name: "汇丰控股", shares: 2000, cost: 30, high52w: 30 }] },
+        data: { funds: [], stocks: [{ code: "00005", name: "汇丰控股", shares: 2000, cost: 30, high52w: 30, targetDrawdown: 30 }] },
       }]));
     }
     if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
@@ -1545,7 +1624,8 @@ Deno.test("邮件接线：港股手数全网都取不到时只给「建议买入
   try {
     const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
     assertEquals(res.status, 200);
-    const seg = mail.slice(mail.indexOf("【00005】"));
+    const seg = mail.slice(mail.indexOf("💹 股票分析"));
+    assertEquals(seg.includes("【00005】"), true, "断言锚在股票卡片段，顶部横幅/概览里也出现过【00005】");
     assertEquals(seg.includes("建议买入"), true);
     assertEquals(seg.includes("手（"), false, "手数未知时不许出现手数");
     assertEquals(/¥\d/.test(seg), false, "手数未知时不许给金额");
@@ -1567,7 +1647,7 @@ Deno.test("邮件接线：A股每手固定 100 股，不去腾讯多打一次行
     if (url.includes("dingtou_state")) {
       return Promise.resolve(Response.json([{
         user_id: "u1",
-        data: { funds: [], stocks: [{ code: "600031", name: "三一重工", shares: 500, cost: 30, high52w: 30 }] },
+        data: { funds: [], stocks: [{ code: "600031", name: "三一重工", shares: 500, cost: 30, high52w: 30, targetDrawdown: 30 }] },
       }]));
     }
     if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));

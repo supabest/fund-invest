@@ -48,7 +48,7 @@ const EXPORT_NAMES = [
   'marketLevel', 'DD_STEPS', 'ddAddPct', 'pctTier', 'drawdownFrom', 'dualSignal',
   'computeDeviation', 'effectiveCost', 'computeReturn', 'themeMarketValue', 'themeCapAmount', 'fundBenchKey',
   'baseSignal', 'evalFundSignal', 'fmtWan', 'fmtSigned', 'fmtMoney', 'fmtPct',
-  'dipAlertStock', 'dipAlertFundLadder', 'dipAlertStockCost', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml', 'stockLotSizeOf', 'lotFromTxQuote',
+  'dipAlertStock', 'dipAlertFundLadder', 'dipAlertStockCost', 'stockPadSet', 'stockDipGate', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml', 'stockLotSizeOf', 'lotFromTxQuote', 'dipPadHintHtml',
   'sellBannerHtml', 'stockSellPlan', 'stockSellBannerHtml',
   'profitNextTier', 'profitMetaText',
   'supabaseBaseUrl',
@@ -126,6 +126,14 @@ export type StockCostDip = { kind: string; ret: number; target: number; shout: b
 export const dipAlertStockCost = F.dipAlertStockCost as (
   s: { targetDrawdown?: unknown; cost?: unknown; currentPrice?: unknown }, dev: number | null,
 ) => StockCostDip | null;
+/** 安全垫是否已设：未填/空白/脏值/0 ⇒ false；负数与小数 ⇒ true（判据按绝对值）。 */
+export const stockPadSet = F.stockPadSet as (s: { targetDrawdown?: unknown }) => boolean;
+/** 双信号仲裁（2026-10-31 裁决）：回撤腿与安全垫腿同时突破才亮灯；未设安全垫要显式报出来。 */
+export type StockDipGate = { light: boolean; needPad: boolean; shout: boolean };
+export const stockDipGate = F.stockDipGate as (
+  ladder: { dd: number; add: number } | null, cost: StockCostDip | null, padSet: boolean,
+) => StockDipGate;
+export const dipPadHintHtml = F.dipPadHintHtml as () => string;
 export const buyBannerHtml = F.buyBannerHtml as (
   list: Array<{ kind: string; dd?: number; add?: number; ret?: number; target?: number; shout: boolean }>,
 ) => string;

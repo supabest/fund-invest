@@ -10,7 +10,7 @@ import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueT
   EM_VAL_MIN_ROWS, valPctSupported, emValUrl, valuationPctFromRows, valPctCaliber, valPctNaWhy,
   valPctNeedFetch, valPctApply, valPctHtml, valPctMerge, valPctLockNote,
   incomeChannelOf, renderIncomeList, foldCardHtml,
-  valueMedian, valueIndStatsOf, ROIC_GATE_PCT } from "./value_leg_logic.ts";
+  valueMedian, valueIndStatsOf, ROIC_GATE_PCT, valueVetoClass, valueDipVetoHtml } from "./value_leg_logic.ts";
 
 const row = { code:'600031', name:'潍柴', vq:78.4, tier:'qualified', confidence:'A', vetoed:false,
   owner_yield:6.2, margin_of_safety:4.35, cn10y:1.85, roic_med:18.0, v_moat:80, v_cash:70, v_safety:75, v_health:66,
@@ -1044,6 +1044,70 @@ Deno.test('价值否决文案：其它否决原因原样可见（不被护城河
   const h = valueGateHtml({ ...row, tier: 'vetoed', veto_reasons: ['资不抵债', '商誉/净资产>50%'] });
   assertEquals(h.includes('资不抵债'), true);
   assertEquals(h.includes('商誉/净资产&gt;50%'), true);   // 原因串经 escapeHtml，'>' 变实体
+});
+
+// ── 2026-10-31：抄底亮灯时要标出「价值硬否决是哪一类」（用户裁定：只标注，不改买入指令）──
+// 三态按质地/行业中位分：普通＝资不抵债/商誉/烧钱加杠杆这类与行业无关的硬伤；
+// 双否决＝护城河否决且本股 ROIC 不高于同行业中位（绝对门槛里、同行比较里都输）；
+// 单否决＝护城河否决但本股高于同行业中位（只被 8% 资本成本锚这一条绝对门槛压住）。
+Deno.test('否决分类：质地硬伤优先于护城河；仅护城河按行业中位分双/单；相等归双', () => {
+  const ind = { '汽车零部件': { med: 6.9, n: 215 } };
+  const moat = (roicMed: number | null, reasons: string[] = ['无护城河证据']) =>
+    ({ ...row, tier: 'vetoed', vetoed: true, veto_reasons: reasons, ths_l2: '汽车零部件', roic_med: roicMed });
+  assertEquals(valueVetoClass(moat(5.2), ind), 'dual', 'ROIC 5.2 < 同业中位 6.9 ⇒ 双否决');
+  assertEquals(valueVetoClass(moat(7.65), ind), 'single', 'ROIC 7.65 > 同业中位 ⇒ 只是没过绝对门槛');
+  assertEquals(valueVetoClass(moat(6.9), ind), 'dual', '恰好等于中位要归双：不许把「和同行一样差」说成「比同行好」');
+  assertEquals(valueVetoClass(moat(null), ind), 'fin', 'roic_med 为 NA 是金融股（引擎按 ROE 对标）');
+  assertEquals(valueVetoClass(moat(5.2), null), 'noind', '没有行业参照时不硬分双/单');
+  assertEquals(valueVetoClass(moat(5.2, ['无护城河证据'] ), { '汽车零部件': { med: null, n: 0 } }), 'noind', '参照行为脏值同样不硬分');
+  assertEquals(valueVetoClass(moat(5.2, ['无护城河证据', '资不抵债']), ind), 'quality', '硬伤与护城河并存 ⇒ 以质地硬伤为准');
+  assertEquals(valueVetoClass(moat(5.2, ['资不抵债', '商誉/净资产>50%']), ind), 'quality');
+  assertEquals(valueVetoClass({ ...row, veto_reasons: [] }, ind), null, '没被否决就没有分类');
+  assertEquals(valueVetoClass({ ...row, tier: 'vetoed', vetoed: true, veto_reasons: [] }, ind), null,
+    '引擎不变式是「否决⇔原因非空」；真出现空原因按未判定处理，绝不编造分类');
+  assertEquals(valueVetoClass(null, ind), null, '无数据不是「没被否决」，由调用点单独显示未判定');
+});
+
+Deno.test('抄底标注：三态各一行、只标注夹不带指令；无本批次数据写「未判定」，批次未生成不刷这行', () => {
+  const ind = { '汽车零部件': { med: 6.9, n: 215 } };
+  const base = { ...row, tier: 'vetoed', vetoed: true, ths_l2: '汽车零部件', roic_cur: 3.1 };
+  const dual = valueDipVetoHtml({ ...base, veto_reasons: ['无护城河证据'], roic_med: 5.2 }, ind, true);
+  assertMatch(dual, /价值 硬否决·行业双否决/);
+  assertMatch(dual, /本股 ROIC 5\.2% ≤ 同行业中位 6\.9%/);
+  const single = valueDipVetoHtml({ ...base, veto_reasons: ['无护城河证据'], roic_med: 7.65 }, ind, true);
+  assertMatch(single, /价值 硬否决·行业单否决/);
+  assertMatch(single, /高于同行业中位/);
+  assertMatch(single, /8% 资本成本门槛/);
+  const quality = valueDipVetoHtml({ ...base, veto_reasons: ['资不抵债', '商誉/净资产>50%'], roic_med: 5.2 }, ind, true);
+  assertMatch(quality, /价值 硬否决·质地/);
+  assertMatch(quality, /资不抵债/);
+  assertMatch(quality, /商誉/);
+  const fin = valueDipVetoHtml({ ...base, veto_reasons: ['无护城河证据'], roic_med: null }, ind, true);
+  assertMatch(fin, /价值 硬否决·金融 ROE 口径/);
+  assertEquals(fin.includes('ROIC'), false, '金融股不是 ROIC 口径，别混着写');
+  const noInd = valueDipVetoHtml({ ...base, veto_reasons: ['无护城河证据'], roic_med: 5.2 }, null, true);
+  assertMatch(noInd, /价值 硬否决·无同行业参照/);
+  // 用户裁定「只标注，不改指令」：这一行里不得出现任何买入话术，也不得出现被压掉的指令残留
+  for (const one of [dual, single, quality, fin, noInd]) {
+    assertEquals(/建议买入|可分批|加仓|→/.test(one), false, '否决标注里不许出现指令话术：' + one);
+    assertEquals(/NaN|null%|undefined/.test(one), false, '缺值不许冒充数值：' + one);
+  }
+  // 无数据两态必须分开（展示层铁律：缺数据不等于结论）
+  assertMatch(valueDipVetoHtml(null, ind, true), /本批次无该股数据（未判定）/);
+  assertEquals(valueDipVetoHtml(null, ind, false), '', '价值批次尚未生成时不刷这行，页面别处已有降级语');
+  assertEquals(valueDipVetoHtml(row, ind, true), '', '合格行无标注');
+  assertEquals(valueDipVetoHtml(undefined, ind, true), '');
+});
+
+Deno.test('接线守卫：否决标注接在抄底灯亮之后，且行业参照确实传进纯函数', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  assertEquals(/const vetoNote = sDipGate\.light \? valueDipVetoHtml\(vRow, /.test(html), true,
+    '否决标注必须在灯亮时才算（灯灭不该多出这一行）');
+  assertEquals(html.includes('${vetoNote}'), true, '标注必须渲染进卡片');
+  assertEquals(/const vRow = valueState \? valueState\.rows\.get\(/.test(html), true,
+    '标注必须按 code 取本批次价值行（取不到就是未判定）');
+  assertEquals(/valueDipVetoHtml\(vRow, valueIndRef \? valueIndRef\.byL2 : null, !!valueState\)/.test(html), true,
+    '行业参照与「批次是否已生成」必须由调用点传入，纯函数不读全局');
 });
 
 Deno.test('ROIC_GATE_PCT 与引擎 ROIC_GATE 同值（改一端必须改另一端）', async () => {
