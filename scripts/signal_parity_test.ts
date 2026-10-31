@@ -22,6 +22,7 @@ import {
   stockAddPlan as pageStockAddPlan, stockBuyBannerHtml as pageStockBuyBanner,
   stockSellPlan as pageStockSellPlan, stockSellBannerHtml as pageStockSellBanner,
   sellBannerHtml as pageSellBanner,
+  profitNextTier as pageProfitNextTier, profitMetaText as pageProfitMetaText,
   stockLotSizeOf as pageStockLotSizeOf, lotFromTxQuote as pageLotFromTxQuote,
   supabaseBaseUrl as pageSupabaseBaseUrl,
 } from "./signal_parity.ts";
@@ -503,6 +504,54 @@ Deno.test("基金止盈横幅维持百分比份额（基金份额可小数赎回
   const a = { ret: 36.4, tier: { ret: 20, sell: 10 } };
   assert(pageSellBanner(a).includes("建议卖出 10% 份额"), pageSellBanner(a));
   assert(D.sellMarkHtml(a).includes("建议卖出 10% 份额"), D.sellMarkHtml(a));
+});
+
+Deno.test("止盈下一档：只取高于当前收益率且未执行的档，执行过的档不回头", () => {
+  const tiers = PAGE_TIERS;
+  assertEquals(pageProfitNextTier(tiers, [], 83), null, "83% 已越过全部默认档，不存在「下一档 +20%」");
+  assertEquals(pageProfitNextTier(tiers, [], 50), { ret: 60, sell: 30 });
+  assertEquals(pageProfitNextTier(tiers, [60], 50), { ret: 80, sell: 50 }, "60 档已执行则顺延到 80");
+  assertEquals(pageProfitNextTier(tiers, [20, 40, 60, 80], 83), null);
+  assertEquals(pageProfitNextTier(tiers, [], null), { ret: 20, sell: 10 }, "无收益数据时维持旧行为：报第一档");
+  assertEquals(pageProfitNextTier(tiers, [20], 83), null, "高收益下已执行档不影响「没有下一档」");
+});
+
+Deno.test("止盈卡片元信息：已达档写「已达」，无下一档写「已执行完毕」，不再出现自相矛盾的下一档", () => {
+  assertEquals(pageProfitMetaText({ ret: 83, tier: { ret: 80, sell: 50 } }, null), "已达 +80% 止盈档（卖50%）");
+  assertEquals(pageProfitMetaText(null, { ret: 100, sell: 25 }), "下一止盈档 +100%（卖25%）");
+  assertEquals(pageProfitMetaText(null, null), "各止盈档已执行完毕");
+});
+
+Deno.test("股票止盈横幅：剩余 1 手时不再给百分比分批指令，改给「继续持有或清仓」", () => {
+  const a = { ret: 83, tier: { ret: 80, sell: 50 } };
+  const plan = pageStockSellPlan(100, 31.1, 50, 100)!;
+  assertEquals(plan.shares, 100, "计划要带上总股数");
+  assertEquals(plan.price, 31.1, "计划要带现价（清仓金额用）");
+  const h = pageStockSellBanner(a, plan);
+  assert(h.includes("剩余 1 手（100 股）"), h);
+  assert(h.includes("已无法按 50% 分批"), h);
+  assert(h.includes("继续持有"), h);
+  assert(h.includes("清仓 100 股"), h);
+  assert(h.includes("¥3,110"), h);
+  assert(h.includes("建议卖出") === false, "不足一手不给卖出指令");
+  assert(!/卖 0 手|至少 1 手/.test(h), h);
+  const many = pageStockSellBanner({ ret: 36, tier: { ret: 20, sell: 10 } }, pageStockSellPlan(1500, 10, 10, 100));
+  assert(many.includes("建议卖出 1 手（100 股）"), "多手场景保持原口径：" + many);
+});
+
+Deno.test("接线守卫：止盈卡片下一档与已达档走纯函数；标记执行写 profitTaken 并保存", async () => {
+  const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
+  assert(/const nextTier = nextProfitTier\(f, ret\);/.test(html), "基金卡片必须把当前收益率传给 nextProfitTier");
+  assert(/profitMetaText\(alert, nextTier\)/.test(html), "基金卡片元信息必须用 profitMetaText 消歧");
+  assert(/const nextTier = nextProfitTier\(s, ret\);/.test(html), "股票卡片必须把当前收益率传给 nextProfitTier");
+  assert(/profitMetaText\(sAlert, nextTier\)/.test(html), "股票卡片元信息必须用 profitMetaText 消歧");
+  assert(/function markProfitTaken\(/.test(html), "必须有标记已执行的写入口");
+  assert(/item\.profitTaken = Array\.from\(new Set\(/.test(html), "标记执行必须写入 profitTaken（去重）");
+  assert(/const add = tiers\.filter\(t => t\.ret <= hit\)\.map\(t => t\.ret\);/.test(html), "标记高档时更低档也要一并写入");
+  const markFn = (html.match(/function markProfitTaken\([\s\S]*?\n\}/) || [""])[0];
+  assert(markFn.includes("await saveFunds();") && markFn.includes("await saveStocks();"),
+    "标记后必须落盘并云同步（股票与基金两条路都在）");
+  assert(/data-ret="\$\{Number\(ret\)\}"/.test(html), "按钮必须携带档位 ret");
 });
 
 Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对的函数（防「测试绿但生产走岔路」）", async () => {

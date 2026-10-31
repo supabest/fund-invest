@@ -50,6 +50,7 @@ const EXPORT_NAMES = [
   'baseSignal', 'evalFundSignal', 'fmtWan', 'fmtSigned', 'fmtMoney', 'fmtPct',
   'dipAlertStock', 'dipAlertFundLadder', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml', 'stockLotSizeOf', 'lotFromTxQuote',
   'sellBannerHtml', 'stockSellPlan', 'stockSellBannerHtml',
+  'profitNextTier', 'profitMetaText',
   'supabaseBaseUrl',
   '__setState',
 ];
@@ -134,6 +135,7 @@ export const stockBuyBannerHtml = F.stockBuyBannerHtml as (
 ) => string;
 export type SellPlan = {
   wantShares: number; lots: number; qty: number; amount: number; lotSize: number; ratio: number; sell: number;
+  shares: number; price: number;
 };
 export type SellAlert = { ret: number; tier: { ret: number; sell: number } };
 export const stockSellPlan = F.stockSellPlan as (
@@ -143,6 +145,17 @@ export const stockSellPlan = F.stockSellPlan as (
 export const sellBannerHtml = F.sellBannerHtml as (a: SellAlert) => string;
 /** 股票止盈横幅：整手折算；plan 为 null 表示缺股数/现价，只陈述比例。 */
 export const stockSellBannerHtml = F.stockSellBannerHtml as (a: SellAlert, plan: SellPlan | null) => string;
+/** 下一止盈档：只看高于当前收益率且未执行的档；已越过全部档返回 null。 */
+export const profitNextTier = F.profitNextTier as (
+  tiers: { ret: number; sell: number }[] | null | undefined,
+  taken: number[] | null | undefined,
+  ret: number | null | undefined,
+) => { ret: number; sell: number } | null;
+/** 卡片元信息：已达档 / 下一档 / 全部执行完，三选一，避免「+83% 还写下一档 +20%」。 */
+export const profitMetaText = F.profitMetaText as (
+  alert: SellAlert | null | undefined,
+  next: { ret: number; sell: number } | null | undefined,
+) => string;
 
 /** 注入前端全局态（funds 影响 themeMarketValue；themeCaps/goal 影响 themeCapAmount）。 */
 export const setState = F.__setState as (next: { funds?: { theme?: string; marketValue?: number }[]; themeCaps?: Record<string, number>; goal?: number }) => void;

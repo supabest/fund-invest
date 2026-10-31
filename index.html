@@ -130,6 +130,8 @@
   .trade-badge{align-self:center; margin-right:8px; font-size:11px; font-weight:600; padding:2px 8px; border-radius:99px; border:1px solid; white-space:nowrap;}
   .trade-badge.sell{border-color:var(--brick); color:var(--brick);}
   .trade-badge.buy{border-color:var(--jade); color:var(--jade);}
+  .tier-done-btn{margin:-4px 16px 10px 16px; padding:4px 10px; border-radius:6px; border:1px solid var(--line-strong); background:transparent; color:var(--muted); font-size:11.5px; cursor:pointer; font-family:var(--sans);}
+  .tier-done-btn:hover{color:var(--brick); border-color:var(--brick);}
 
   .add-fund-btn{width:100%; padding:14px; border-radius:10px; border:1px dashed var(--line-strong); background:transparent; color:var(--muted); font-size:13px; cursor:pointer; font-family:var(--sans); margin-top:6px;}
 
@@ -662,6 +664,17 @@ async function saveStocks(){
   try{ await store.set(STOCKS_KEY, JSON.stringify(stocks)); }
   catch(e){ showToast('保存失败，请重试'); }
   pushCloud();
+}
+// 止盈档「已执行」的写入口：只改 profitTaken，不动股数；更低档一并标记（已不可能补卖）
+async function markProfitTaken(kind, id, hit){
+  const item = (kind === 'fund' ? funds : stocks).find(x => String(x.id) === String(id));
+  if(!item) return;
+  const tiers = (item.profitTiers && item.profitTiers.length) ? item.profitTiers : DEFAULT_TIERS;
+  const add = tiers.filter(t => t.ret <= hit).map(t => t.ret);
+  item.profitTaken = Array.from(new Set((item.profitTaken || []).concat(add)));
+  if(kind === 'fund') await saveFunds(); else await saveStocks();
+  render();
+  showToast('已标记 +' + hit + '% 档已执行');
 }
 async function saveSettings(){
   try{ await store.set(SETTINGS_KEY, JSON.stringify({goal, stockCap})); }
@@ -2597,10 +2610,9 @@ function profitTiersText(f){
   const t = (f.profitTiers && f.profitTiers.length) ? f.profitTiers : DEFAULT_TIERS;
   return t.map(x=>x.ret+':'+x.sell).join(',');
 }
-function nextProfitTier(f){
-  const t = (f.profitTiers && f.profitTiers.length) ? f.profitTiers : DEFAULT_TIERS;
-  const taken = f.profitTaken || [];
-  return t.find(x=>!taken.includes(x.ret)) || null;
+// 必须带当前收益率：只找「高于当前收益且未执行」的档，否则 +83% 仍会把 +20% 当下一档（2026-10-31）
+function nextProfitTier(f, ret){
+  return profitNextTier(f.profitTiers, f.profitTaken, ret);
 }
 
 // 沪深300 日K（JSONP，本地浏览器可用；artifact 沙盒会被 CSP 拦截）
@@ -2978,7 +2990,7 @@ function stockSellPlan(shares, price, sellPct, lotSize){
   const wantShares = sh * pct / 100;
   const lots = Math.floor(wantShares / lot + 1e-9);
   const qty = lots * lot;
-  return { wantShares, lots, qty, amount: qty * px, lotSize: lot, ratio: qty / sh * 100, sell: pct };
+  return { wantShares, lots, qty, amount: qty * px, lotSize: lot, ratio: qty / sh * 100, sell: pct, shares: sh, price: px };
 }
 // A股主板每手固定 100 股；港股每手股数因股而异（拆股会变），只认按标的取回来并存下的 lotSize，
 // 没有就返回 0（上层据此不给金额，而不是按 100 编一个错的）
@@ -3026,10 +3038,34 @@ function sellBannerHtml(a){
 function stockSellBannerHtml(a, plan){
   const head = `⚠️ 达到止盈档：${a.ret>=0?'+':''}${a.ret.toFixed(1)}% ≥ +${a.tier.ret}% 档 → `;
   if(!plan) return `<div class="trade-banner sell">${head}建议卖出 ${a.tier.sell}%（持仓/现价/每手股数不全，未折算手数）</div>`;
+  // 剩余仓位不足一手：百分比分批已无执行性，只给事实与二选一（2026-10-31 用户裁决）
+  if(plan.lots < 1 && plan.shares <= plan.lotSize){
+    const pos = plan.shares === plan.lotSize ? ('1 手（' + plan.shares + ' 股）') : (plan.shares + ' 股（不足 1 手）');
+    const clear = plan.shares === plan.lotSize ? '整手清仓' : '清仓';
+    return `<div class="trade-banner sell">${head}剩余 ${pos}，已无法按 ${a.tier.sell}% 分批；继续持有，或${clear} ${plan.shares} 股 ≈ ${fmtMoney(plan.shares * plan.price)}</div>`;
+  }
   if(plan.lots < 1) return `<div class="trade-banner sell">${head}目标卖出 ${a.tier.sell}%（约 ${Math.round(plan.wantShares)} 股），不足 1 手（每手 ${plan.lotSize} 股）</div>`;
   return `<div class="trade-banner sell">${head}建议卖出 ${plan.lots} 手（${plan.qty} 股）≈ ${fmtMoney(plan.amount)}（占持仓 ${plan.ratio.toFixed(1)}%，目标 ${a.tier.sell}%）</div>`;
 }
+// 下一档只看「高于当前收益率」且未执行的档；无收益数据时维持旧行为（报第一档）
+function profitNextTier(tiers, taken, ret){
+  const t = (tiers && tiers.length) ? tiers : DEFAULT_TIERS;
+  const tk = taken || [];
+  const r = (ret === null || ret === undefined || isNaN(Number(ret))) ? null : Number(ret);
+  return t.find(x => !tk.includes(x.ret) && (r === null || r < x.ret)) || null;
+}
+// 卡片元信息三态：已达档 / 下一档 / 全部执行完（与邮件 tierNote 同口径）
+function profitMetaText(alert, next){
+  if(alert) return '已达 +'+alert.tier.ret+'% 止盈档（卖'+alert.tier.sell+'%）';
+  if(next) return '下一止盈档 +'+next.ret+'%（卖'+next.sell+'%）';
+  return '各止盈档已执行完毕';
+}
 // ==== LADDER_PURE_END ====
+
+// 标记本档已执行：写入 profitTaken（含更低档），随整包云同步，邮件端下一封自动跟随
+function tierDoneBtnHtml(kind, id, ret){
+  return `<button class="tier-done-btn" data-kind="${kind}" data-id="${escapeHtml(String(id))}" data-ret="${Number(ret)}">标记本档已执行</button>`;
+}
 
 function pillClass(level){
   switch(level){
@@ -3159,11 +3195,11 @@ function renderFundList(){
     if(mktOn && sig.multiplier>0){
       sig.reasons = sig.reasons.concat(['大盘参考：'+BENCHMARKS[bkey].name+' '+bm.label+'（'+fmtSigned(bm.dev)+'），系数 ×'+coef]);
     }
-    const nextTier = nextProfitTier(f);
+    const alert = profitTakingAlert(f);
+    const nextTier = nextProfitTier(f, ret);
     const card = document.createElement('div');
     card.className = 'fund-card';
 
-    const alert = profitTakingAlert(f);
     const dCost = dipAlertFund(f, sig);
     const dLadder = dipAlertFundLadder(f, sig);
     const dips = [dCost, dLadder].filter(Boolean);
@@ -3172,7 +3208,7 @@ function renderFundList(){
       <div class="fund-head" data-id="${f.id}">
         <div class="fund-head-left">
           <div class="fund-name">${escapeHtml(f.name || '未命名基金')}</div>
-          <div class="fund-meta">${escapeHtml(f.theme||'未分类')}${f.isQDII?' · QDII':''} · 市值 ${fmtMoney(f.marketValue||0)}${nextTier?' · 下一止盈档 +'+nextTier.ret+'%（卖'+nextTier.sell+'%）':''}</div>
+          <div class="fund-meta">${escapeHtml(f.theme||'未分类')}${f.isQDII?' · QDII':''} · 市值 ${fmtMoney(f.marketValue||0)} · ${profitMetaText(alert, nextTier)}</div>
         </div>
         <div class="fund-return ${ret>=0?'ret-pos':'ret-neg'}">${fmtPct(ret,1)}</div>
         ${alert?'<span class="trade-badge sell">🔴 止盈</span>':''}${dips.length?'<span class="trade-badge buy">🟢 抄底</span>':''}
@@ -3184,13 +3220,15 @@ function renderFundList(){
       </div>
       <div class="signal-reason">${sig.reasons.join('；')}</div>
       ${dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0, false)}
-      ${alert ? sellBannerHtml(alert) : ''}
+      ${alert ? sellBannerHtml(alert) + tierDoneBtnHtml('fund', f.id, alert.tier.ret) : ''}
       ${dips.length ? buyBannerHtml(dips) : ''}
       <div class="fund-body" id="body-${f.id}"></div>
     `;
     list.appendChild(card);
 
     card.querySelector('.fund-head').addEventListener('click', ()=> toggleFundBody(f.id));
+    const tierBtn = card.querySelector('.tier-done-btn');
+    if(tierBtn) tierBtn.addEventListener('click', async (ev)=>{ ev.stopPropagation(); await markProfitTaken(tierBtn.dataset.kind, tierBtn.dataset.id, Number(tierBtn.dataset.ret)); });
   });
 }
 
@@ -3259,7 +3297,7 @@ function renderStockSection(){
     const dev = (s.ma60 && s.ma120) ? ((s.currentPrice-s.ma60)/s.ma60 + (s.currentPrice-s.ma120)/s.ma120)/2*100 : (s.ma60 ? (s.currentPrice-s.ma60)/s.ma60*100 : null);
     const tier = stockTierLabel(dev);
     const ret = (parseFloat(s.cost)>0 && s.currentPrice>0) ? (s.currentPrice-parseFloat(s.cost))/parseFloat(s.cost)*100 : null;
-    const nextTier = nextProfitTier(s);    const pillCls = dev===null ? 'pill-normal' : (dev<=-5 ? 'pill-strong' : (dev>=3 ? 'pill-half' : 'pill-normal'));
+    const nextTier = nextProfitTier(s, ret);    const pillCls = dev===null ? 'pill-normal' : (dev<=-5 ? 'pill-strong' : (dev>=3 ? 'pill-half' : 'pill-normal'));
     const sAlert = profitAlertFromRet(ret, s);
     const sDip = dipAlertStock(s);
     const sPlan = sDip ? stockAddPlan(stockMvOf(s), parseFloat(s.currentPrice)||0, sDip.add, stockLotSizeOf(s)) : null;
@@ -3271,7 +3309,7 @@ function renderStockSection(){
       <div class="fund-head" data-sid="${s.id}">
         <div class="fund-head-left">
           <div class="fund-name">${escapeHtml(s.name || '未命名股票')}</div>
-          <div class="fund-meta">${exchangeLabel(s.code)} · ${s.shares||0} 股 · 市值 ${fmtMoney(stockMvOf(s))}${s.priceDate?' · '+s.priceDate:''}${nextTier?' · 下一止盈档 +'+nextTier.ret+'%（卖'+nextTier.sell+'%）':''}</div>
+          <div class="fund-meta">${exchangeLabel(s.code)} · ${s.shares||0} 股 · 市值 ${fmtMoney(stockMvOf(s))}${s.priceDate?' · '+s.priceDate:''} · ${profitMetaText(sAlert, nextTier)}</div>
         </div>
         <div class="fund-return ${ret!==null&&ret>=0?'ret-pos':'ret-neg'}">${fmtPct(ret,1)}</div>
         ${sAlert?'<span class="trade-badge sell">🔴 止盈</span>':''}${sDip?'<span class="trade-badge buy">🟢 抄底</span>':''}
@@ -3285,12 +3323,14 @@ function renderStockSection(){
       </div>
       <div class="signal-price">现价 ${s.currentPrice||'--'}${s.ma60?' · MA60 '+Number(s.ma60).toFixed(2):''}${s.ma120?' · MA120 '+Number(s.ma120).toFixed(2):''}</div>
       ${dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0)}
-      ${sAlert ? stockSellBannerHtml(sAlert, sSellPlan) : ''}
+      ${sAlert ? stockSellBannerHtml(sAlert, sSellPlan) + tierDoneBtnHtml('stock', s.id, sAlert.tier.ret) : ''}
       ${sDip ? stockBuyBannerHtml(sDip, sPlan) : ''}
       <div class="fund-body" id="sbody-${s.id}"></div>
     `;
     list.appendChild(card);
     card.querySelector('.fund-head').addEventListener('click', ()=> toggleStockBody(s.id));
+    const tierBtn = card.querySelector('.tier-done-btn');
+    if(tierBtn) tierBtn.addEventListener('click', async (ev)=>{ ev.stopPropagation(); await markProfitTaken(tierBtn.dataset.kind, tierBtn.dataset.id, Number(tierBtn.dataset.ret)); });
     const rp = card.querySelector('.research-pill');
     if(rp) rp.addEventListener('click', (ev)=>{
       ev.stopPropagation();

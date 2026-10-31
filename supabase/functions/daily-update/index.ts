@@ -325,7 +325,7 @@ export function stockAddPlan(mv: number, price: number, add: number, lotSize = 1
 // 股票止盈计划：档位比例 × 持仓股数 → 整手向下取整（A股 100、港股按标的读）。
 // 不足一手时 lots=0：横幅只陈述目标股数，不出「卖 0 手」或「至少 1 手」这类指令
 // （2026-10-30 用户裁决，与买入侧同一条规矩；页面 stockSellPlan 同式）
-export function stockSellPlan(shares: number, price: number, sellPct: number, lotSize = 100): { wantShares: number; lots: number; qty: number; amount: number; lotSize: number; ratio: number; sell: number } | null {
+export function stockSellPlan(shares: number, price: number, sellPct: number, lotSize = 100): { wantShares: number; lots: number; qty: number; amount: number; lotSize: number; ratio: number; sell: number; shares: number; price: number } | null {
   const sh = Number(shares) || 0;
   const px = Number(price) || 0;
   const pct = Number(sellPct) || 0;
@@ -334,7 +334,7 @@ export function stockSellPlan(shares: number, price: number, sellPct: number, lo
   const wantShares = sh * pct / 100;
   const lots = Math.floor(wantShares / lot + 1e-9);
   const qty = lots * lot;
-  return { wantShares, lots, qty, amount: qty * px, lotSize: lot, ratio: qty / sh * 100, sell: pct };
+  return { wantShares, lots, qty, amount: qty * px, lotSize: lot, ratio: qty / sh * 100, sell: pct, shares: sh, price: px };
 }
 function buyMarkHtml(l: { dd: number; add: number } | null, plan?: { want: number; lots: number; amount: number; lotSize: number; ratio: number } | null): string {
   if (!l) return '';
