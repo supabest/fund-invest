@@ -39,6 +39,13 @@
 //   顺带修一处 v11 遗留：股票行 🟢 标志此前只看回撤腿，明显高位（dev≥+10%）照样打印「建议买入 N 手」，
 //   与同页「只陈述事实」的口径自相矛盾——现在与页面横幅同吃 sGate.shout。
 //   灯灭时回撤事实与缺腿原因仍写进 📈 行（事实保留，收紧的只是灯）。
+// v13 (2026-10-31): 止盈档口径对齐页面（用户裁决 A）——sellAlert 只认「最高达标档」，该档已标记执行即整条闭嘴；
+//   旧写法扫的是「最高达标且未执行」，标记 60 后仍会回退去喊已经越过的 +40% 档（42 格对照实测 3 格不一致）。
+//   两腿的下一档不再各自 tiers.find，改调页面同款 profitNextTier(tiers, taken, ret)：加 ret 过滤后，
+//   非升序的自定义 profitTiers 也不会挑出已越过的档（默认升序档下读数不变）。
+//   达标档标记（profit_tier 落库 + 「止盈X%达标」标签）与横幅共用同一次 sellAlert 结果，杜绝两套口径。
+//   同日补齐：收益率后的档位备注三态抽成 tierNoteHtml(r)，两腿共用——股票腿此前「全部执行完」写成空串，
+//   「没有下一档了」只有基金腿和页面会说。
 // 触发方式: POST /functions/v1/daily-update，Authorization: Bearer <DAILY_UPDATE_TOKEN>
 // 可选 body: {"force":true} 无变化也发送报告
 const GOAL_DEFAULT = 200000;
@@ -321,7 +328,9 @@ export function dipLadder(
   if (pct !== null && Number.isFinite(pct) && pct >= 80) return null;
   return { dd, add: ddAddPct(dd) };
 }
-// 止盈档：与页面 profitAlertFromRet 同判据——取已触及的最高未执行档；已执行档跳过，不重复喊。
+// 止盈档：与页面 profitAlertFromRet 逐字同判据（2026-10-31 用户裁决 A）——
+// 只看「最高达标档」，该档已标记执行就整条闭嘴；绝不回退到更低的已越过档
+// （旧判据取「达标且未执行里的最高档」，+60% 且 60 档已执行时会宣布「已达到 +40%（卖20%）」，把做完的一档再喊一遍）。
 export function sellAlert(
   ret: number | null,
   f: { profitTiers?: Array<{ ret: number; sell: number }>; profitTaken?: number[] } | null | undefined,
@@ -330,8 +339,32 @@ export function sellAlert(
   const tiers = (f && f.profitTiers && f.profitTiers.length) ? f.profitTiers : DEFAULT_TIERS;
   const taken: number[] = (f && f.profitTaken) || [];
   let hit: { ret: number; sell: number } | null = null;
-  for (const t of tiers) if (ret >= t.ret && !taken.includes(t.ret)) hit = t;
-  return hit ? { ret, tier: hit } : null;
+  for (const t of tiers) if (ret >= t.ret) hit = t;
+  if (!hit || taken.includes(hit.ret)) return null;
+  return { ret, tier: hit };
+}
+// 下一止盈档：与页面 profitNextTier 逐字同判据——只看「未执行且高于当前收益」的档；
+// 邮件两腿原先各自 `tiers.find(!taken.includes)`，非升序的自定义档表会挑出已越过的档
+export function profitNextTier(
+  tiers: Array<{ ret: number; sell: number }> | null | undefined,
+  taken: number[] | null | undefined,
+  ret: number | null,
+): { ret: number; sell: number } | null {
+  const t = (tiers && tiers.length) ? tiers : DEFAULT_TIERS;
+  const tk = taken || [];
+  const r = (ret === null || ret === undefined || isNaN(Number(ret))) ? null : Number(ret);
+  return t.find((x) => !tk.includes(x.ret) && (r === null || r < x.ret)) || null;
+}
+// 收益率后面的档位备注三态：已达档 / 下一档 / 全部执行完。两腿共用同一个函数——
+// 股票腿此前第三态写成空串，「没有下一档了」这件事只有基金腿和页面会说（2026-10-31 用户裁决补齐）。
+// 判据来源始终是 sellAlert + profitNextTier，本函数只负责把三态说清楚，文案对齐页面 profitMetaText。
+export function tierNoteHtml(r: {
+  sell?: { tier: { ret: number; sell: number } } | null;
+  nextTier?: { ret: number; sell: number } | null;
+}): string {
+  if (r.sell) return '｜已达到 +' + r.sell.tier.ret + '% 止盈档';
+  if (r.nextTier) return '｜下一止盈档 +' + r.nextTier.ret + '%（卖' + r.nextTier.sell + '%）';
+  return '｜各止盈档已执行完毕';
 }
 // 名称右侧的收益率色块：赚绿亏红（与持仓概览同色）；无成本给 --，绝不吐 NaN。
 export function retChipHtml(ret: number | null): string {
@@ -964,10 +997,10 @@ export async function handle(
             if (reasons.length) (fundResume[userId] = fundResume[userId] || []).push({ code, name: fname, reasons });
           }
           const tiers = (f.profitTiers && f.profitTiers.length) ? f.profitTiers : DEFAULT_TIERS;
-          let newTier: number | null = null;
-          if (ret !== null && ret > 0) {
-            for (const t of tiers) { if (ret >= t.ret && !(f.profitTaken || []).includes(t.ret)) newTier = t.ret; }
-          }
+          // 达标档与横幅同源：sellAlert 已按「只看最高达标档、该档已执行即闭嘴」判定，
+          // 再单列一个「最高达标且未执行」的循环就会回退去喊已越过的低档（2026-10-31 裁决 A）
+          const sell = sellAlert(ret, f);
+          const newTier: number | null = sell ? sell.tier.ret : null;
           const label = sig.label + (newTier !== null ? '｜止盈' + newTier + '%达标' : '');
           fundSignalRows.push({ user_id: userId, code, label, profit_tier: newTier, benchmark: fundBenchKey(f), updated_at: new Date().toISOString() });
 
@@ -977,14 +1010,13 @@ export async function handle(
           // 与页面同款：系数只看参考档位是否就绪，不看 multiplier（暂停时 multiplier=0，金额本就为 0）
           const coef = bl ? bl.coef : 1;
           const amount = (parseFloat(f.baseAmount) || 0) * sig.multiplier * coef;
-          const taken = f.profitTaken || [];
-          const nextTier = tiers.find((x: any) => !taken.includes(x.ret)) || null;
+          const nextTier = profitNextTier(tiers, f.profitTaken || [], ret);
           (fundReport[userId] = fundReport[userId] || []).push({
             code, name: fname, nav: close, navDate,
             dev, ma60, ma120, streak, label: sig.label, multiplier: sig.multiplier,
             amount: Math.round(amount), benchmarkName: bl ? BENCH[bkey].name : '', benchmarkLevel: bl ? bl.label : '',
             ret, nextTier, resumeReady: !!sig.resumeReady, theme: f.theme || '',
-            sell: sellAlert(ret, f), ladder
+            sell, ladder
           });
 
           await post('fund_nav_history', 'user_id,code,nav_date', [{ user_id: userId, code, nav_date: navDate, nav: close, ma60, ma120, dev_pct: dev, above_ma60: above }]);
@@ -1049,14 +1081,14 @@ export async function handle(
           }
           const tier = baseSignalLabel(dev);
           const tiers = (s.profitTiers && s.profitTiers.length) ? s.profitTiers : DEFAULT_TIERS;
-          let newTier: number | null = null;
-          if (ret !== null && ret > 0) { for (const t of tiers) { if (ret >= t.ret && !(s.profitTaken || []).includes(t.ret)) newTier = t.ret; } }
+          // 与基金腿同源：达标档交给 sellAlert 判定，不再自己扫「最高达标且未执行」的档
+          const sell = sellAlert(ret, s);
+          const newTier: number | null = sell ? sell.tier.ret : null;
 
           stockSignalRows.push({ user_id: userId, code, tier: tier.label + (dev === null ? '（数据不足）' : ''), profit_tier: newTier, updated_at: new Date().toISOString() });
 
           const sname = s.name || k.name || '';
-          const taken = s.profitTaken || [];
-          const nextTier = tiers.find((x: any) => !taken.includes(x.ret)) || null;
+          const nextTier = profitNextTier(tiers, s.profitTaken || [], ret);
           const sLadder = dipLadder(s, close, readPct(s));
           const sCostDip = stockDipAlert(s, ret, dev);
           const sGate = stockDipGate(sLadder, sCostDip, stockPadSet(s));
@@ -1065,7 +1097,6 @@ export async function handle(
           // 手数：A股主板固定 100；港股按标的读（腾讯行情），取不到再回落页面同步来的 lotSize，仍无则不给金额
           const lotSize = /^\d{5}$/.test(code) ? ((await fetchHkLot(code)) || Number(s.lotSize) || 0) : 100;
           const addPlan = sLadder ? stockAddPlan(sMv, close, sLadder.add, lotSize) : null;
-          const sell = sellAlert(ret, s);
           const sellPlan = sell ? stockSellPlan(sShare, close, sell.tier.sell, lotSize) : null;
           (stockReport[userId] = stockReport[userId] || []).push({
             code, name: sname || code, close, date: k.date, dev, ma60, ma120, below,
@@ -1215,9 +1246,8 @@ export async function handle(
         else if (r.label === '加强') actionStr = '维持或加大定投节奏';
         else if (r.dev === null) actionStr = '自动获取净值/均线数据后即可分析';
         else actionStr = '按计划定投，持有不动';
-        // 已达档时不再写「下一止盈档」：nextTier 取的是第一个未执行档，+60% 时会写成 +20%，与上方卖出标志自相矛盾
-        const tierNote = r.sell ? '｜已达到 +' + r.sell.tier.ret + '% 止盈档'
-          : (r.nextTier ? '｜下一止盈档 +' + r.nextTier.ret + '%（卖' + r.nextTier.sell + '%）' : '｜各止盈档已执行完毕');
+        // 档位备注（已达 / 下一档 / 全部执行完）与股票腿共用 tierNoteHtml，别再就地写三元式
+        const tierNote = tierNoteHtml(r);
         const profitStr = r.ret === null ? '' : ('当前收益率 ' + fmtSigned(r.ret) + tierNote);
         return '<li style="margin:12px 0;padding:10px 12px;background:#FAF8F2;border-radius:8px;">'
           + '<b>【' + r.code + '】' + r.name + '</b> ' + retChipHtml(r.ret)
@@ -1242,8 +1272,7 @@ export async function handle(
         else if (r.dev < 10) actionStr = '偏高区，不再追高，关注止盈档';
         else actionStr = '明显高位，浮盈分批止盈锁定收益';
         const trendStr = r.ma60 ? (r.below > 0 ? '已连续 ' + r.below + ' 日低于60日线' : (r.above > 0 ? '已连续 ' + r.above + ' 日站上60日线' : '')) : '';
-        const tierNote = r.sell ? '｜已达到 +' + r.sell.tier.ret + '% 止盈档'
-          : (r.nextTier ? '｜下一止盈档 +' + r.nextTier.ret + '%（卖' + r.nextTier.sell + '%）' : '');
+        const tierNote = tierNoteHtml(r);
         const profitStr = r.ret === null ? '' : ('当前收益率 ' + fmtSigned(r.ret) + tierNote);
         // 灯灭时回撤事实仍要如实写出，并点名缺的是哪一腿（2026-10-31 裁决：双腿齐备才亮，缺数据不许静默）
         const legNote = (r.ladder && !r.dipLight)

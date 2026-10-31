@@ -50,7 +50,7 @@ const EXPORT_NAMES = [
   'baseSignal', 'evalFundSignal', 'fmtWan', 'fmtSigned', 'fmtMoney', 'fmtPct',
   'dipAlertStock', 'dipAlertFundLadder', 'dipAlertStockCost', 'stockPadSet', 'stockDipGate', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml', 'stockLotSizeOf', 'lotFromTxQuote', 'dipPadHintHtml',
   'sellBannerHtml', 'stockSellPlan', 'stockSellBannerHtml',
-  'profitNextTier', 'profitMetaText',
+  'profitNextTier', 'profitMetaText', 'profitAlertFromRet',
   'supabaseBaseUrl',
   '__setState',
 ];
@@ -169,6 +169,11 @@ export const profitMetaText = F.profitMetaText as (
   alert: SellAlert | null | undefined,
   next: { ret: number; sell: number } | null | undefined,
 ) => string;
+/** 止盈命中判定：只看最高达标档；该档已执行返回 null（绝不回退到更低的已越过档）。 */
+export const profitAlertFromRet = F.profitAlertFromRet as (
+  ret: number | null,
+  item: { profitTiers?: { ret: number; sell: number }[]; profitTaken?: number[] },
+) => SellAlert | null;
 
 /** 注入前端全局态（funds 影响 themeMarketValue；themeCaps/goal 影响 themeCapAmount）。 */
 export const setState = F.__setState as (next: { funds?: { theme?: string; marketValue?: number }[]; themeCaps?: Record<string, number>; goal?: number }) => void;

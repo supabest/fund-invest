@@ -2961,16 +2961,6 @@ function evalFundSignal(f){
 }
 // ==== SIGNAL_PURE_END ====
 
-// 止盈命中判定（通用）：基金传 computeReturn(f)，股票卡自带 ret 传同口径值
-function profitAlertFromRet(ret, item){
-  if(ret===null || ret<=0) return null;
-  const tiers = item.profitTiers && item.profitTiers.length ? item.profitTiers : DEFAULT_TIERS;
-  let hit = null;
-  for(const t of tiers){ if(ret >= t.ret) hit = t; }
-  if(!hit) return null;
-  if(item.profitTaken && item.profitTaken.includes(hit.ret)) return null;
-  return {tier:hit, ret};
-}
 function profitTakingAlert(f){
   return profitAlertFromRet(computeReturn(f), f);
 }
@@ -3125,6 +3115,18 @@ function stockSellBannerHtml(a, plan){
   }
   if(plan.lots < 1) return `<div class="trade-banner sell">${head}目标卖出 ${a.tier.sell}%（约 ${Math.round(plan.wantShares)} 股），不足 1 手（每手 ${plan.lotSize} 股）</div>`;
   return `<div class="trade-banner sell">${head}建议卖出 ${plan.lots} 手（${plan.qty} 股）≈ ${fmtMoney(plan.amount)}（占持仓 ${plan.ratio.toFixed(1)}%，目标 ${a.tier.sell}%）</div>`;
+}
+// 止盈命中判定（通用）：基金传 computeReturn(f)，股票卡自带 ret 传同口径值。
+// 判据＝只看最高达标档，该档已执行则整条闭嘴（不回退到更低的已越过档）；入 LADDER_PURE 是为了让
+// signal_parity 矩阵能把邮件端 sellAlert 逐格钉在同一判据上。
+function profitAlertFromRet(ret, item){
+  if(ret===null || ret<=0) return null;
+  const tiers = item.profitTiers && item.profitTiers.length ? item.profitTiers : DEFAULT_TIERS;
+  let hit = null;
+  for(const t of tiers){ if(ret >= t.ret) hit = t; }
+  if(!hit) return null;
+  if(item.profitTaken && item.profitTaken.includes(hit.ret)) return null;
+  return {tier:hit, ret};
 }
 // 下一档只看「高于当前收益率」且未执行的档；无收益数据时维持旧行为（报第一档）
 function profitNextTier(tiers, taken, ret){

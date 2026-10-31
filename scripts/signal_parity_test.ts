@@ -25,6 +25,7 @@ import {
   stockSellPlan as pageStockSellPlan, stockSellBannerHtml as pageStockSellBanner,
   sellBannerHtml as pageSellBanner,
   profitNextTier as pageProfitNextTier, profitMetaText as pageProfitMetaText,
+  profitAlertFromRet as pageProfitAlert,
   stockLotSizeOf as pageStockLotSizeOf, lotFromTxQuote as pageLotFromTxQuote,
   supabaseBaseUrl as pageSupabaseBaseUrl,
 } from "./signal_parity.ts";
@@ -666,6 +667,51 @@ Deno.test("止盈卡片元信息：已达档写「已达」，无下一档写「
   assertEquals(pageProfitMetaText(null, null), "各止盈档已执行完毕");
 });
 
+// 2026-10-31 用户裁决 A：邮件端 sellAlert 的「回退到更低的已越过档」改掉——
+// 页面只看最高达标档，该档标记已执行就整条闭嘴；邮件曾从「达标且未执行」里取最高档，
+// 于是 taken=[40] 且收益 +50% 时宣布「已达到 +20% 止盈档（卖10%）」，把早就越过的档包装成待办指令。
+Deno.test("止盈达标判定双端同判据（42 格）：最高达标档已执行即闭嘴，绝不回退到更低的已越过档", () => {
+  const TAKENS = [[], [20], [40], [20, 40], [20, 40, 60], [40, 80], [20, 40, 60, 80]];
+  const RETS = [5, 25, 36, 50, 65, 85];
+  // deno-lint-ignore no-explicit-any
+  const key = (x: any) => (x ? "已达+" + x.tier.ret + "/卖" + x.tier.sell : "闭嘴");
+  const bad: string[] = [];
+  for (const taken of TAKENS) {
+    for (const ret of RETS) {
+      const item = { profitTaken: taken };
+      const p = key(pageProfitAlert(ret, item));
+      const e = key(D.sellAlert(ret, item));
+      if (p !== e) bad.push("taken=[" + taken.join(",") + "] ret=+" + ret + "% → 页面 " + p + " / 邮件 " + e);
+    }
+  }
+  assertEquals(bad, [], "双端 " + bad.length + "/" + TAKENS.length * RETS.length + " 格不一致：\n" + bad.join("\n"));
+});
+
+// 邮件端 nextTier 必须吃同一个 profitNextTier（含 ret 过滤）：数组非升序时旧 find 会挑出已越过的档。
+Deno.test("下一止盈档双端同判据：邮件必须调 profitNextTier，ret 过滤防住非升序自定义档", () => {
+  assertEquals(typeof D.profitNextTier, "function", "邮件端必须导出 profitNextTier（两腿 nextTier 走它，不许各自 find）");
+  const TIER_SETS = [PAGE_TIERS, [{ ret: 60, sell: 30 }, { ret: 20, sell: 10 }]];
+  for (const tiers of TIER_SETS) {
+    for (const taken of [[], [20], [40], [20, 40], [20, 40, 60, 80]]) {
+      for (const ret of [null, 5, 50, 65, 85]) {
+        const item = { profitTiers: tiers, profitTaken: taken };
+        const p = pageProfitNextTier(tiers, taken, ret);
+        const e = D.profitNextTier(tiers, taken, ret);
+        assertEquals(e, p, "nextTier 不一致 tiers=" + JSON.stringify(tiers) + " taken=[" + taken + "] ret=" + ret);
+        if (p && ret !== null) assert(p.ret > ret, "下一档 " + p.ret + "% 不高于当前收益 " + ret + "%（ret 过滤失守）");
+        // 三态（已达 / 下一档 / 收尾）双端必须同态：邮件 tierNote 的分支条件与此一致
+        const state = (hit: unknown, next: unknown) => (hit ? "已达" : next ? "下一档" : "收尾");
+        assertEquals(state(D.sellAlert(ret, item), e), state(D.sellAlert(ret, item), p),
+          "双端三态分叉：taken=[" + taken + "] ret=" + ret);
+        const pageText = pageProfitMetaText(D.sellAlert(ret, item), p);
+        assertEquals(state(D.sellAlert(ret, item), p),
+          pageText.startsWith("已达") ? "已达" : pageText.startsWith("下一") ? "下一档" : "收尾",
+          "页面文案与三态判据不自洽：" + pageText);
+      }
+    }
+  }
+});
+
 Deno.test("股票止盈横幅：剩余 1 手时不再给百分比分批指令，改给「继续持有或清仓」", () => {
   const a = { ret: 83, tier: { ret: 80, sell: 50 } };
   const plan = pageStockSellPlan(100, 31.1, 50, 100)!;
@@ -696,6 +742,51 @@ Deno.test("接线守卫：止盈卡片下一档与已达档走纯函数；标记
   assert(markFn.includes("await saveFunds();") && markFn.includes("await saveStocks();"),
     "标记后必须落盘并云同步（股票与基金两条路都在）");
   assert(/data-ret="\$\{Number\(ret\)\}"/.test(html), "按钮必须携带档位 ret");
+});
+
+Deno.test("接线守卫：邮件两腿的达标档与下一档都必须走 sellAlert/profitNextTier，禁止各自扫表", async () => {
+  const server = await Deno.readTextFile(new URL("../supabase/functions/daily-update/index.ts", import.meta.url));
+  // 达标档必须复用 sellAlert（页面口径：只看最高达标档，已执行即闭嘴），
+  // 一旦退回「扫最高达标且未执行」的循环，标记 60 后就会重新喊出已越过的 40%
+  assertEquals((server.match(/const newTier: number \| null = sell \? sell\.tier\.ret : null;/g) || []).length,
+    2, "基金腿与股票腿都要从 sellAlert 派生达标档");
+  assert(/const sell = sellAlert\(ret, f\);/.test(server), "基金腿必须先算 sellAlert 再派生 newTier");
+  assert(/const sell = sellAlert\(ret, s\);/.test(server), "股票腿必须先算 sellAlert 再派生 newTier");
+  assert(/for \(const t of tiers\) \{ if \(ret >= t\.ret && !\(f\.profitTaken/.test(server) === false,
+    "基金腿不得保留旧的「最高达标且未执行」扫描循环（回退已越过档）");
+  assert(/for \(const t of tiers\) \{ if \(ret >= t\.ret && !\(s\.profitTaken/.test(server) === false,
+    "股票腿不得保留旧的「最高达标且未执行」扫描循环");
+  // 下一档必须走纯函数：旧写法只看 profitTaken、不看当前收益，非升序自定义档会挑出已越过的档
+  assert(/export function profitNextTier\(/.test(server), "邮件端必须导出 profitNextTier");
+  assert(/const nextTier = profitNextTier\(tiers, f\.profitTaken \|\| \[\], ret\);/.test(server),
+    "基金腿下一档必须走 profitNextTier 并传当前收益率");
+  assert(/const nextTier = profitNextTier\(tiers, s\.profitTaken \|\| \[\], ret\);/.test(server),
+    "股票腿下一档必须走 profitNextTier 并传当前收益率");
+  assert(/tiers\.find\(\(x: any\) => !taken\.includes\(x\.ret\)\)/.test(server) === false,
+    "两腿不得再各自 tiers.find 下一档");
+  assert(/const taken = (f|s)\.profitTaken \|\| \[\];/.test(server) === false,
+    "下一档改用纯函数后，局部 taken 变量应随之删除（留着说明还有手写扫描）");
+  // 卡片横幅与「止盈X%达标」标记必须来自同一次判定，不许各算一次（算两次就能算出两套口径）
+  assert(/sell:\s*sellAlert\(/.test(server) === false,
+    "报告行的 sell 必须复用同一个 sellAlert 结果，不能再就地调用一次");
+});
+
+Deno.test("接线守卫：档位备注三态两腿共用一个函数，「执行完毕」态与页面同文案", async () => {
+  const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
+  const server = await Deno.readTextFile(new URL("../supabase/functions/daily-update/index.ts", import.meta.url));
+  assert(/export function tierNoteHtml\(/.test(server), "档位备注要抽成可测函数并导出");
+  assertEquals((server.match(/const tierNote = tierNoteHtml\(r\);/g) || []).length, 2,
+    "基金腿与股票腿必须调用同一个 tierNoteHtml(r)（各自手写就会漂成两套话术）");
+  // 每句档位话术在整个文件里只许出现一次：出现在 tierNoteHtml 内 = 1；某条腿又手写一遍 = 2（就是漂移的开始）
+  assertEquals((server.match(/'｜已达到 \+'/g) || []).length, 1, "已达档话术只准写在 tierNoteHtml 里");
+  assertEquals((server.match(/'｜下一止盈档 \+'/g) || []).length, 1, "下一档话术只准写在 tierNoteHtml 里");
+  assertEquals((server.match(/各止盈档已执行完毕/g) || []).length, 1, "第三态只准写在 tierNoteHtml 里");
+  // 第三态（全部执行完）此前只有基金腿和页面有，股票腿留白——邮件与页面必须说同一句话
+  const done = "各止盈档已执行完毕";
+  assert(new RegExp("function tierNoteHtml[\\s\\S]{0,400}?" + done).test(server),
+    "「执行完毕」态必须由共用的 tierNoteHtml 给出，不是某条腿临时补的字符串");
+  assert(new RegExp("function profitMetaText[\\s\\S]{0,300}?" + done).test(html),
+    "页面这一态仍是同一句文案（邮件与页面不许各说各话）");
 });
 
 Deno.test("接线守卫：股票安全垫有输入框、保存写 s.targetDrawdown、页面与邮件都走双腿仲裁", async () => {

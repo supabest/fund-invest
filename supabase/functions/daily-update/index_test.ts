@@ -10,7 +10,7 @@ Deno.env.set("SUPABASE_URL", "https://fake.supabase.co");
 Deno.env.set("SB_SERVICE_KEY", "svc-placeholder");
 const { handle, holdingsSummaryHtml, fundDipAlert, dipBannerHtml, runRow, txSource, parseTxKline, klineFailNote,
   ddAddPct, drawdownFrom, dipLadder, sellAlert, retChipHtml, baseSignalLabel,
-  evalFundSignalServer, stockAddPlan, lotFromTxQuote } = await import("./index.ts");
+  evalFundSignalServer, stockAddPlan, lotFromTxQuote, profitNextTier } = await import("./index.ts");
 
 const SB = "https://fake.supabase.co";
 const TOKEN = "test-token";
@@ -1197,6 +1197,19 @@ Deno.test("sellAlert：达到止盈档且未执行才报，已执行不重复报
   assertEquals(sellAlert(null, f), null, "算不出收益率不报");
   assertEquals(sellAlert(12, { ...f, profitTaken: [10] }), null, "该档已执行过");
   assertEquals(sellAlert(25, { ...f, profitTaken: [10] }), { ret: 25, tier: { ret: 20, sell: 30 } }, "跳过已执行档继续往上判");
+  // 2026-10-31 用户裁决 A：判据只看「最高达标档」，它已执行就整条闭嘴——绝不回退到更低的已越过档
+  assertEquals(sellAlert(25, { ...f, profitTaken: [20] }), null, "最高达标档 20 已执行，不得回退去喊 +10% 档");
+  assertEquals(sellAlert(45, { ...f, profitTaken: [35] }), null, "最高达标档 35 已执行，不得回退去喊 +20% 档");
+});
+
+Deno.test("profitNextTier（邮件侧）：与页面同判据，非升序自定义档也不给出已越过的档", () => {
+  assertEquals(typeof profitNextTier, "function", "邮件端必须导出 profitNextTier，两腿 nextTier 走它");
+  const tiers = [{ ret: 60, sell: 30 }, { ret: 20, sell: 10 }];
+  assertEquals(profitNextTier(tiers, [], 65), null, "65% 已越过 60 档，数组乱序也不许报「下一档 +60%」");
+  assertEquals(profitNextTier(tiers, [], 50), { ret: 60, sell: 30 });
+  assertEquals(profitNextTier(null, [20], 25), { ret: 40, sell: 20 }, "默认档表：25% 时下一档是未执行且更高的 40");
+  assertEquals(profitNextTier(null, [20, 40, 60, 80], 85), null, "全部执行完 ⇒ 收尾文案");
+  assertEquals(profitNextTier(null, [], null), { ret: 20, sell: 10 }, "算不出收益时维持报第一档");
 });
 
 Deno.test("retChipHtml：赚绿亏砖红、无成本显示 --，绝不吐 NaN", () => {
@@ -1287,6 +1300,94 @@ Deno.test("邮件接线：达止盈档打「建议卖出」，基金与股票名
     const fundSeg = mail.slice(mail.indexOf("【000001】"), mail.indexOf("💹 股票分析"));
     assertEquals(fundSeg.includes("已达到 +60% 止盈档"), true, "已达标就写已达标");
     assertEquals(fundSeg.includes("下一止盈档"), false, "已达 60% 档时不许再写「下一止盈档 +20%」自相矛盾");
+    assertEquals(/NaN|Infinity/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+// 2026-10-31 用户裁决 A：最高达标档标记「已执行」后，整条止盈提示闭嘴并顺延到未来的档；
+// 邮件端旧判据会回退到更低的已越过档（+60% 且 60 档已执行 ⇒ 宣布「已达到 +40%（卖20%）」，
+// 把早就做完的一档当成待办指令再喊一遍）。基金腿与股票腿同一条规矩。
+Deno.test("邮件接线：最高达标档已执行则闭嘴顺延，不得回退去喊已越过的低档（基金+股票双腿）", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (url.includes("dingtou_state")) {
+      // 基金 成本 1.00 / 净值 1.60 ⇒ +60.0%；股票 成本 11.20 / 收盘 18.07 ⇒ +61.3%
+      // 两腿都把默认 60% 档标记为已执行 ⇒ 最高达标档闭嘴，下一档应是 80%（卖 50%）
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: {
+          funds: [{ fundCode: "000001", name: "测试基金", benchmark: "", marketValue: 160, shares: 100, costBasis: 1, profitTaken: [60] }],
+          stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 11.2, profitTaken: [60] }],
+        },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    const fundSeg = mail.slice(mail.indexOf("📊 基金分析"), mail.indexOf("💹 股票分析"));
+    const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
+    for (const [leg, seg] of [["基金", fundSeg], ["股票", stockSeg]] as [string, string][]) {
+      assertEquals(seg.includes("已达到 +40%"), false, leg + "腿回退去喊已越过的 40% 档：" + seg.slice(0, 400));
+      assertEquals(seg.includes("已达到 +20%"), false, leg + "腿回退去喊已越过的 20% 档");
+      assertEquals(seg.includes("下一止盈档 +80%（卖50%）"), true, leg + "腿应顺延到未执行且更高的 80% 档：" + seg.slice(0, 400));
+      assertEquals(seg.includes("建议卖出"), false, leg + "腿已执行档不得再发卖出指令");
+    }
+    assertEquals(/NaN|Infinity/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+// 2026-10-31 用户「补齐」裁决：股票腿在「无达标档且无下一档」时此前打印空串，
+// 基金腿与页面都写「各止盈档已执行完毕」——三态里最后一态不许只在一条腿上存在。
+Deno.test("邮件接线：全部止盈档执行完毕后，基金腿与股票腿都如实写「各止盈档已执行完毕」（股票腿此前留白）", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("pingzhongdata")) return Promise.resolve(new Response(PZ_TEXT, { status: 200 }));
+    if (url.includes("dingtou_state")) {
+      // 基金 +60.0% / 股票 +61.3%，四档全标已执行 ⇒ 两腿都既无达标档也无下一档
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: {
+          funds: [{ fundCode: "000001", name: "测试基金", benchmark: "", marketValue: 160, shares: 100, costBasis: 1, profitTaken: [20, 40, 60, 80] }],
+          stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 11.2, profitTaken: [20, 40, 60, 80] }],
+        },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    const fundSeg = mail.slice(mail.indexOf("📊 基金分析"), mail.indexOf("💹 股票分析"));
+    const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
+    for (const [leg, seg] of [["基金", fundSeg], ["股票", stockSeg]] as [string, string][]) {
+      assertEquals(seg.includes("各止盈档已执行完毕"), true, leg + "腿必须说出「没有下一档」这件事，不许留白：" + seg.slice(0, 500));
+      assertEquals(seg.includes("下一止盈档"), false, leg + "腿已全部执行完，不该再有下一档");
+      assertEquals(seg.includes("已达到 +"), false, leg + "腿执行过的档不得再报达标");
+      assertEquals(seg.includes("建议卖出"), false, leg + "腿不得再发卖出指令");
+    }
     assertEquals(/NaN|Infinity/.test(mail), false);
   } finally {
     globalThis.fetch = real;
