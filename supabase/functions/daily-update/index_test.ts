@@ -10,7 +10,9 @@ Deno.env.set("SUPABASE_URL", "https://fake.supabase.co");
 Deno.env.set("SB_SERVICE_KEY", "svc-placeholder");
 const { handle, holdingsSummaryHtml, fundDipAlert, dipBannerHtml, runRow, txSource, parseTxKline, klineFailNote,
   ddAddPct, drawdownFrom, dipLadder, sellAlert, retChipHtml, baseSignalLabel,
-  evalFundSignalServer, stockAddPlan, lotFromTxQuote, profitNextTier } = await import("./index.ts");
+  evalFundSignalServer, stockAddPlan, lotFromTxQuote, profitNextTier,
+  calendarSectionHtml, fetchDisclosureCalendar, calPeriods, cstDateStr,
+  CAL_WINDOW_DAYS, CAL_SOON_DAYS } = await import("./index.ts");
 
 const SB = "https://fake.supabase.co";
 const TOKEN = "test-token";
@@ -1843,6 +1845,248 @@ Deno.test("邮件接线：A股每手固定 100 股，不去腾讯多打一次行
     assertEquals(res.status, 200);
     assertEquals(urls.some(u => u.includes("qt.gtimg.cn")), false, "A股手数固定 100，无需额外请求");
     assertEquals(mail.includes("建议买入 2 手（200 股）≈ ¥3,614（占持仓 40.0%）"), true);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+// ── 财报日历（2026-11-01 用户裁定 R3）：邮件端小节、取数形态与降级路径 ──
+// 判据本体在 index.html 的 CAL_PURE 块，双端逐场景比对已由 scripts/calendar_logic_test.ts 钉住；
+// 这里只覆盖邮件端特有的三件事：小节文案与排序、东财 filter 的实际出站形态、取数挂掉不许拖挂邮件。
+
+function calItem(over: Record<string, unknown>) {
+  return {
+    code: "600031", date: "2026-11-03", kind: "appoint" as const, changed: false,
+    fromDate: null, label: "2026 三季报", daysTo: 2, name: "三一重工", ...over,
+  };
+}
+const CAL_TODAY = "2026-11-01";
+
+Deno.test("calendarSectionHtml：3 天内加 ⏰ 且排在前面，文案 = 日期 + 两级口径 + 剩 N 天", () => {
+  const html = calendarSectionHtml([
+    calItem({ date: "2026-11-14", daysTo: 13, label: "2026 年报" }),
+    calItem({}),
+  ], CAL_TODAY);
+  assertEquals(html.includes("📅 财报窗口（未来 " + CAL_WINDOW_DAYS + " 天）"), true);
+  assertEquals(
+    html.includes("⏰ 【600031】三一重工 11-03（预约）｜2026 三季报 · 剩 2 天"), true,
+    "近档行必须是这个原话（改口径要连文案一起改）");
+  assertEquals(
+    html.includes("【600031】三一重工 11-14（预约）｜2026 年报 · 剩 13 天"), true,
+    "窗口内非近档不加 ⏰");
+  assertEquals(html.indexOf("⏰ ") < html.indexOf("11-14（预约）"), true, "近档必须排在前面");
+  assertEquals(html.includes("（仅提醒，不参与买入参考与止盈档）"), true, "小节必须自带「不进信号」声明");
+  assertEquals(/NaN|Infinity/.test(html), false);
+});
+
+Deno.test("calendarSectionHtml：改期行要点名首约→变更，法定兜底行前缀 ~", () => {
+  const html = calendarSectionHtml([
+    calItem({ code: "000338", name: "潍柴动力", date: "2026-10-31", kind: "statutory", daysTo: 6, label: "2026 三季报" }),
+    calItem({ code: "688235", name: "爱博医疗", date: "2026-10-28", changed: true, fromDate: "2026-10-20", daysTo: 3, label: "2026 三季报" }),
+  ], "2026-10-25");
+  assertEquals(html.includes("10-28（预约·改期 10-20→10-28）"), true);
+  assertEquals(html.includes("~10-31（法定截止）"), true, "法定口径要用 ~ 表明「不是排期，是截止日」");
+  assertEquals(html.indexOf("688235") < html.indexOf("000338"), true, "改期那条只剩 3 天，必须排在法定那条前面");
+});
+
+Deno.test("calendarSectionHtml：窗口边界 —— 第 14 天仍在，第 15 天整条消失", () => {
+  const inWindow = calendarSectionHtml([calItem({ date: "2026-11-15", daysTo: 14 })], CAL_TODAY);
+  assertEquals(inWindow.includes("11-15（预约）｜2026 三季报 · 剩 14 天"), true);
+  assertEquals(inWindow.includes("⏰"), false, "超过 " + CAL_SOON_DAYS + " 天不报警");
+  const out = calendarSectionHtml([calItem({ date: "2026-11-16", daysTo: 15 })], CAL_TODAY);
+  assertEquals(out.includes("未来 " + CAL_WINDOW_DAYS + " 天内没有持仓个股披露安排"), true,
+    "第 15 天不算窗口内，只能走「无安排 + 最近一条」");
+});
+
+Deno.test("calendarSectionHtml：窗口内空但确有排期 → 说清「没有安排」并点名最近一条", () => {
+  const html = calendarSectionHtml([calItem({ date: "2027-03-20", daysTo: 139, label: "2026 年报" })], CAL_TODAY);
+  assertEquals(html.includes("未来 " + CAL_WINDOW_DAYS + " 天内没有持仓个股披露安排"), true);
+  assertEquals(html.includes("；最近的一条是 03-20（预约）（2026 年报）"), true,
+    "「没安排」和「排期还没公布」是两件事，后者必须给出最近的一条");
+});
+
+Deno.test("calendarSectionHtml：无持仓 A 股整段不出（纯基金用户不留空壳标题）", () => {
+  assertEquals(calendarSectionHtml([], CAL_TODAY), "");
+  assertEquals(calendarSectionHtml([null as never], CAL_TODAY), "", "null 条目要过滤掉，不能拼出空标题");
+});
+
+Deno.test("fetchDisclosureCalendar：出站 filter 是实测唯一可用引号形态（代码双引号、日期单引号），港股代码被剔", async () => {
+  const urls: string[] = [];
+  const rows = await fetchDisclosureCalendar(
+    ["600031", "000338", "00700", ""], CAL_TODAY,
+    (url: string) => {
+      urls.push(url);
+      return Promise.resolve(Response.json({ success: true, result: { pages: 1, count: 1, data: [{ SECURITY_CODE: "600031" }] } }));
+    },
+  );
+  assertEquals(urls.length, 1, "一次过滤请求，不打全表分页");
+  const filter = decodeURIComponent(new URL(urls[0]).searchParams.get("filter") || "");
+  assertEquals(filter, '(SECURITY_CODE in ("000338","600031"))(REPORT_DATE in (\'2026-09-30\',\'2026-12-31\',\'2027-03-31\'))');
+  assertEquals(filter.includes("00700"), false, "非 6 位代码不进请求（东财该表不覆盖港股）");
+  assertEquals(rows.length, 1, "result.data 原样透出，交由 nextDisclosure 判定");
+  assertEquals(calPeriods(CAL_TODAY)[0], "2026-09-30", "必须向前多取一期，否则改期未披露的持仓被静默吞掉");
+});
+
+Deno.test("fetchDisclosureCalendar：无代码不发请求；success:false 视作合法空表（走法定兜底，不抛）", async () => {
+  let called = 0;
+  const a = await fetchDisclosureCalendar(["00700", "ABC"], CAL_TODAY, () => { called++; return Promise.resolve(Response.json({})); });
+  assertEquals([called, a.length], [0, 0], "全非 A 股代码 ⇒ 一条请求都不该发");
+  const b = await fetchDisclosureCalendar(["600031"], CAL_TODAY, () => Promise.resolve(Response.json({ success: false, result: null })));
+  assertEquals(b, [], "服务端 false 不是异常，交法定截止兜底");
+});
+
+Deno.test("fetchDisclosureCalendar：超过 150 只分批，避开服务端 pageSize=500 的静默截断", async () => {
+  const urls: string[] = [];
+  const codes = Array.from({ length: 151 }, (_x, i) => String(600000 + i));
+  await fetchDisclosureCalendar(codes, CAL_TODAY, (url: string) => {
+    urls.push(url);
+    return Promise.resolve(Response.json({ success: true, result: { data: [] } }));
+  });
+  assertEquals(urls.length, 2, "150 只一批：151 只必须拆两次，否则第二批被截掉");
+  const first = decodeURIComponent(new URL(urls[0]).searchParams.get("filter") || "");
+  assertEquals((first.match(/"\d{6}"/g) || []).length, 150);
+});
+
+// 夜间邮件里真出现财报小节（不是只在纯函数里绿），且预约日期取到的是东财行而非法定兜底
+function calDates(offset: number): { today: string; soon: string; md: string } {
+  const today = cstDateStr();
+  const soon = new Date(Date.parse(today + "T00:00:00Z") + offset * 86400000).toISOString().slice(0, 10);
+  return { today, soon, md: soon.slice(5) };
+}
+function calStockStub(data: Record<string, unknown>, calendar: () => Response) {
+  const urls: string[] = [];
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    urls.push(url);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (url.includes("RPT_PUBLIC_BS_APPOIN")) return Promise.resolve(calendar());
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) return Promise.resolve(Response.json([{ user_id: "u1", data }]));
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) return Promise.resolve(new Response(txJson("sh600031", TX_STOCK_ROWS), { status: 200 }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  return urls;
+}
+const CAL_HELD = { funds: [], stocks: [{ code: "600031", name: "三一重工", shares: 500, cost: 30, high52w: 30, targetDrawdown: 30 }] };
+
+Deno.test("邮件接线：东财预约行真进邮件，小节在股票分析之后，且只当提醒不当信号", async () => {
+  const { soon, md } = calDates(2);
+  const real = globalThis.fetch;
+  const urls = calStockStub(CAL_HELD, () => Response.json({
+    success: true,
+    result: { data: [{ SECURITY_CODE: "600031", REPORT_DATE: "2026-12-31 00:00:00", FIRST_APPOINT_DATE: soon + " 00:00:00", APPOINT_PUBLISH_DATE: soon + " 00:00:00", IS_PUBLISH: "0" }] },
+  }));
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    assertEquals(mail.includes("📅 财报窗口（未来 " + CAL_WINDOW_DAYS + " 天）"), true, "邮件里必须有财报小节（纯函数绿了不代表接上了）");
+    assertEquals(mail.indexOf("💹 股票分析") < mail.indexOf("📅 财报窗口"), true, "位置：股票分析之后");
+    assertEquals(mail.includes("⏰ 【600031】三一重工 " + md + "（预约）｜2026 年报 · 剩 2 天"), true,
+      "预约行要用东财排期，不许退成法定截止");
+    assertEquals(mail.includes("（法定截止）"), false, "取到预约就不该再出法定口径");
+    assertEquals(urls.filter(u => u.includes("RPT_PUBLIC_BS_APPOIN")).length, 1);
+    assertEquals(/NaN|Infinity/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：日历取数抛错 → 邮件照发、退成法定截止、[财报日历] 日志可归因", async () => {
+  const real = globalThis.fetch;
+  const urls = calStockStub(CAL_HELD, () => new Response("boom", { status: 500 }));
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200, "日历只是提醒，挂了不能拖挂整封邮件");
+    assertEquals(mail.includes("（法定截止）"), true, "失败要降级成法定口径，不是整段消失");
+    assertEquals(mail.includes("📅 财报窗口"), true);
+    assertEquals(hasStageLog(logs.lines, "财报日历"), true, "失败必须能在日志里归因到环节");
+    assertEquals(urls.filter(u => u.includes("RPT_PUBLIC_BS_APPOIN")).length >= 1, true);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：只持港股 → 不发日历请求、不出财报小节", async () => {
+  const real = globalThis.fetch;
+  const urls = calStockStub({ funds: [], stocks: [{ code: "00700", name: "腾讯控股", shares: 100, cost: 400 }] }, () => Response.json({ success: true, result: { data: [] } }));
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    assertEquals(urls.some(u => u.includes("RPT_PUBLIC_BS_APPOIN")), false, "东财该表不覆盖港股，白打一次请求");
+    assertEquals(mail.includes("📅 财报窗口"), false, "没有可判的持仓就不出空壳小节");
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：财报日历按全体用户持仓合并成一次请求，且每人只看到自己的票", async () => {
+  const { soon, md } = calDates(2);
+  const real = globalThis.fetch;
+  const calUrls: string[] = [];
+  const rows = ["600031", "000338", "601398"].map(c => ({
+    SECURITY_CODE: c, REPORT_DATE: "2026-12-31 00:00:00",
+    FIRST_APPOINT_DATE: soon + " 00:00:00", APPOINT_PUBLISH_DATE: soon + " 00:00:00", IS_PUBLISH: "0",
+  }));
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (url.includes("RPT_PUBLIC_BS_APPOIN")) { calUrls.push(url); return Promise.resolve(Response.json({ success: true, result: { data: rows } })); }
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      return Promise.resolve(Response.json([
+        { user_id: "u1", data: { funds: [], stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 30, currentPrice: 18 }, { code: "600031", name: "三一重工", shares: 50, cost: 21, currentPrice: 18 }] } },
+        { user_id: "u2", data: { funds: [], stocks: [{ code: "000338", name: "潍柴动力", shares: 100, cost: 12, currentPrice: 15 }] } },
+      ]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  const mails: string[] = [];
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mails.push(html); return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    assertEquals(calUrls.length, 1, "三个用户持仓合并成一次过滤请求，不是每人打一次");
+    const filter = decodeURIComponent(new URL(calUrls[0]).searchParams.get("filter") || "");
+    assertEquals(filter.includes('"000338"') && filter.includes('"600031"'), true,
+      "请求必须带上全体用户的持仓代码（只取第一个用户 = 其余人整夜拿法定截止冒充排期）");
+    assertEquals((filter.match(/"600031"/g) || []).length, 1, "同一代码重复持仓合并成一次，不重复进 in() 列表");
+    assertEquals(mails.length, 2);
+    const m1 = mails.find(t => t.includes("三一重工")) || "";
+    const m2 = mails.find(t => t.includes("潍柴动力")) || "";
+    assertEquals(m1.includes("【600031】三一重工 " + md + "（预约）"), true, "u1 只看到自己的 600031");
+    assertEquals(m1.split("⏰ 【600031】").length - 1, 1, "同一代码填两条持仓也只出一行财报提醒");
+    assertEquals(m1.includes("000338"), false, "u1 的邮件不许串进别人的持仓");
+    assertEquals(m2.includes("【000338】潍柴动力 " + md + "（预约）"), true, "u2 同样要有自己的那一行");
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件文案：规则速查不许再宣称「估值百分位两腿合成」（2026-10-28 基金侧已下线该腿）", async () => {
+  const real = globalThis.fetch;
+  calStockStub(CAL_HELD, () => Response.json({ success: true, result: { data: [] } }));
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    const legend = mail.slice(mail.indexOf("信号规则速查"));
+    assertEquals(legend.includes("估值百分位"), false, "两腿口径 2026-10-28 就下线了，速查还在教用户填分位");
+    assertEquals(legend.includes("基金档位 = 均线偏离单腿"), true);
+    assertEquals(legend.includes("股票买入参考 = 三腿合成"), true);
   } finally {
     globalThis.fetch = real;
     logs.restore();

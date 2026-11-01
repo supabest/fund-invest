@@ -92,6 +92,9 @@
 
   .dual-strip{display:flex; align-items:center; gap:8px; padding:0 16px 6px 16px; flex-wrap:wrap;}
   .dual-tag{font-size:11px; color:var(--muted); border:1px dashed var(--line-strong); border-radius:4px; padding:2px 6px; white-space:nowrap;}
+  /* 财报日历只做提醒、不参与任何信号，所以配色走中性灰，不与买卖档的 jade/gold 抢注意力 */
+  .disclosure-pill{font-size:11px; color:var(--muted); border:1px solid var(--line-strong); border-radius:12px; padding:1px 7px; white-space:nowrap; cursor:help;}
+  .disclosure-na{font-size:11px; color:var(--gold); border:1px dashed rgba(255,255,255,.18); border-radius:12px; padding:1px 7px; white-space:nowrap;}
   .dual-amt{font-size:12px; color:var(--muted);}
   /* 估值分位口径：数值旁边必须跟着「谁的历史、多长样本、什么口径」，否则同一只股两次快照跳档无从判断 */
   .valpct-chip{font-size:11px; color:var(--jade); background:var(--jade-dim); border-radius:12px; padding:2px 8px; white-space:nowrap; cursor:help;}
@@ -314,6 +317,8 @@
     .signal-reason{font-size:14px; padding:0 20px 16px 20px;}
     .dual-strip{padding:0 20px 8px 20px;}
     .dual-tag{font-size:12.5px;}
+    .disclosure-pill{font-size:12.5px;}
+    .disclosure-na{font-size:12.5px;}
     .dual-amt{font-size:13.5px;}
     .dual-strip .signal-pill{font-size:13px;}
     .valpct-chip{font-size:12.5px;}
@@ -3172,6 +3177,144 @@ function profitMetaText(alert, next){
 }
 // ==== LADDER_PURE_END ====
 
+// ==== CAL_PURE_BEGIN ====
+// 财报日历（2026-11-01 用户裁定 R3：只覆盖持仓股票、只提醒不参与任何信号与档位）。
+// 两级口径：① 东财预约披露日历里有未披露行 → 用 APPOINT_PUBLISH_DATE（改期后的有效日；读首约日会把「延后」念成「提前」）
+//          ② 排期尚未公布 → 退 A 股法定截止（探针实测 REPORT_DATE='2026-12-31' 现查为空，兜底腿不是可选项）
+// 形态事实（探针实测，台账「续三十五」）：日期一律带 " 00:00:00" 要截 10 位；IS_PUBLISH 是字符串 "0"/"1"；
+// 该表只覆盖 A 股（00700/09988 实测返回空）⇒ 港股不判，不拿 A 股法定截止冒充港股结论。
+// 邮件端 supabase/functions/daily-update/index.ts 有同口径镜像，由 scripts/calendar_logic_test.ts 矩阵比对钉住。
+const CAL_WINDOW_DAYS = 14;   // 邮件「财报窗口」小节只看未来 14 天
+const CAL_SOON_DAYS = 3;      // 其中 3 天内单独标为临近
+const CAL_MD = {
+  '03-31': { dl: '04-30', name: '一季报' },
+  '06-30': { dl: '08-31', name: '半年报' },
+  '09-30': { dl: '10-31', name: '三季报' },
+  '12-31': { dl: '04-30', name: '年报', nextYear: true }   // 年报截止在次年 4-30
+};
+function calSupported(code){ return /^\d{6}$/.test(String(code == null ? '' : code).trim()); }
+function calD10(s){ const t = String(s == null ? '' : s).trim(); return /^\d{4}-\d{2}-\d{2}/.test(t) ? t.slice(0, 10) : ''; }
+function periodLabel(reportDate){
+  const d = calD10(reportDate), m = CAL_MD[d.slice(5)];
+  return m ? d.slice(0, 4) + ' ' + m.name : '';
+}
+// UTC 日差：只吃 'YYYY-MM-DD'，跨月跨年不串行（闰年 2-29 自然算进去）
+function calDaysBetween(from, to){
+  const a = Date.parse(String(from) + 'T00:00:00Z'), b = Date.parse(String(to) + 'T00:00:00Z');
+  return (isFinite(a) && isFinite(b)) ? Math.round((b - a) / 86400000) : NaN;
+}
+function calAllPeriods(today){
+  const startY = parseInt(String(today).slice(0, 4), 10), all = [];
+  for(let y = startY - 1; y <= startY + 2; y++){
+    for(const md of Object.keys(CAL_MD)){
+      const spec = CAL_MD[md];
+      all.push({ reportDate: y + '-' + md, deadline: (spec.nextYear ? y + 1 : y) + '-' + spec.dl });
+    }
+  }
+  // 同日截止（年报与次年一季报都是 4-30）按报告期升序 ⇒ 年报排在前面
+  all.sort((a, b) => a.deadline < b.deadline ? -1 : a.deadline > b.deadline ? 1 : (a.reportDate < b.reportDate ? -1 : 1));
+  return all;
+}
+function statutorySchedule(today, count){
+  const n = count === undefined ? 3 : count;
+  return calAllPeriods(today)
+    .filter(p => p.deadline >= String(today))
+    .slice(0, n)
+    .map(p => ({ reportDate: p.reportDate, deadline: p.deadline, label: p.label || periodLabel(p.reportDate) }));
+}
+// 向前多取一期：法定截止已过但仍「改期未披露」的行就在这一期（探针实测 11-01 全市场还有 4 条）
+function calPeriods(today, back, fwd){
+  const b = back === undefined ? 1 : back, f = fwd === undefined ? 2 : fwd;
+  const all = calAllPeriods(today);
+  const idx = all.findIndex(p => p.deadline >= String(today));
+  if (idx < 0) return [];
+  return all.slice(Math.max(0, idx - b), idx + f).map(p => p.reportDate);
+}
+// 拼 filter：两侧都过白名单（6 位数字 / ISO 日期），宁可不发也不打无过滤全表；
+// 任一侧为空就返回空串 —— 调用方据此跳过请求（没有 REPORT_DATE 就是 12 页全表）。
+// 引号风格是实测唯一可用形态：日期必须单引号（双引号服务端报「filter字段中日期参数格式错误」），代码必须双引号。
+function calFilter(codes, reportDates){
+  const cs = [...new Set((codes || []).map(c => String(c == null ? '' : c).trim()).filter(c => /^\d{6}$/.test(c)))].sort();
+  const ps = [...new Set((reportDates || []).map(p => String(p == null ? '' : p).trim()).filter(p => /^\d{4}-\d{2}-\d{2}$/.test(p)))].sort();
+  if (!cs.length || !ps.length) return '';
+  return '(SECURITY_CODE in (' + cs.map(c => '"' + c + '"').join(',') + '))'
+    + '(REPORT_DATE in (' + ps.map(p => "'" + p + "'").join(',') + '))';
+}
+// 单只持仓的下次披露：预约行（未披露且有效日不早于今天）取最近一条；否则退当期法定截止
+function nextDisclosure(rows, code, today){
+  if (!calSupported(code)) return null;
+  const c = String(code).trim(), t = String(today), list = rows || [];
+  const dates = list.filter(r => r && String(r.SECURITY_CODE == null ? '' : r.SECURITY_CODE).trim() === c
+      && String(r.IS_PUBLISH == null ? '' : r.IS_PUBLISH) !== '1')
+    .map(r => calD10(r.APPOINT_PUBLISH_DATE)).filter(d => d && d >= t).sort();
+  if (dates.length){
+    const date = dates[0];
+    const row = list.find(r => String(r.SECURITY_CODE == null ? '' : r.SECURITY_CODE).trim() === c
+      && calD10(r.APPOINT_PUBLISH_DATE) === date);
+    const first = calD10(row.FIRST_APPOINT_DATE), changed = !!first && first !== date;
+    return { code: c, date, kind: 'appoint', changed, fromDate: changed ? first : null,
+      label: periodLabel(row.REPORT_DATE), daysTo: calDaysBetween(t, date) };
+  }
+  const p = statutorySchedule(t, 1)[0];
+  if (!p) return null;
+  return { code: c, date: p.deadline, kind: 'statutory', changed: false, fromDate: null,
+    label: p.label, daysTo: calDaysBetween(t, p.deadline) };
+}
+// 14 天窗口 + 3 天临近；daysTo 一律用本次的 today 重算，缓存隔天的条目不会带着旧倒计时进邮件
+function calWindow(list, today){
+  const ok = (list || []).filter(e => e && calDaysBetween(today, e.date) >= 0
+      && calDaysBetween(today, e.date) <= CAL_WINDOW_DAYS)
+    .map(e => ({ ...e, daysTo: calDaysBetween(today, e.date) }))
+    .sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
+  return { soon: ok.filter(e => e.daysTo <= CAL_SOON_DAYS), later: ok.filter(e => e.daysTo > CAL_SOON_DAYS) };
+}
+// 文案单一来源：日期 + 两级口径 + 改期三要素。页面胶囊与邮件小节都拼这一段，
+// 各自只加外壳与倒计时前缀 —— 否则两处话术会各写各的（止盈档 2026-10-31 就是这么漂的）。
+function disclosureText(e){
+  if (!e) return '';
+  const md = e.date.slice(5);
+  const chg = e.changed && e.fromDate ? '·改期 ' + e.fromDate.slice(5) + '→' + md : '';
+  return (e.kind === 'statutory' ? '~' : '') + md + '（' + (e.kind === 'appoint' ? '预约' : '法定截止') + chg + '）';
+}
+// 三态：有值出胶囊｜取数失败点名失败（与「无口径」不同话）｜非 A 股或还没取过不给话
+function disclosurePillHtml(e, status){
+  if (!e) return status === 'failed' ? '<span class="disclosure-na">下次披露：日历获取失败（不影响其他信号）</span>' : '';
+  const til = e.daysTo <= CAL_SOON_DAYS ? '·剩 ' + e.daysTo + ' 天' : '';
+  return '<span class="disclosure-pill" title="' + e.label + ' 披露">下次披露 ' + disclosureText(e) + til + '</span>';
+}
+// ==== CAL_PURE_END ====
+// 财报日历取数（浏览器直连东财预约披露日历；2026-11-01 在本机实测 ACAO:*，一次代码过滤请求 2.4KB/3 只）。
+// 与邮件端各取各的：页面按用户持仓现取，夜间按全部用户持仓取一次；都不建表、不落库、不改任何信号。
+const CAL_EM_API = 'https://datacenter-web.eastmoney.com/api/data/v1/get'
+  + '?reportName=RPT_PUBLIC_BS_APPOIN&columns=ALL&pageSize=500&pageNumber=1'
+  + '&sortColumns=SECURITY_CODE&sortTypes=1&source=SELECT&client=WEB';
+const CAL_TIMEOUT_MS = 15000;   // 与估值分位同一条教训：无超时的 fetch 挂起会把整段首屏一起拖死
+let calDisclosures = {};        // code → nextDisclosure 结果（null 也存，区分「无口径」与「没取过」）
+let calStatus = null;           // null 未取 | 'ok' | 'failed'
+async function fetchDisclosureCalendar(codes, today){
+  const filter = calFilter(codes, calPeriods(today));
+  if(!filter) return { rows: [], status: 'ok' };      // 持仓里没有 6 位 A 股：不发请求，也不报失败
+  try{
+    const r = await fetch(CAL_EM_API + '&filter=' + encodeURIComponent(filter), {
+      signal: AbortSignal.timeout(CAL_TIMEOUT_MS) });
+    if(!r.ok) throw new Error('EM cal http ' + r.status);
+    const j = await r.json();
+    return { rows: (j && j.result && j.result.data) || [], status: 'ok' };   // success:false/排期未公布 → 空表 → 全靠法定兜底
+  }catch(e){
+    return { rows: [], status: 'failed' };
+  }
+}
+async function refreshDisclosures(){
+  const today = fmtDateCN(new Date());
+  const codes = stocks.map(s => String(s.code || '').trim());
+  const res = await fetchDisclosureCalendar(codes, today);
+  calStatus = res.status;
+  const next = {};
+  for(const c of codes) next[c] = nextDisclosure(res.rows, c, today);
+  calDisclosures = next;
+  if(document.getElementById('stockList')) renderStockSection();   // 算完必须回到界面，否则判据只是测试里的绿灯
+}
+
 // 标记本档已执行：写入 profitTaken（含更低档），随整包云同步，邮件端下一封自动跟随
 function tierDoneBtnHtml(kind, id, ret){
   return `<button class="tier-done-btn" data-kind="${kind}" data-id="${escapeHtml(String(id))}" data-ret="${Number(ret)}">标记本档已执行</button>`;
@@ -3428,6 +3571,7 @@ function renderStockSection(){
         ${scorePillHtml(s)}
         ${valuePillHtml(vRow)}
         ${researchPillHtml(fundamentals.get(String(s.code)) || null)}
+        ${disclosurePillHtml(calDisclosures[String(s.code || '').trim()] || null, calStatus)}
       </div>
       <div class="signal-price">现价 ${s.currentPrice||'--'}${s.ma60?' · MA60 '+Number(s.ma60).toFixed(2):''}${s.ma120?' · MA120 '+Number(s.ma120).toFixed(2):''}</div>
       ${dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0)}
@@ -4084,6 +4228,7 @@ async function autoRefreshAll(force){
   let fN = 0, sN = 0, vN = 0, lN = 0;
   try{ fN = await autoRefreshFunds(); }catch(e){}
   try{ const r = await autoRefreshStocks(); sN = r.prices; vN = r.valuations; lN = r.lots || 0; }catch(e){}
+  refreshDisclosures().catch(()=>{});   // 财报日历：一次过滤请求，与价格解耦，失败只少一行提示（不进任何信号）
   loadSectorRotation().catch(()=>{}); // 修复轮2（评审 I1 ②）：仍在刷新序列末尾触发（不新起定时器），但改为 fire-and-forget —— 卡片结果非 saveFunds/Toast 所需，不再把 autoRefreshRunning 锁在≤ 10 个串行 RT 上；同时在飞请求由 sectorReqGuard 序号守卫防竞态
   autoRefreshRunning = false;
   if(fN + sN + vN + lN > 0){

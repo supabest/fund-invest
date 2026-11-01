@@ -503,6 +503,168 @@ export function dipBannerHtml(list: Array<{ code: string; name?: string; ret: nu
     + '<div style="font-size:13px;color:#1B2436;margin-top:4px;">' + lines.join('<br>') + '</div></div>';
 }
 
+// ==== 财报日历（2026-11-01 用户裁定 R3）：下面这段是 index.html CAL_PURE 块的镜像 ====
+// 判据的实现体在页面，这里逐字同口径重述一份（Edge 单文件部署不能 import 页面）。
+// 一致性由 scripts/calendar_logic_test.ts 逐场景比对钉住：只改一侧必红。
+// 三条纪律：只覆盖持仓 A 股、只提醒不进任何信号与档位、不建表（夜间现算，按代码一次过滤请求）。
+export const CAL_WINDOW_DAYS = 14;
+export const CAL_SOON_DAYS = 3;
+const CAL_MD: Record<string, { dl: string; name: string; nextYear?: boolean }> = {
+  '03-31': { dl: '04-30', name: '一季报' },
+  '06-30': { dl: '08-31', name: '半年报' },
+  '09-30': { dl: '10-31', name: '三季报' },
+  '12-31': { dl: '04-30', name: '年报', nextYear: true },   // 年报截止在次年 4-30
+};
+// deno-lint-ignore no-explicit-any
+export type CalRow = Record<string, any>;
+export type Disclosure = {
+  code: string; date: string; kind: 'appoint' | 'statutory'; changed: boolean;
+  fromDate: string | null; label: string; daysTo: number;
+};
+export type CalItem = Disclosure & { name?: string };
+
+export function calSupported(code: unknown): boolean {
+  return /^\d{6}$/.test(String(code == null ? '' : code).trim());
+}
+// 东财所有日期字段都带 " 00:00:00"，不截掉就无法比较（探针实测形态）
+function calD10(s: unknown): string {
+  const t = String(s == null ? '' : s).trim();
+  return /^\d{4}-\d{2}-\d{2}/.test(t) ? t.slice(0, 10) : '';
+}
+export function periodLabel(reportDate: string | null): string {
+  const d = calD10(reportDate), m = CAL_MD[d.slice(5)];
+  return m ? d.slice(0, 4) + ' ' + m.name : '';
+}
+export function calDaysBetween(from: string, to: string): number {
+  const a = Date.parse(String(from) + 'T00:00:00Z'), b = Date.parse(String(to) + 'T00:00:00Z');
+  return (isFinite(a) && isFinite(b)) ? Math.round((b - a) / 86400000) : NaN;
+}
+function calAllPeriods(today: string): { reportDate: string; deadline: string }[] {
+  const startY = parseInt(String(today).slice(0, 4), 10), all: { reportDate: string; deadline: string }[] = [];
+  for (let y = startY - 1; y <= startY + 2; y++) {
+    for (const md of Object.keys(CAL_MD)) {
+      const spec = CAL_MD[md];
+      all.push({ reportDate: y + '-' + md, deadline: (spec.nextYear ? y + 1 : y) + '-' + spec.dl });
+    }
+  }
+  // 同日截止（年报与次年一季报都是 4-30）按报告期升序 ⇒ 年报排在前面
+  all.sort((a, b) => a.deadline < b.deadline ? -1 : a.deadline > b.deadline ? 1 : (a.reportDate < b.reportDate ? -1 : 1));
+  return all;
+}
+export function statutorySchedule(today: string, count = 3): { reportDate: string; deadline: string; label: string }[] {
+  return calAllPeriods(today)
+    .filter(p => p.deadline >= String(today))
+    .slice(0, count)
+    .map(p => ({ reportDate: p.reportDate, deadline: p.deadline, label: periodLabel(p.reportDate) }));
+}
+// 向前多取一期：法定截止已过但仍「改期未披露」的行就在这一期（探针实测 11-01 全市场还有 4 条）
+export function calPeriods(today: string, back = 1, fwd = 2): string[] {
+  const all = calAllPeriods(today);
+  const idx = all.findIndex(p => p.deadline >= String(today));
+  if (idx < 0) return [];
+  return all.slice(Math.max(0, idx - back), idx + fwd).map(p => p.reportDate);
+}
+// 引号风格是实测唯一可用形态：日期必须单引号（双引号服务端直接 success:false「filter字段中日期参数格式错误」），
+// 代码必须双引号。两侧都过白名单，任一侧为空就返回空串 —— 没有 REPORT_DATE 过滤等于打 12 页全表，宁可不发。
+export function calFilter(codes: unknown[], reportDates: (string | null)[]): string {
+  const cs = [...new Set((codes || []).map(c => String(c == null ? '' : c).trim()).filter(c => /^\d{6}$/.test(c)))].sort();
+  const ps = [...new Set((reportDates || []).map(p => String(p == null ? '' : p).trim()).filter(p => /^\d{4}-\d{2}-\d{2}$/.test(p)))].sort();
+  if (!cs.length || !ps.length) return '';
+  return '(SECURITY_CODE in (' + cs.map(c => '"' + c + '"').join(',') + '))'
+    + '(REPORT_DATE in (' + ps.map(p => "'" + p + "'").join(',') + '))';
+}
+// 单只持仓的下次披露：预约行（未披露且有效日不早于今天）取最近一条；否则退当期法定截止
+export function nextDisclosure(rows: CalRow[], code: unknown, today: string): Disclosure | null {
+  if (!calSupported(code)) return null;
+  const c = String(code).trim(), t = String(today), list = rows || [];
+  const dates = list.filter(r => r && String(r.SECURITY_CODE == null ? '' : r.SECURITY_CODE).trim() === c
+      && String(r.IS_PUBLISH == null ? '' : r.IS_PUBLISH) !== '1')
+    .map(r => calD10(r.APPOINT_PUBLISH_DATE)).filter(d => d && d >= t).sort();
+  if (dates.length) {
+    const date = dates[0];
+    const row = list.find(r => String(r.SECURITY_CODE == null ? '' : r.SECURITY_CODE).trim() === c
+      && calD10(r.APPOINT_PUBLISH_DATE) === date)!;
+    const first = calD10(row.FIRST_APPOINT_DATE), changed = !!first && first !== date;
+    return { code: c, date, kind: 'appoint', changed, fromDate: changed ? first : null,
+      label: periodLabel(row.REPORT_DATE), daysTo: calDaysBetween(t, date) };
+  }
+  const p = statutorySchedule(t, 1)[0];
+  if (!p) return null;
+  return { code: c, date: p.deadline, kind: 'statutory', changed: false, fromDate: null,
+    label: p.label, daysTo: calDaysBetween(t, p.deadline) };
+}
+export function calWindow(list: (Disclosure | null)[], today: string): { soon: Disclosure[]; later: Disclosure[] } {
+  const ok = (list || []).filter((e): e is Disclosure => !!e)
+    .map(e => ({ ...e, daysTo: calDaysBetween(today, e.date) }))
+    .filter(e => e.daysTo >= 0 && e.daysTo <= CAL_WINDOW_DAYS)
+    .sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : (a.code < b.code ? -1 : a.code > b.code ? 1 : 0));
+  return { soon: ok.filter(e => e.daysTo <= CAL_SOON_DAYS), later: ok.filter(e => e.daysTo > CAL_SOON_DAYS) };
+}
+// 文案单一来源：页面胶囊与邮件小节拼同一段，各自只加外壳与倒计时前缀
+export function disclosureText(e: Disclosure | null): string {
+  if (!e) return '';
+  const md = e.date.slice(5);
+  const chg = e.changed && e.fromDate ? '·改期 ' + e.fromDate.slice(5) + '→' + md : '';
+  return (e.kind === 'statutory' ? '~' : '') + md + '（' + (e.kind === 'appoint' ? '预约' : '法定截止') + chg + '）';
+}
+// 镜像页面同名函数（比对用；邮件正文不出 span）
+export function disclosurePillHtml(e: Disclosure | null, status?: string | null): string {
+  if (!e) return status === 'failed' ? '<span class="disclosure-na">下次披露：日历获取失败（不影响其他信号）</span>' : '';
+  const til = e.daysTo <= CAL_SOON_DAYS ? '·剩 ' + e.daysTo + ' 天' : '';
+  return '<span class="disclosure-pill" title="' + e.label + ' 披露">下次披露 ' + disclosureText(e) + til + '</span>';
+}
+// 邮件小节：无持仓 A 股整段不出（纯基金用户不留空壳）；窗口内无披露也要说出最近的一条，
+// 「无安排」与「排期还没公布」是两件事，前者不用解释、后者需要。
+export function calendarSectionHtml(items: CalItem[], today: string): string {
+  const held = (items || []).filter((x): x is CalItem => !!x);
+  if (!held.length) return '';
+  const head = '<h3 style="font-size:16px;margin:20px 0 12px;">📅 财报窗口（未来 ' + CAL_WINDOW_DAYS + ' 天）'
+    + '<span style="font-weight:400;font-size:12px;color:' + C_MUTED + '">（仅提醒，不参与买入参考与止盈档）</span></h3>';
+  const w = calWindow(held, today);
+  const line = (d: CalItem, soon: boolean) => '<li style="margin:6px 0;">' + (soon ? '⏰ ' : '')
+    + '【' + d.code + '】' + (d.name ? d.name + ' ' : '') + disclosureText(d)
+    + '｜' + d.label + ' · 剩 ' + d.daysTo + ' 天</li>';
+  const rows = [...w.soon.map(d => line(d, true)), ...w.later.map(d => line(d, false))];
+  if (!rows.length) {
+    const nxt = held.map(d => ({ ...d, daysTo: calDaysBetween(today, d.date) }))
+      .filter(d => d.daysTo >= 0).sort((a, b) => a.date < b.date ? -1 : 1)[0];
+    return head + '<p style="color:#707C8C;">未来 ' + CAL_WINDOW_DAYS + ' 天内没有持仓个股披露安排'
+      + (nxt ? '；最近的一条是 ' + disclosureText(nxt) + '（' + nxt.label + '）' : '') + '。</p>';
+  }
+  return head + '<ul style="padding-left:18px;margin:12px 0;">' + rows.join('') + '</ul>';
+}
+
+const CAL_EM_API = 'https://datacenter-web.eastmoney.com/api/data/v1/get'
+  + '?reportName=RPT_PUBLIC_BS_APPOIN&columns=ALL&pageSize=500&pageNumber=1'
+  + '&sortColumns=SECURITY_CODE&sortTypes=1&source=SELECT&client=WEB';
+// get 由调用方注入（夜间传 fetchRetry：重试 + 硬超时 + 缓存击穿参数都是现成纪律）。
+// 返回空表是合法结果（排期未公布 / success:false），由 nextDisclosure 的法定兜底接管，不抛。
+export async function fetchDisclosureCalendar(
+  codes: unknown[], today: string,
+  get: (url: string, headers: Record<string, string>, tries?: number, timeoutMs?: number) => Promise<Response>,
+): Promise<CalRow[]> {
+  const periods = calPeriods(today);
+  const uniq = [...new Set((codes || []).map(c => String(c == null ? '' : c).trim()).filter(calSupported))];
+  if (!uniq.length || !periods.length) return [];
+  const out: CalRow[] = [];
+  // 分批 150：探针实测服务端 pageSize 封顶 500（pageSize=3000 也只回 500），150 只 × 3 期 = 450 行仍在单页内
+  for (let i = 0; i < uniq.length; i += 150) {
+    const filter = calFilter(uniq.slice(i, i + 150), periods);
+    if (!filter) continue;
+    const r = await get(CAL_EM_API + '&filter=' + encodeURIComponent(filter),
+      { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://data.eastmoney.com/yysj/' }, 2, 8000);
+    const j = await r.json();
+    out.push(...(((j && j.result && j.result.data) || []) as CalRow[]));
+  }
+  return out;
+}
+// 北京时间今天（YYYY-MM-DD）：夜间 cron 跑在 UTC，直接用 new Date() 会在 00:00-08:00 UTC 差一天
+export function cstDateStr(d: Date = new Date()): string {
+  const t = new Date(d.getTime() + 8 * 3600 * 1000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return t.getUTCFullYear() + '-' + p(t.getUTCMonth() + 1) + '-' + p(t.getUTCDate());
+}
+
 // 并发池：限制同时在飞的请求数。取数改并发的理由见 v8 头注释——串行 + 3 次重试会把整段拖到 150s 墙钟边缘。
 // fn 自己负责吞错（返回结果对象），所以这里不需要 allSettled；单项失败不能拖倒其余项。
 async function mapPool<T>(items: T[], limit: number, fn: (x: T) => Promise<void>): Promise<void> {
@@ -613,7 +775,7 @@ const REAL_DEPS: DailyUpdateDeps = { sendMail };
 // 背景：本函数由 pg_cron 经 HTTP 触发、响应体通常被调用方丢弃，失败若只落在 body 里则事后无法定位；
 // 故取数/写库/发信三类失败除写入 summary/抛出外，一律额外打一条可归因日志行。
 function logFailure(
-  stage: "取数" | "写库" | "发信" | "致命",
+  stage: "取数" | "写库" | "发信" | "致命" | "财报日历",
   detail: string,
   err: unknown,
 ): void {
@@ -1212,9 +1374,37 @@ export async function handle(
     mark('write');
     console.log('[daily-update][计时] ' + timings.join(' | '));
 
+    // 5c. 财报日历（2026-11-01 R3）：一次过滤请求覆盖全部用户持仓的 A 股，夜间现算、不建表、不落库。
+    // 取数失败只降级为「全按法定截止提醒」，绝不把邮件拖挂；港股不在该表覆盖内（探针实测返回空）⇒ 不判。
+    // states 是 res.json() 的 any，回调参数不标注就 TS7006，标注就撞 no-explicit-any，所以在这里收一次口。
+    const heldStocksOf = (u: unknown): Array<{ code?: unknown; name?: unknown }> => {
+      const arr = (u as { data?: { stocks?: unknown } })?.data?.stocks;
+      return Array.isArray(arr) ? arr as Array<{ code?: unknown; name?: unknown }> : [];
+    };
+    const calToday = cstDateStr();
+    const calCodes = [...new Set(states.flatMap((s: unknown) =>
+      heldStocksOf(s).map(x => String(x.code ?? '').trim())))];
+    let calRows: CalRow[] = [];
+    try {
+      calRows = await fetchDisclosureCalendar(calCodes, calToday, fetchRetry);
+    } catch (e) {
+      logFailure('财报日历', '东财预约披露日历获取失败（本次全部按法定截止提醒）', e);
+    }
+    mark('calendar');
+
     // 6. 分析报告 + 与昨日信号对比的变化提醒 + 邮件
     for (const userId of new Set([...Object.keys(fundReport), ...Object.keys(stockReport), ...Object.keys(invalidStocks)])) {
       const st = states.find((s: any) => s.user_id === userId);
+      // 该用户持仓的下次披露（同代码去重；非 A 股 nextDisclosure 返回 null，整条不进小节）
+      const calItems: CalItem[] = [];
+      const calSeen = new Set<string>();
+      for (const x of heldStocksOf(st)) {
+        const code = String(x.code || '').trim();
+        if (calSeen.has(code)) continue;
+        calSeen.add(code);
+        const d = nextDisclosure(calRows, code, calToday);
+        if (d) calItems.push({ ...d, name: String(x.name || '') });
+      }
       const items: string[] = [];
 
       // 将“代码无效”的股票并入告警，确保误填代码不再被静默丢弃
@@ -1354,9 +1544,10 @@ export async function handle(
         + (fundBlock ? '<ul style="padding-left:0;list-style:none;">' + fundBlock + '</ul>' : '<p style="color:#707C8C;">暂无基金</p>')
         + '<h3 style="font-size:16px;margin:20px 0 12px;">💹 股票分析</h3>'
         + (stockBlock ? '<ul style="padding-left:0;list-style:none;">' + stockBlock + '</ul>' : '<p style="color:#707C8C;">暂无股票（可在股票标签页添加）</p>')
+        + calendarSectionHtml(calItems, calToday)
         + '<div style="background:#F1EDE3;padding:14px;border-radius:8px;margin:16px 0;font-size:13px;">'
         + '<b>📖 信号规则速查</b>：双倍/加强 = 加大买入拉低成本｜正常 = 按计划定投｜减半/暂停 = 少买或停买<br>'
-        + '档位 = 均线偏离 + 估值百分位两腿合成，与页面同口径；QDII溢价 / 主题仓位超限 / 手动暂停可覆盖档位<br>'
+        + '基金档位 = 均线偏离单腿（估值分位 2026-10-28 起不再参与）｜股票买入参考 = 三腿合成（均线 + 回撤达档 + 跌穿成本安全垫）；QDII溢价 / 主题仓位超限 / 手动暂停可覆盖档位<br>'
         + '止盈档位达到时系统会提醒分批卖出；大盘参考指数升至高位会降低买入系数。'
         + '</div>'
         + '<p style="color:#707C8C;font-size:12px;">本邮件由定投信号台自动发送 · 每日 22:30（北京时间）自动更新</p>'
