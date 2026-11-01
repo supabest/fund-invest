@@ -3012,6 +3012,14 @@ function stockPadSet(s){
   const tdd = parseFloat(String(raw));
   return Number.isFinite(tdd) && tdd!==0;
 }
+// 明细行要用的安全垫数字：dipAlertStockCost 只在「已跌穿」时返回对象，未跌穿拿不到目标与收益，
+// 所以这里按同一判据（stockPadSet）补一份。取不到收益就留 null，宁可不报数也不拿 0 冒充「没跌穿」。
+function stockPadInfo(s, ret){
+  if(!stockPadSet(s)) return null;
+  const target = -Math.abs(parseFloat(String(s.targetDrawdown)));
+  const r = (ret===null || ret===undefined || !isFinite(Number(ret))) ? null : Number(ret);
+  return {target, ret: r};
+}
 // 股票抄底·成本口径：与基金 dipAlertFund 同判据——跌穿自设「目标跌幅安全垫」才亮（含 1e-9 踩线容差）。
 // 股票侧没有「暂停定投」状态可仲裁，改用既有的均线档边界：dev≥+10% 就是邮件里的「明显高位」，只陈述事实不给买入指令。
 function dipAlertStockCost(s, dev){
@@ -3039,7 +3047,9 @@ function stockDipGate(ladder, cost, padSet){
 // dev≥10 就是邮件口径的「明显高位」，与安全垫 shout=false 同一条边界：此时后两条腿只陈述事实、
 // 不计进买入参考——否则会出现「现价高于均线 12% 却喊加强」这种自相矛盾的指令。
 // 价值硬否决照旧只标注、不参与降级（2026-10-31 裁决不变）。
-function stockBuyRef(dev, ladder, cost, padSet){
+// text 是给用户的白话明细（2026-11-01 用户投诉「均线+2·回撤+2·安全垫未破」读不懂）：只报每条腿的事实，
+// 打分与总分一律不外露；「三腿」这类内部术语只留在注释里。改措辞必须同步改邮件端镜像与双端矩阵。
+function stockBuyRef(dev, ladder, cost, padSet, padInfo){
   const hasDev = !(dev===null || dev===undefined || !isFinite(Number(dev)));
   const d = hasDev ? Number(dev) : null;
   let devScore = 0;
@@ -3053,11 +3063,20 @@ function stockBuyRef(dev, ladder, cost, padSet){
   let label;
   if(score>=3) label='双倍'; else if(score>=1) label='加强'; else if(score>=-1) label='正常';
   else if(score>=-3) label='减半'; else label='暂停';
-  const sgn = n => (n>0?'+':'')+n;
-  const devTxt = d===null ? '均线缺数据' : '均线'+sgn(devScore);
-  const ddTxt = !ladder ? '回撤未达档' : (ddScore===0 ? '回撤高位不计' : '回撤'+sgn(ddScore));
-  const padTxt = !padSet ? '安全垫未设' : (padScore===1 ? '安全垫跌破' : (cost ? '安全垫高位不计' : '安全垫未破'));
-  return {devScore, ddScore, padScore, score, label, text: devTxt+'·'+ddTxt+'·'+padTxt};
+  const pct = n => (n>=0?'+':'')+Number(n).toFixed(1)+'%';
+  const zone = d===null ? '' : (d<=-15 ? '深度低位' : d<=-5 ? '低位区' : d<3 ? '中性区间' : d<10 ? '偏高区' : '明显高位');
+  const devTxt = d===null ? '均线数据缺失' : '现价较均线 '+pct(d)+'（'+zone+'）';
+  const ddTxt = !ladder ? '52 周回撤未达 30% 档'
+    : (hot ? '52 周回撤 '+Number(ladder.dd).toFixed(1)+'%（高位期不采纳）'
+           : '52 周回撤 '+Number(ladder.dd).toFixed(1)+'%，'+(ddScore===2 ? '回撤较深' : '回撤达档'));
+  let padTxt;
+  if(!padSet) padTxt = '未设成本安全垫（填「目标跌幅」才启用这条腿）';
+  else if(cost && cost.shout) padTxt = '已跌穿成本安全垫（目标 '+cost.target+'%，现价相对成本 '+pct(cost.ret)+'）';
+  else if(cost) padTxt = '已跌穿成本安全垫（现价相对成本 '+pct(cost.ret)+'），高位期不采纳';
+  else if(padInfo && padInfo.ret!==null && padInfo.ret!==undefined) padTxt = '尚未跌穿成本安全垫（目标 '+padInfo.target+'%，现价相对成本 '+pct(padInfo.ret)+'）';
+  else if(padInfo) padTxt = '尚未跌穿成本安全垫（目标 '+padInfo.target+'%）';
+  else padTxt = '尚未跌穿成本安全垫';
+  return {devScore, ddScore, padScore, score, label, text: devTxt+'；'+ddTxt+'；'+padTxt};
 }
 // 股票加仓计划：档位比例按「整体持仓市值」计（2026-10-29 用户裁决：不是定投基数），
 // 按标的整手股数向下折算（A股 100、港股按标的读）——不足一手时只报目标金额，绝不四舍五入出虚构手数
@@ -3544,7 +3563,7 @@ function renderStockSection(){
     const sDip = dipAlertStock(s);
     const dCostStock = dipAlertStockCost(s, dev);
     // 买入参考 = 均线 + 回撤达档 + 安全垫三腿合成（2026-11-01），配色沿用现成的 dualPillClass
-    const sRef = stockBuyRef(dev, sDip, dCostStock, stockPadSet(s));
+    const sRef = stockBuyRef(dev, sDip, dCostStock, stockPadSet(s), stockPadInfo(s, ret));
     const pillCls = dualPillClass(sRef.label);
     const sDipGate = stockDipGate(sDip, dCostStock, stockPadSet(s));
     const sPlan = sDipGate.light ? stockAddPlan(stockMvOf(s), parseFloat(s.currentPrice)||0, sDip.add, stockLotSizeOf(s)) : null;
@@ -3567,12 +3586,12 @@ function renderStockSection(){
       </div>
       <div class="signal-strip">
         <span class="signal-pill ${pillCls}">买入参考·${sRef.label}</span>
-        <span class="dual-tag">三腿 ${sRef.text}</span>
         ${scorePillHtml(s)}
         ${valuePillHtml(vRow)}
         ${researchPillHtml(fundamentals.get(String(s.code)) || null)}
         ${disclosurePillHtml(calDisclosures[String(s.code || '').trim()] || null, calStatus)}
       </div>
+      <div class="signal-reason">${sRef.text}</div>
       <div class="signal-price">现价 ${s.currentPrice||'--'}${s.ma60?' · MA60 '+Number(s.ma60).toFixed(2):''}${s.ma120?' · MA120 '+Number(s.ma120).toFixed(2):''}</div>
       ${dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0)}
       ${sAlert ? stockSellBannerHtml(sAlert, sSellPlan) + tierDoneBtnHtml('stock', s.id, sAlert.tier.ret) : ''}

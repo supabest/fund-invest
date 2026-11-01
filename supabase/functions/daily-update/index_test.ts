@@ -371,7 +371,7 @@ Deno.test("接线：股票只有安全垫腿（没有 52 周高点）→ 2026-10
     assertEquals(res.status, 200);
     assertEquals(mail.includes("抄底提示"), false, "单腿（只有成本腿）不得点亮顶部横幅：" + mail.slice(0, 600));
     const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
-    assertEquals(stockSeg.includes("已跌破 -24% 成本安全垫"), true, "灯灭了事实也不能消失（📈 行仍要如实写出安全垫）");
+    assertEquals(stockSeg.includes("已跌穿成本安全垫（目标 -24%，现价相对成本 -24.7%）"), true, "灯灭了事实也不能消失（明细行仍要如实写出安全垫）");
     assertEquals(stockSeg.includes("建议买入"), false, "灯灭时不得留 🟢 买入标志");
     assertEquals(/NaN|Infinity/.test(mail), false);
   } finally {
@@ -415,7 +415,7 @@ Deno.test("接线：回撤与安全垫双腿齐备才点亮横幅，股票进同
     assertEquals(banner.includes("【600031】三一重工 收益 -24.7% 已跌破 -24% 安全垫"), true, "股票要和基金一样并进这一条：" + banner.slice(0, 400));
     assertEquals(banner.includes("建议加仓/多投"), true, "均线只有 3 根 ⇒ dev null ⇒ 不按高位压指令");
     const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
-    assertEquals(stockSeg.includes("已跌破 -24% 成本安全垫"), true, "📈 行如实补一句事实，与横幅同判据");
+    assertEquals(stockSeg.includes("已跌穿成本安全垫（目标 -24%，现价相对成本 -24.7%）"), true, "明细行如实写出事实，与横幅同判据");
     assertEquals(stockSeg.includes("建议买入 2 手（200 股）"), true, "灯亮时整手指令照旧：" + stockSeg.slice(0, 400));
     assertEquals(/NaN|Infinity/.test(mail), false);
   } finally {
@@ -490,7 +490,7 @@ Deno.test("接线：股票踩线但均线明显高位（dev≥+10%）→ 横幅�
     assertEquals(banner.includes("建议加仓"), false, "明显高位不许喊加仓");
     assertEquals(banner.includes("→"), false, "删掉指令后不留悬空箭头");
     const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
-    assertEquals(stockSeg.includes("已跌破 -30% 成本安全垫"), true);
+    assertEquals(stockSeg.includes("已跌穿成本安全垫（现价相对成本 -33.3%），高位期不采纳"), true);
     assertEquals(stockSeg.includes("明显高位"), true, "区间口径与仲裁同源（都是 dev≥+10%）");
     // 断言用「加仓档」而不是「建议买入」：本例 100 股 × 收盘 20 ⇒ 目标额不足一手，
     // 旧断言写的 建议买入 恰好是那条话术不会出现的分支，变异检验会假活（整条 🟢 标志才是判据）
@@ -506,7 +506,7 @@ Deno.test("接线：股票踩线但均线明显高位（dev≥+10%）→ 横幅�
 // ── 2026-11-01 用户裁决：股票「买入参考」由均线单腿改三腿合成（页面同判据，双端矩阵钉住在
 // scripts/signal_parity_test.ts）。这两条端到端只管「邮件正文真的把合成档位与三条腿写出来了」：
 // 纯函数矩阵绿不代表 r.tier / r.refText 接进了 📊 那一行。
-Deno.test("邮件接线：股票买入参考写三腿合成——深低位+回撤达档+跌穿安全垫要能报到「双倍」", async () => {
+Deno.test("邮件接线：股票买入参考写白话三条腿明细——深低位+回撤达档+跌穿安全垫要能报到「双倍」", async () => {
   const real = globalThis.fetch;
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
@@ -538,8 +538,14 @@ Deno.test("邮件接线：股票买入参考写三腿合成——深低位+回�
     const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
     assertEquals(stockSeg.includes('买入参考：<b style="color:#A87C2E;">双倍</b>'), true,
       "三条腿合计 +5 必须报「双倍」，只报「加强」说明回撤/安全垫两条腿又没并进买入参考：" + stockSeg.slice(0, 500));
-    assertEquals(stockSeg.includes("均线+2·回撤+2·安全垫跌破"), true,
-      "买入参考后面要当面写出三条腿各给了几分：" + stockSeg.slice(0, 500));
+    assertEquals(stockSeg.includes("52 周回撤 44.0%，回撤较深"), true,
+      "回撤腿要报出当前回撤与档位，不再写「回撤+2」这种没有单位的分数：" + stockSeg.slice(0, 500));
+    assertEquals(stockSeg.includes("已跌穿成本安全垫（目标 -25%，现价相对成本 -30.0%）"), true,
+      "安全垫腿要点明是「已跌穿」并给出目标与现价相对成本的数：" + stockSeg.slice(0, 500));
+    assertEquals(stockSeg.includes("三腿"), false, "正文不得再出现内部术语「三腿」");
+    assertEquals(/均线[+−-]\d|回撤[+−-]\d|安全垫(跌破|未破|未设|高位不计)/.test(stockSeg), false,
+      "旧的打分编码（均线+2/回撤+2/安全垫未破…）必须整体退场，不然两套说法并存更乱");
+    assertEquals(stockSeg.includes("📈 较均线"), false, "均线位置已在明细行报过，📈 行不能重复一遍同一个数");
     assertEquals(/NaN|Infinity|undefined/.test(mail), false);
   } finally {
     globalThis.fetch = real;
@@ -575,8 +581,9 @@ Deno.test("邮件接线：明显高位（dev≥+10%）时回撤档与安全垫�
     const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
     assertEquals(stockSeg.includes('买入参考：<b style="color:#A87C2E;">减半</b>'), true,
       "明显高位时买入参考必须退回均线单腿档（−2 ⇒ 减半）：" + stockSeg.slice(0, 500));
-    assertEquals(stockSeg.includes("均线-2·回撤高位不计·安全垫高位不计"), true,
-      "被压住的两条腿要点名「高位不计」，不能悄悄消失：" + stockSeg.slice(0, 500));
+    assertEquals(stockSeg.includes("（高位期不采纳）"), true,
+      "被压住的两条腿要明说「高位期不采纳」，不能悄悄消失：" + stockSeg.slice(0, 500));
+    assertEquals(stockSeg.includes("高位不计"), false, "「不计」是账房话，用户读不出主语是谁不采纳");
     assertEquals(/NaN|Infinity|undefined/.test(mail), false);
   } finally {
     globalThis.fetch = real;
@@ -2086,7 +2093,8 @@ Deno.test("邮件文案：规则速查不许再宣称「估值百分位两腿合
     const legend = mail.slice(mail.indexOf("信号规则速查"));
     assertEquals(legend.includes("估值百分位"), false, "两腿口径 2026-10-28 就下线了，速查还在教用户填分位");
     assertEquals(legend.includes("基金档位 = 均线偏离单腿"), true);
-    assertEquals(legend.includes("股票买入参考 = 三腿合成"), true);
+    assertEquals(legend.includes("股票买入参考 = 均线位置 + 52 周回撤 + 是否跌穿成本安全垫"), true);
+    assertEquals(legend.includes("三腿"), false, "速查是给用户看的，内部术语「三腿」不该出现在这里");
   } finally {
     globalThis.fetch = real;
     logs.restore();

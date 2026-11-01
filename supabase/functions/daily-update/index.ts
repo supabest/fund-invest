@@ -53,6 +53,12 @@
 //   dev≥+10%（即本邮件「明显高位」，也是 sGate.shout=false 那条线）时后两腿只陈述事实、不计分，
 //   否则会出现「现价高于均线 12% 却喊加强」的自相矛盾。价值硬否决照旧只标注、不参与降级（v12 裁决不变）。
 //   落库 stock_signal_state.tier 的词表不变；正文在档位后追加「｜三腿 均线+2·回撤+2·安全垫跌破」。
+// v15 (2026-11-01): 明细改白话（用户投诉「三腿 均线+2·回撤+2·安全垫未破」读不懂）——判据与阈值一字未动，
+//   只是不再把打分亮给用户：text 改成「现价较均线 −15.3%（深度低位）；52 周回撤 41.2%，回撤较深；
+//   尚未跌穿成本安全垫（目标 −15%，现价相对成本 +7.0%）」，位置词表复用本邮件既有的 深度低位/低位区/中性区间/偏高区/明显高位。
+//   「未破」这类容易被读成坏消息的说法退场；「三腿」降为代码注释里的内部术语。
+//   页面把同一句话放进 .signal-reason 灰字行（与基金侧同款），邮件放进 📊 行下方的灰字行，
+//   📈 行不再重复报均线位置与成本垫（原样重复会同一件事说两遍）。未跌穿的两个数由新增 stockPadInfo(s, ret) 供给。
 // 触发方式: POST /functions/v1/daily-update，Authorization: Bearer <DAILY_UPDATE_TOKEN>
 // 可选 body: {"force":true} 无变化也发送报告
 const GOAL_DEFAULT = 200000;
@@ -312,19 +318,23 @@ export function stockDipGate(
   return { light, needPad: !!(ladder && !padSet && !cost), shout: light ? !!(cost && cost.shout) : false };
 }
 
-// 股票买入参考·三腿合成（2026-11-01 用户裁决，与页面 stockBuyRef 逐格同判据）：
-// 均线腿 + 52 周回撤达档腿 + 成本安全垫腿；沿用既有词表与区间（双倍≥3/加强≥1/正常≥−1/减半≥−3/其余暂停），
-// 均线腿就是原单腿分档，回撤腿吃 DD_STEPS 现成档位（add≥40 → +2、add=30 → +1），安全垫腿吃 shout（跌破 → +1）。
+// 股票买入参考明细（2026-11-01 用户裁决，与页面 stockBuyRef 逐格同判据）：
+// 三条腿 = 均线位置 + 52 周回撤达档 + 成本安全垫是否跌穿；打分沿用既有区间（双倍≥3/加强≥1/正常≥−1/减半≥−3/其余暂停），
+// 均线腿就是原单腿分档，回撤腿吃 DD_STEPS 现成档位（add≥40 较深、add=30 达档），安全垫腿吃 shout（跌穿 → +1）。
 // dev≥STOCK_HOT_DEV（本邮件口径的「明显高位」，与安全垫 shout=false 同一条线）时后两腿只陈述事实、不计分，
 // 否则会出现「现价高于均线 12% 却喊加强」这种自相矛盾的指令。价值硬否决照旧只标注、不参与降级。
+// text 是给用户看的白话明细（用户投诉「均线+2·回撤+2·安全垫未破」读不懂）：只报事实，不露打分与总分，
+// 「三腿」这类内部术语只留在注释里。改措辞必须同步改页面与双端矩阵。
+export type StockPadInfo = { target: number; ret: number | null };
 export type StockBuyRef = {
   devScore: number; ddScore: number; padScore: number; score: number; label: string; text: string;
 };
 export function stockBuyRef(
   dev: number | null,
   ladder: { dd: number; add: number } | null,
-  cost: { shout?: boolean } | null,
+  cost: { shout?: boolean; ret?: number; target?: number } | null,
   padSet: boolean,
+  padInfo?: StockPadInfo | null,
 ): StockBuyRef {
   const hasDev = !(dev === null || dev === undefined || !isFinite(Number(dev)));
   const d = hasDev ? Number(dev) : null;
@@ -345,11 +355,32 @@ export function stockBuyRef(
   else if (score >= -1) label = '正常';
   else if (score >= -3) label = '减半';
   else label = '暂停';
-  const sgn = (n: number) => (n > 0 ? '+' : '') + n;
-  const devTxt = d === null ? '均线缺数据' : '均线' + sgn(devScore);
-  const ddTxt = !ladder ? '回撤未达档' : (ddScore === 0 ? '回撤高位不计' : '回撤' + sgn(ddScore));
-  const padTxt = !padSet ? '安全垫未设' : (padScore === 1 ? '安全垫跌破' : (cost ? '安全垫高位不计' : '安全垫未破'));
-  return { devScore, ddScore, padScore, score, label, text: devTxt + '·' + ddTxt + '·' + padTxt };
+  const pct = (n: number) => (n >= 0 ? '+' : '') + Number(n).toFixed(1) + '%';
+  const zone = d === null ? '' : (d <= -15 ? '深度低位' : d <= -5 ? '低位区' : d < 3 ? '中性区间' : d < 10 ? '偏高区' : '明显高位');
+  const devTxt = d === null ? '均线数据缺失' : '现价较均线 ' + pct(d) + '（' + zone + '）';
+  const ddTxt = !ladder ? '52 周回撤未达 30% 档'
+    : (hot ? '52 周回撤 ' + Number(ladder.dd).toFixed(1) + '%（高位期不采纳）'
+      : '52 周回撤 ' + Number(ladder.dd).toFixed(1) + '%，' + (ddScore === 2 ? '回撤较深' : '回撤达档'));
+  let padTxt: string;
+  if (!padSet) padTxt = '未设成本安全垫（填「目标跌幅」才启用这条腿）';
+  else if (cost && cost.shout) padTxt = '已跌穿成本安全垫（目标 ' + cost.target + '%，现价相对成本 ' + pct(Number(cost.ret)) + '）';
+  else if (cost) padTxt = '已跌穿成本安全垫（现价相对成本 ' + pct(Number(cost.ret)) + '），高位期不采纳';
+  else if (padInfo && padInfo.ret !== null && padInfo.ret !== undefined) padTxt = '尚未跌穿成本安全垫（目标 ' + padInfo.target + '%，现价相对成本 ' + pct(padInfo.ret) + '）';
+  else if (padInfo) padTxt = '尚未跌穿成本安全垫（目标 ' + padInfo.target + '%）';
+  else padTxt = '尚未跌穿成本安全垫';
+  return { devScore, ddScore, padScore, score, label, text: devTxt + '；' + ddTxt + '；' + padTxt };
+}
+
+// 明细行要用的安全垫数字（与页面 stockPadInfo 同判据）：dipAlertStockCost/stockDipAlert 只在「已跌穿」时
+// 返回对象，未跌穿拿不到目标与收益，所以这里按 stockPadSet 补一份；取不到收益就留 null，不拿 0 冒充「没跌穿」。
+export function stockPadInfo(
+  s: { cost?: unknown; currentPrice?: unknown; targetDrawdown?: unknown },
+  ret: number | null,
+): StockPadInfo | null {
+  if (!stockPadSet(s)) return null;
+  const target = -Math.abs(parseFloat(String(s.targetDrawdown)));
+  const r = (ret === null || ret === undefined || !isFinite(Number(ret))) ? null : Number(ret);
+  return { target, ret: r };
 }
 
 // 回撤加仓阶梯：与页面 DD_STEPS（index.html 2562）同表；改表必须双端同步，否则页面与邮件给出不同加仓档。
@@ -1297,7 +1328,7 @@ export async function handle(
           const sGate = stockDipGate(sLadder, sCostDip, stockPadSet(s));
           // 2026-11-01 用户裁决：买入参考改三腿合成（均线 + 回撤达档 + 成本安全垫），与页面同一格输入；
           // 缺均线数据不再整条造词，由「（数据不足）」后缀与三腿明细里的「均线缺数据」共同披露
-          const sRef = stockBuyRef(dev, sLadder, sCostDip, stockPadSet(s));
+          const sRef = stockBuyRef(dev, sLadder, sCostDip, stockPadSet(s), stockPadInfo(s, ret));
 
           stockSignalRows.push({ user_id: userId, code, tier: sRef.label + (dev === null ? '（数据不足）' : ''), profit_tier: newTier, updated_at: new Date().toISOString() });
 
@@ -1502,7 +1533,6 @@ export async function handle(
       const stockBlock = (stockReport[userId] || []).map(r => {
         if (r.fetchError) return '<li style="margin:12px 0;padding:10px 12px;background:#B14A341A;border-radius:8px;color:#B14A34;">⚠️ ' + r.fetchError + '</li>';
         if (r.capAlert) return '<li style="margin:12px 0;padding:10px 12px;background:#B14A341A;border-radius:8px;color:#B14A34;">⚠️ ' + r.capAlert + '</li>';
-        const zone = r.dev === null ? '数据不足' : (r.dev <= -15 ? '深度低位' : r.dev <= -5 ? '低位区' : r.dev < 3 ? '中性区间' : r.dev < 10 ? '偏高区' : '明显高位');
         let actionStr: string;
         if (r.dev === null) actionStr = '等待行情数据';
         else if (r.dev <= -15) actionStr = '深度低位，可分批买入拉低成本';
@@ -1523,9 +1553,9 @@ export async function handle(
           + '<b>【' + r.code + '】' + r.name + '</b> ' + retChipHtml(r.ret)
           + sellMarkHtml(r.sell, r.sellPlan)
           + buyMarkHtml(r.dipShout ? r.ladder : null, r.dipShout ? r.addPlan : null)
-          + '<div style="margin:4px 0;">📊 买入参考：<b style="color:#A87C2E;">' + r.tier + '</b>｜三腿 ' + r.refText + ' · 现价 ' + r.close + '（' + r.date + '）</div>'
-          + '<div style="color:#707C8C;font-size:13px;">📈 较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (trendStr ? '｜' + trendStr : '')
-          + (r.costDip ? '｜收益 ' + fmtSigned(r.costDip.ret) + ' 已跌破 ' + String(r.costDip.target) + '% 成本安全垫' : '') + legNote + '</div>'
+          + '<div style="margin:4px 0;">📊 买入参考：<b style="color:#A87C2E;">' + r.tier + '</b> · 现价 ' + r.close + '（' + r.date + '）</div>'
+          + '<div style="color:#707C8C;font-size:13px;">' + r.refText + legNote + '</div>'
+          + (trendStr ? '<div style="color:#707C8C;font-size:13px;">📈 ' + trendStr + '</div>' : '')
           + '<div style="color:#707C8C;font-size:13px;">💰 ' + profitStr + '</div>'
           + '<div style="margin-top:4px;">👉 ' + actionStr + '</div>'
           + '</li>';
@@ -1547,7 +1577,7 @@ export async function handle(
         + calendarSectionHtml(calItems, calToday)
         + '<div style="background:#F1EDE3;padding:14px;border-radius:8px;margin:16px 0;font-size:13px;">'
         + '<b>📖 信号规则速查</b>：双倍/加强 = 加大买入拉低成本｜正常 = 按计划定投｜减半/暂停 = 少买或停买<br>'
-        + '基金档位 = 均线偏离单腿（估值分位 2026-10-28 起不再参与）｜股票买入参考 = 三腿合成（均线 + 回撤达档 + 跌穿成本安全垫）；QDII溢价 / 主题仓位超限 / 手动暂停可覆盖档位<br>'
+        + '基金档位 = 均线偏离单腿（估值分位 2026-10-28 起不再参与）｜股票买入参考 = 均线位置 + 52 周回撤 + 是否跌穿成本安全垫，三条合看（明显高位时后两条只陈述、不采纳）；QDII溢价 / 主题仓位超限 / 手动暂停可覆盖档位<br>'
         + '止盈档位达到时系统会提醒分批卖出；大盘参考指数升至高位会降低买入系数。'
         + '</div>'
         + '<p style="color:#707C8C;font-size:12px;">本邮件由定投信号台自动发送 · 每日 22:30（北京时间）自动更新</p>'

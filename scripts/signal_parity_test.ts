@@ -19,7 +19,7 @@ import {
   computeReturn as pageComputeReturn, dualSignal, pctTier, setState,
   dipAlertStock as pageDipAlertStock, dipAlertFundLadder as pageDipFundLadder,
   dipAlertStockCost as pageDipStockCost,
-  stockPadSet as pageStockPadSet, stockDipGate as pageStockDipGate,
+  stockPadSet as pageStockPadSet, stockPadInfo as pageStockPadInfo, stockDipGate as pageStockDipGate,
   stockBuyRef as pageStockBuyRef,
   buyBannerHtml as pageBuyBanner,
   stockAddPlan as pageStockAddPlan, stockBuyBannerHtml as pageStockBuyBanner,
@@ -467,38 +467,44 @@ const LAD_60 = { dd: 55, add: 60 };
 const PAD_ON = { kind: "cost", ret: -12, target: -8, shout: true };
 const PAD_HUSH = { kind: "cost", ret: -12, target: -8, shout: false };
 
-Deno.test("三腿合成 golden：未达档/未破垫贡献 0，两条新腿缺席时必须退化回原均线档", () => {
+Deno.test("三腿明细 = 白话句子：不显示打分，只讲每条腿的事实（用户投诉「均线+2·回撤+2·安全垫未破」读不懂）", () => {
   const R = pageStockBuyRef;
-  const nail = (dev: number | null, ladder: Any, cost: Any, padSet: boolean, label: string, score: number, text: string) => {
+  const UNSET = "未设成本安全垫（填「目标跌幅」才启用这条腿）";
+  const DD_NA = "52 周回撤未达 30% 档";
+  const nail = (dev: number | null, ladder: Any, cost: Any, padSet: boolean, label: string, score: number, text: string, pad?: Any) => {
     const tag = `dev=${dev} add=${ladder ? ladder.add : '未达档'} pad=${cost ? cost.shout : 'null'} padSet=${padSet}`;
-    const r = R(dev, ladder, cost, padSet);
+    const r = R(dev, ladder, cost, padSet, pad);
     assertEquals(`${r.label}/${r.score}`, `${label}/${score}`, tag);
     assertEquals(r.text, text, `三腿明细 ${tag}`);
   };
-  const noPad = "回撤未达档·安全垫未设";
-  // 均线单腿（原 stockTierLabel 的每一档；旧代码这里返回同名标签，null 返回「缺数据」）
-  nail(-20, LAD_NA, null, false, "加强", 2, `均线+2·${noPad}`);
-  nail(-10, LAD_NA, null, false, "加强", 1, `均线+1·${noPad}`);
-  nail(-4, LAD_NA, null, false, "正常", 0, `均线0·${noPad}`);
-  nail(0, LAD_NA, null, false, "正常", 0, `均线0·${noPad}`);
-  nail(4, LAD_NA, null, false, "正常", -1, `均线-1·${noPad}`);
-  nail(15, LAD_NA, null, false, "减半", -2, `均线-2·${noPad}`);
-  nail(null, LAD_NA, null, false, "正常", 0, `均线缺数据·${noPad}`);
-  // 回撤腿：档位沿用 DD_STEPS（add≥40 记 +2，add=30 记 +1），不另设门槛
-  nail(-10, LAD_30, null, true, "加强", 2, "均线+1·回撤+1·安全垫未破");
-  nail(-10, LAD_40, null, true, "双倍", 3, "均线+1·回撤+2·安全垫未破");
-  nail(-10, LAD_60, null, true, "双倍", 3, "均线+1·回撤+2·安全垫未破");
-  nail(0, LAD_40, null, true, "加强", 2, "均线0·回撤+2·安全垫未破");
-  // 安全垫腿：跌穿记 +1，已设未破记 0，压根没设记 0 并在明细里点名
-  nail(0, LAD_NA, PAD_ON, true, "加强", 1, "均线0·回撤未达档·安全垫跌破");
-  nail(0, LAD_NA, null, true, "正常", 0, "均线0·回撤未达档·安全垫未破");
-  nail(-10, LAD_40, PAD_ON, true, "双倍", 4, "均线+1·回撤+2·安全垫跌破");
-  // 明显高位（dev≥10）：后两腿只陈述事实、不计分（沿用 dipAlertStockCost 里 shout=false 那条边界）
-  nail(12, LAD_40, PAD_HUSH, true, "减半", -2, "均线-2·回撤高位不计·安全垫高位不计");
-  nail(12, LAD_40, null, true, "减半", -2, "均线-2·回撤高位不计·安全垫未破");
-  nail(12, LAD_NA, null, false, "减半", -2, `均线-2·回撤未达档·安全垫未设`);
-  // 均线缺数据 + 双腿齐备：不再整条造「缺数据」词，缺的是哪条腿由明细披露
-  nail(null, LAD_40, PAD_ON, true, "双倍", 3, "均线缺数据·回撤+2·安全垫跌破");
+  // 均线腿：数字 + 邮件端在用的同一套位置词表（深度低位/低位区/中性区间/偏高区/明显高位），不另造术语
+  nail(-20, LAD_NA, null, false, "加强", 2, `现价较均线 -20.0%（深度低位）；${DD_NA}；${UNSET}`);
+  nail(-10, LAD_NA, null, false, "加强", 1, `现价较均线 -10.0%（低位区）；${DD_NA}；${UNSET}`);
+  nail(-4, LAD_NA, null, false, "正常", 0, `现价较均线 -4.0%（中性区间）；${DD_NA}；${UNSET}`);
+  nail(0, LAD_NA, null, false, "正常", 0, `现价较均线 +0.0%（中性区间）；${DD_NA}；${UNSET}`);
+  nail(4, LAD_NA, null, false, "正常", -1, `现价较均线 +4.0%（偏高区）；${DD_NA}；${UNSET}`);
+  nail(15, LAD_NA, null, false, "减半", -2, `现价较均线 +15.0%（明显高位）；${DD_NA}；${UNSET}`);
+  nail(null, LAD_NA, null, false, "正常", 0, `均线数据缺失；${DD_NA}；${UNSET}`);
+  // 回撤腿：ladder.dd 就是当前 52 周回撤，直接报数；档位深浅沿用 DD_STEPS 的 add，不显示 +1/+2
+  nail(-10, LAD_30, null, true, "加强", 2, "现价较均线 -10.0%（低位区）；52 周回撤 32.0%，回撤达档；尚未跌穿成本安全垫");
+  nail(-10, LAD_40, null, true, "双倍", 3, "现价较均线 -10.0%（低位区）；52 周回撤 40.0%，回撤较深；尚未跌穿成本安全垫");
+  nail(-10, LAD_60, null, true, "双倍", 3, "现价较均线 -10.0%（低位区）；52 周回撤 55.0%，回撤较深；尚未跌穿成本安全垫");
+  nail(0, LAD_40, null, true, "加强", 2, "现价较均线 +0.0%（中性区间）；52 周回撤 40.0%，回撤较深；尚未跌穿成本安全垫");
+  // 安全垫腿：跌穿与未跌穿是两回事，「未跌穿」不再写成容易被读成坏消息的「未破」
+  nail(0, LAD_NA, PAD_ON, true, "加强", 1, "现价较均线 +0.0%（中性区间）；52 周回撤未达 30% 档；已跌穿成本安全垫（目标 -8%，现价相对成本 -12.0%）");
+  nail(0, LAD_NA, null, true, "正常", 0, "现价较均线 +0.0%（中性区间）；52 周回撤未达 30% 档；尚未跌穿成本安全垫");
+  nail(-10, LAD_40, PAD_ON, true, "双倍", 4, "现价较均线 -10.0%（低位区）；52 周回撤 40.0%，回撤较深；已跌穿成本安全垫（目标 -8%，现价相对成本 -12.0%）");
+  // 未跌穿时把「目标跌幅」与「现价相对成本」两个数一并报出来（第 5 个参数由调用点供给）
+  nail(-10, LAD_40, null, true, "双倍", 3, "现价较均线 -10.0%（低位区）；52 周回撤 40.0%，回撤较深；尚未跌穿成本安全垫（目标 -15%，现价相对成本 +7.0%）", { target: -15, ret: 7 });
+  // 明显高位（dev≥10）：后两条腿点名「高位期不采纳」，不悄悄消失，也不再出现「不计」这种账房话
+  nail(12, LAD_40, PAD_HUSH, true, "减半", -2, "现价较均线 +12.0%（明显高位）；52 周回撤 40.0%（高位期不采纳）；已跌穿成本安全垫（现价相对成本 -12.0%），高位期不采纳");
+  nail(12, LAD_40, null, true, "减半", -2, "现价较均线 +12.0%（明显高位）；52 周回撤 40.0%（高位期不采纳）；尚未跌穿成本安全垫");
+  nail(12, LAD_NA, null, false, "减半", -2, `现价较均线 +12.0%（明显高位）；${DD_NA}；${UNSET}`);
+  // 均线缺数据 + 双腿齐备：缺的是哪条腿由句子自己披露
+  nail(null, LAD_40, PAD_ON, true, "双倍", 3, "均线数据缺失；52 周回撤 40.0%，回撤较深；已跌穿成本安全垫（目标 -8%，现价相对成本 -12.0%）");
+  // 用户投诉的这三个字不得再出现在任何面向用户的字符串里
+  assertEquals(pageStockBuyRef(-10, LAD_40, null, true).text.includes("三腿"), false, "明细里不许残留内部术语「三腿」");
+  assertEquals(pageStockBuyRef(-10, LAD_40, null, true).text.includes("+"), false, "明细里不许残留打分（用户选了只看事实）");
 });
 
 Deno.test("三腿合成后「双倍」终于可达、「暂停」仍不可达（最负只到 −2，不为此造负腿）", () => {
@@ -519,25 +525,48 @@ Deno.test("三腿合成后「双倍」终于可达、「暂停」仍不可达（
   assertEquals(maxScore, 5);
 });
 
-Deno.test("三腿合成双端矩阵：页面 stockBuyRef 与邮件端镜像在（dev × 回撤档 × 安全垫 × 是否已设）全格一致", () => {
+Deno.test("三腿合成双端矩阵：页面 stockBuyRef 与邮件端镜像在（dev × 回撤档 × 安全垫 × 是否已设 × 有无未跌穿数字）全格一致", () => {
   const devs: Array<number | null> = [null, -20, -15, -14.9, -10, -6, -5.1, -5, -4.9, -4, 0, 2, 2.9, 3, 5, 9.9, 10, 10.1, 25];
   const ladders: Array<Any> = [LAD_NA, LAD_30, LAD_40, LAD_60];
   const costs: Array<Any> = [null, PAD_ON, PAD_HUSH];
+  const pads: Array<Any> = [undefined, { target: -15, ret: 7 }, { target: -15, ret: null }];
   let cells = 0;
   for (const dev of devs) {
     for (const l of ladders) {
       for (const c of costs) {
         for (const set of [true, false]) {
-          const tag = `dev=${dev} add=${l ? l.add : 'null'} pad=${c ? c.shout : 'null'} padSet=${set}`;
-          const page = pageStockBuyRef(dev, l, c, set);
-          const srv = D.stockBuyRef(dev, l, c, set);
+          for (const p of pads) {
+          const tag = `dev=${dev} add=${l ? l.add : 'null'} pad=${c ? c.shout : 'null'} padSet=${set} padInfo=${p ? p.ret : 'none'}`;
+          const page = pageStockBuyRef(dev, l, c, set, p);
+          const srv = D.stockBuyRef(dev, l, c, set, p);
           assertEquals(srv, page, `双端三腿合成必须逐字同值：${tag}`);
           cells++;
+          }
         }
       }
     }
   }
   assert(cells >= 100, `矩阵格数不足（${cells}）说明循环写坏了`);
+});
+
+// 明细里那两个数（目标跌幅 / 现价相对成本）只有页面和邮件各自算一次的可能，这里钉住两端同值。
+Deno.test("stockPadInfo 双端同值：未跌穿才给数，没设垫或缺成本/现价一律 null", () => {
+  const cases = [
+    { code: "600031", cost: "20", currentPrice: "21.4", targetDrawdown: 15 },
+    { code: "600031", cost: "20", currentPrice: "17", targetDrawdown: 15 },
+    { code: "600031", cost: "20", currentPrice: "21.4", targetDrawdown: "" },
+    { code: "600031", cost: "0", currentPrice: "21.4", targetDrawdown: 15 },
+    { code: "600031", cost: "20", currentPrice: "", targetDrawdown: -15 },
+  ];
+  for (const s of cases) {
+    const ret = (parseFloat(s.cost) > 0 && parseFloat(s.currentPrice) > 0)
+      ? (parseFloat(s.currentPrice) - parseFloat(s.cost)) / parseFloat(s.cost) * 100 : null;
+    const page = pageStockPadInfo(s, ret);
+    const srv = (D as Any).stockPadInfo(s, ret);
+    assertEquals(srv, page, `stockPadInfo 双端必须同值：${JSON.stringify(s)}`);
+  }
+  assertEquals(pageStockPadInfo(cases[0], null), { target: -15, ret: null }, "已设垫但取不到收益 ⇒ 给目标、不给假数");
+  assertEquals(pageStockPadInfo(cases[2], 7), null, "没设垫不给数（明细会说「未设成本安全垫」）");
 });
 
 // 规则翻转（本日上线）：旧行为「任一腿突破就出横幅」全部作废，单腿一律空串。
@@ -923,28 +952,37 @@ Deno.test("接线守卫：折叠行胶囊条必须换行，股票买入参考两
   const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
   assert(/\.signal-strip\{[^}]*flex-wrap:wrap[^}]*\}/.test(html),
     ".signal-strip 必须带 flex-wrap:wrap（否则手机端「价值 硬否决」胶囊被 overflow:hidden 剪掉）");
-  assert(/const sRef = stockBuyRef\(dev, sDip, dCostStock, stockPadSet\(s\)\);/.test(html),
-    "页面股票卡片必须由 dipAlertStock + dipAlertStockCost + stockPadSet 的合成结果出档位");
+  assert(/const sRef = stockBuyRef\(dev, sDip, dCostStock, stockPadSet\(s\), stockPadInfo\(s, ret\)\);/.test(html),
+    "页面股票卡片必须由 dipAlertStock + dipAlertStockCost + stockPadSet 的合成结果出档位，并把安全垫的目标/现价比传进明细（未跌穿也要报数）");
   assert(/const pillCls = dualPillClass\(sRef\.label\);/.test(html),
     "页面买入参考胶囊配色必须跟着合成档位走（沿用现成的 dualPillClass，不再按 dev 手写）");
   assert(/<span class="signal-pill \$\{pillCls\}">买入参考·\$\{sRef\.label\}<\/span>/.test(html),
     "页面胶囊文案 = 买入参考·<合成档位>");
-  assert(/<span class="dual-tag">三腿 \$\{sRef\.text\}<\/span>/.test(html),
-    "折叠行必须当面写出三条腿各给了几分（用户投诉「只显示加强、看不出为什么」）");
+  assert(/<div class="signal-reason">\$\{sRef\.text\}<\/div>/.test(html),
+    "页面必须用基金侧同款的 .signal-reason 灰字行写出三条腿的事实（用户投诉胶囊条里的「三腿 +2/+2/未破」读不懂）");
+  assert(/<span class="dual-tag">三腿 \$\{sRef\.text\}<\/span>/.test(html) === false,
+    "折叠行胶囊条里不得再塞打分编码的「三腿」标签（那是内部术语，且 +2 没有单位）");
+  assert(/三腿 \$\{/.test(html) === false, "页面不得再有把「三腿」拼进用户可见文案的地方");
   assert(/function stockTierLabel\(/.test(html) === false,
     "均线单腿函数必须随合成上线一起删掉（留着说明还有卡片没换）");
   assert(/买入参考·\$\{tier\}/.test(html) === false, "胶囊不得再渲染单腿变量 tier");
 
   const server = await Deno.readTextFile(new URL("../supabase/functions/daily-update/index.ts", import.meta.url));
   assert(/export function stockBuyRef\(/.test(server), "邮件端必须导出同判据的 stockBuyRef");
-  assert(/const sRef = stockBuyRef\(dev, sLadder, sCostDip, stockPadSet\(s\)\);/.test(server),
-    "邮件股票腿必须把回撤档与安全垫两条腿并进买入参考（与页面同一格输入）");
+  assert(/const sRef = stockBuyRef\(dev, sLadder, sCostDip, stockPadSet\(s\), stockPadInfo\(s, ret\)\);/.test(server),
+    "邮件股票腿必须把回撤档与安全垫两条腿并进买入参考（与页面同一格输入，含安全垫目标/现价比）");
   assert(/const tier = baseSignalLabel\(dev\);/.test(server) === false,
     "邮件股票腿不得再退回均线单腿（baseSignalLabel 只留给基金腿）");
   assertEquals((server.match(/tier: sRef\.label \+ \(dev === null \? '（数据不足）' : ''\)/g) || []).length,
     2, "落库行与报告行都要用合成档位，并保留「缺均线数据」的事随后缀");
-  assert(/refText: sRef\.text/.test(server), "邮件报告行要带上三腿明细");
-  assert(/｜三腿 ' \+ r\.refText \+ ' · 现价/.test(server), "邮件正文必须把三腿明细写在买入参考后面");
+  assert(/refText: sRef\.text/.test(server), "邮件报告行要带上三条腿的白话明细");
+  assert(/<div style="color:#707C8C;font-size:13px;">' \+ r\.refText/.test(server),
+    "邮件必须把白话明细单独放一行灰字（与页面 .signal-reason 同款），不再挤在买入参考后面");
+  assert(/r\.tier \+ '<\/b>｜三腿/.test(server) === false,
+    "邮件正文不得再把档位后面接一段打分编码（那句「｜三腿 均线+2·…」是本次要下线的写法）");
+  assert(/三腿/.test(server.split('\n').filter(l => !/^\s*\/\//.test(l)).join('\n')) === false,
+    "去掉注释后的邮件源码不得再出现内部术语「三腿」");
+  assert(/📈 较均线/.test(server) === false, "均线位置已在明细行报过，📈 行不得重复一遍");
 });
 
 Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对的函数（防「测试绿但生产走岔路」）", async () => {
