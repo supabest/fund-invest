@@ -90,6 +90,24 @@
   .signal-price{font-size:12px; color:var(--muted); padding:0 16px 12px 16px; white-space:nowrap; overflow-x:auto;}
   .signal-reason{font-size:11.5px; color:var(--muted); padding:0 16px 14px 16px; line-height:1.6;}
 
+  /* 2026-11-01：止盈/买入/价值三栏收口，浅色底块 + 标题左对齐，替代原来散落各处的横幅与胶囊 */
+  .ref-section{margin:0 16px 12px 16px; padding:12px 14px; border-radius:8px; background:var(--panel-2); border:1px solid var(--line);}
+  .ref-title{font-size:11px; font-weight:600; color:var(--muted); letter-spacing:.5px; margin-bottom:8px; text-transform:uppercase;}
+  .ref-row{font-size:12.5px; color:var(--ivory); line-height:1.7;}
+  .ref-row .muted{color:var(--muted);}
+  .ref-empty{font-size:12px; color:var(--muted); font-style:italic;}
+  /* 价值四维雷达：2×2 网格，每格一个维度 */
+  .value-radar{display:grid; grid-template-columns:1fr 1fr; gap:8px 12px; margin-bottom:10px;}
+  .value-dim{font-size:11.5px; line-height:1.5;}
+  .value-dim .dim-label{color:var(--muted); font-size:10.5px;}
+  .value-dim .dim-val{color:var(--ivory); font-weight:500;}
+  .value-dim .dim-val.warn{color:var(--brick);}
+  .value-dim .dim-val.ok{color:var(--jade);}
+  .value-verdict{font-size:12.5px; color:var(--ivory); line-height:1.6; padding-top:8px; border-top:1px solid var(--line);}
+  .value-verdict .verdict-warn{color:var(--brick);}
+  .value-verdict .verdict-ok{color:var(--jade);}
+  .value-note{font-size:10.5px; color:var(--muted); margin-top:6px; font-style:italic;}
+
   .dual-strip{display:flex; align-items:center; gap:8px; padding:0 16px 6px 16px; flex-wrap:wrap;}
   .dual-tag{font-size:11px; color:var(--muted); border:1px dashed var(--line-strong); border-radius:4px; padding:2px 6px; white-space:nowrap;}
   /* 财报日历只做提醒、不参与任何信号，所以配色走中性灰，不与买卖档的 jade/gold 抢注意力 */
@@ -315,6 +333,15 @@
     .signal-amount{font-size:14px;}
     .signal-price{font-size:14px; padding:0 20px 14px 20px;}
     .signal-reason{font-size:14px; padding:0 20px 16px 20px;}
+    .ref-section{margin:0 20px 14px 20px; padding:14px 16px;}
+    .ref-title{font-size:12px;}
+    .ref-row{font-size:14px;}
+    .ref-empty{font-size:13px;}
+    .value-radar{gap:10px 16px;}
+    .value-dim{font-size:13px;}
+    .value-dim .dim-label{font-size:11.5px;}
+    .value-verdict{font-size:14px;}
+    .value-note{font-size:11.5px;}
     .dual-strip{padding:0 20px 8px 20px;}
     .dual-tag{font-size:12.5px;}
     .disclosure-pill{font-size:12.5px;}
@@ -1042,6 +1069,129 @@ function valueDipVetoHtml(row, indByL2, hasBatch){
   return '<div class="trade-banner" style="background:#FBECE8;border-color:#B14A34;color:#8A3928;">⛔ 价值 硬否决·'
     + VALUE_VETO_CLASS_CN[cls] + why + '（仅标注，不改变本条指令）</div>';
 }
+
+// ==== 2026-11-01 三栏收口：止盈参考 / 买入参考 / 价值评估 ====
+// 止盈参考：始终显示，无数据时给"暂无止盈档"
+function profitRefHtml(sAlert, nextTier, ret, sSellPlan, s){
+  var rows = [];
+  if(ret !== null){
+    var retCls = ret >= 0 ? 'ret-pos' : 'ret-neg';
+    rows.push('<span class="' + retCls + '">' + fmtPct(ret, 1) + '</span><span class="muted"> · 当前收益</span>');
+  }
+  if(sAlert){
+    rows.push('<span class="muted">已达</span> +' + sAlert.tier.ret + '% <span class="muted">止盈档（卖</span>' + sAlert.tier.sell + '%<span class="muted">）</span>');
+    if(sSellPlan){
+      if(sSellPlan.lots < 1){
+        rows.push('<span class="muted">· 剩余</span> ' + sSellPlan.shares + ' <span class="muted">股，不足 1 手（每手</span> ' + sSellPlan.lotSize + ' <span class="muted">股）</span>');
+      } else {
+        rows.push('<span class="muted">· 建议卖出</span> ' + sSellPlan.lots + ' <span class="muted">手（</span>' + sSellPlan.qty + ' <span class="muted">股）≈</span> ' + fmtMoney(sSellPlan.amount));
+      }
+    }
+  } else if(nextTier){
+    var dist = nextTier.ret - (ret || 0);
+    rows.push('<span class="muted">下一止盈档</span> +' + nextTier.ret + '% <span class="muted">（卖</span>' + nextTier.sell + '%<span class="muted">），距档</span> +' + dist.toFixed(1) + '%');
+  } else {
+    rows.push('<span class="ref-empty">暂无止盈档</span>');
+  }
+  return '<div class="ref-section"><div class="ref-title">止盈参考</div><div class="ref-row">' + rows.join('') + '</div></div>';
+}
+
+// 买入参考：收拢买入 label + 三腿事实句 + MA 行 + 双信号 + 买入横幅
+function buyRefHtml(sRef, pillCls, s, dev, sDipGate, sPlan, dCostStock, dualHtml, sDip, dipPadHtml, buyBannerHtml){
+  var parts = [];
+  parts.push('<span class="signal-pill ' + pillCls + '">买入参考·' + sRef.label + '</span>');
+  parts.push('<div class="ref-row" style="margin-top:8px;">' + escapeHtml(sRef.text) + '</div>');
+  var maLine = '现价 ' + (s.currentPrice || '--');
+  if(s.ma60) maLine += ' · MA60 ' + Number(s.ma60).toFixed(2);
+  if(s.ma120) maLine += ' · MA120 ' + Number(s.ma120).toFixed(2);
+  parts.push('<div class="ref-row muted" style="margin-top:6px;">' + maLine + '</div>');
+  if(dualHtml) parts.push('<div style="margin-top:10px;">' + dualHtml + '</div>');
+  if(dipPadHtml) parts.push('<div style="margin-top:10px;">' + dipPadHtml + '</div>');
+  if(buyBannerHtml) parts.push('<div style="margin-top:10px;">' + buyBannerHtml + '</div>');
+  return '<div class="ref-section"><div class="ref-title">买入参考</div>' + parts.join('') + '</div>';
+}
+
+// 价值评估：四维雷达 + 巴菲特式人话 verdict（替代原"硬否决 ⛔"）
+// 指令隔离：只陈述事实，不改变买入/止盈指令（2026-10-31 用户裁定）
+function valueAssessmentHtml(vRow, indByL2, hasBatch){
+  if(vRow === undefined) return '';
+  if(vRow === null) return hasBatch ? '<div class="ref-section"><div class="ref-title">价值评估</div><div class="ref-empty">本批次无该股数据（未判定）</div></div>' : '';
+
+  var moat = valueNumOrNull(vRow.v_moat);
+  var health = valueNumOrNull(vRow.v_health);
+  var roic = valueNumOrNull(vRow.roic_med);
+  var mos = valueNumOrNull(vRow.margin_of_safety);
+
+  // 四维判定（阈值内嵌，不对外露）
+  var moatLabel = moat === null ? 'NA' : (moat >= 70 ? '宽' : moat >= 40 ? '窄' : '无');
+  var moatCls = moat === null ? '' : (moat >= 40 ? 'ok' : 'warn');
+  var healthLabel = health === null ? 'NA' : (health >= 70 ? '强' : health >= 40 ? '中' : '弱');
+  var healthCls = health === null ? '' : (health >= 40 ? 'ok' : 'warn');
+  var roicLabel = roic === null ? 'NA' : (roic >= ROIC_GATE_PCT ? '达标' : '未达标');
+  var roicCls = roic === null ? '' : (roic >= ROIC_GATE_PCT ? 'ok' : 'warn');
+  var mosLabel = mos === null ? 'NA' : (mos > 0 ? '正 ' + valueFmtPp(mos, 1) : '负 ' + valueFmtPp(mos, 1));
+  var mosCls = mos === null ? '' : (mos > 0 ? 'ok' : 'warn');
+
+  // 同行参照（仅参考，不参与 verdict）
+  var ind = (indByL2 && vRow.ths_l2) ? indByL2[vRow.ths_l2] : null;
+  var indMed = ind ? valueNumOrNull(ind.med) : null;
+  var indTxt = indMed !== null ? '（同行业中位 ' + valueFmtPct(indMed) + '）' : '';
+
+  // Verdict：人话事实，不露算式与内部术语
+  var verdict = '';
+  var verdictCls = '';
+  var reasons = (vRow.veto_reasons || []);
+  var isVetoed = vRow.tier === 'vetoed' || vRow.vetoed;
+
+  if(isVetoed){
+    verdictCls = 'verdict-warn';
+    var hasMoatIssue = reasons.indexOf('无护城河证据') >= 0;
+    var hasQualityIssue = reasons.some(function(x){ return x !== '无护城河证据'; });
+    var roicBelow = roic !== null && roic < ROIC_GATE_PCT;
+
+    if(roicBelow && hasMoatIssue){
+      verdict = '资本回报未覆盖资本成本，护城河不足以补偿';
+    } else if(roicBelow){
+      verdict = '资本回报未覆盖资本成本' + (indMed !== null ? '，且低于同行业中位' : '');
+    } else if(hasMoatIssue){
+      verdict = '未见可识别护城河，长期持有风险偏高';
+    } else if(hasQualityIssue){
+      verdict = '质地存在硬伤：' + escapeHtml(reasons.filter(function(x){ return x !== '无护城河证据'; }).join('、'));
+    } else {
+      verdict = '价值评估未通过';
+    }
+  } else {
+    // 非否决：看四维整体
+    var weakDims = [];
+    if(moat !== null && moat < 40) weakDims.push('护城河');
+    if(roic !== null && roic < ROIC_GATE_PCT) weakDims.push('资本回报');
+    if(mos !== null && mos <= 0) weakDims.push('安全边际');
+    if(health !== null && health < 40) weakDims.push('财务稳健');
+
+    if(weakDims.length === 0){
+      verdict = '具备长期配置价值';
+      verdictCls = 'verdict-ok';
+    } else if(weakDims.length <= 2){
+      verdict = weakDims.join('、') + '偏弱，可观察等待更好价格';
+    } else {
+      verdict = '多维度偏弱，不建议新建仓';
+      verdictCls = 'verdict-warn';
+    }
+  }
+
+  var html = '<div class="ref-section"><div class="ref-title">价值评估</div>';
+  html += '<div class="value-radar">';
+  html += '<div class="value-dim"><div class="dim-label">护城河</div><div class="dim-val ' + moatCls + '">' + moatLabel + '</div></div>';
+  html += '<div class="value-dim"><div class="dim-label">资本回报</div><div class="dim-val ' + roicCls + '">' + roicLabel + (roic !== null ? ' · ' + valueFmtPct(roic) : '') + indTxt + '</div></div>';
+  html += '<div class="value-dim"><div class="dim-label">安全边际</div><div class="dim-val ' + mosCls + '">' + mosLabel + '</div></div>';
+  html += '<div class="value-dim"><div class="dim-label">财务稳健</div><div class="dim-val ' + healthCls + '">' + healthLabel + '</div></div>';
+  html += '</div>';
+  html += '<div class="value-verdict"><span class="' + verdictCls + '">' + verdict + '</span></div>';
+  html += '<div class="value-note">价值评估只回答"值不值"，不等于买卖指令</div>';
+  html += '</div>';
+  return html;
+}
+
 function valueGateHtml(row, indByL2){
   if(!row) return '';
   const bar = (v,l)=>'<div class="score-bar"><span>'+l+'</span><i style="--w:'+Math.max(0,Math.min(100, v==null?0:Number(v)))+'%"></i><em>'+(v==null?'NA':Number(v).toFixed(0))+'</em></div>';
@@ -3466,24 +3616,29 @@ function renderFundList(){
     const dLadder = dipAlertFundLadder(f, sig);
     const dips = [dCost, dLadder].filter(Boolean);
 
+    // 2026-11-01 基金两栏收口：止盈参考 / 买入参考（无价值评估）
+    const fundProfitRef = profitRefHtml(alert, nextTier, ret, null, f);
+    const fundBuyRef = `<div class="ref-section"><div class="ref-title">买入参考</div>
+      <span class="signal-pill ${pillClass(sig.level)}">${sig.label}</span>
+      ${sig.multiplier!==undefined ? '<span class="signal-amount" style="margin-left:8px;">建议金额 '+fmtMoney((f.baseAmount||0)*sig.multiplier*coef)+'/期</span>' : ''}
+      <div class="ref-row" style="margin-top:8px;">${escapeHtml(sig.reasons.join('；'))}</div>
+      ${dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0, false) ? '<div style="margin-top:10px;">' + dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0, false) + '</div>' : ''}
+      ${dips.length ? '<div style="margin-top:10px;">' + buyBannerHtml(dips) + '</div>' : ''}
+    </div>`;
+
     card.innerHTML = `
       <div class="fund-head" data-id="${f.id}">
         <div class="fund-head-left">
           <div class="fund-name">${escapeHtml(f.name || '未命名基金')}</div>
-          <div class="fund-meta">${escapeHtml(f.theme||'未分类')}${f.isQDII?' · QDII':''} · 市值 ${fmtMoney(f.marketValue||0)} · ${profitMetaText(alert, nextTier)}</div>
+          <div class="fund-meta">${escapeHtml(f.theme||'未分类')}${f.isQDII?' · QDII':''} · 市值 ${fmtMoney(f.marketValue||0)}</div>
         </div>
         <div class="fund-return ${ret>=0?'ret-pos':'ret-neg'}">${fmtPct(ret,1)}</div>
         ${alert?'<span class="trade-badge sell">🔴 止盈</span>':''}${dips.length?'<span class="trade-badge buy">🟢 抄底</span>':''}
         <div class="chevron" id="chev-${f.id}">▸</div>
       </div>
-      <div class="signal-strip">
-        <span class="signal-pill ${pillClass(sig.level)}">${sig.label}</span>
-        <span class="signal-amount">${sig.multiplier!==undefined ? '建议金额 '+fmtMoney((f.baseAmount||0)*sig.multiplier*coef)+'/期' : ''}</span>
-      </div>
-      <div class="signal-reason">${sig.reasons.join('；')}</div>
-      ${dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0, false)}
+      ${fundProfitRef}
+      ${fundBuyRef}
       ${alert ? sellBannerHtml(alert) + tierDoneBtnHtml('fund', f.id, alert.tier.ret) : ''}
-      ${dips.length ? buyBannerHtml(dips) : ''}
       <div class="fund-body" id="body-${f.id}"></div>
     `;
     list.appendChild(card);
@@ -3567,37 +3722,39 @@ function renderStockSection(){
     const pillCls = dualPillClass(sRef.label);
     const sDipGate = stockDipGate(sDip, dCostStock, stockPadSet(s));
     const sPlan = sDipGate.light ? stockAddPlan(stockMvOf(s), parseFloat(s.currentPrice)||0, sDip.add, stockLotSizeOf(s)) : null;
-    // 价值否决只在灯亮时标注一次（用户裁定：只标注，不改指令）；取不到本批次行 = null = 未判定，不等于合格
+    // 价值评估（2026-11-01）：取不到本批次行 = null = 未判定，不等于合格
     const vRow = valueState ? valueState.rows.get(String(s.code||'').trim()) || null : null;
-    const vetoNote = sDipGate.light ? valueDipVetoHtml(vRow, valueIndRef ? valueIndRef.byL2 : null, !!valueState) : '';
     // 止盈：档位比例 → 股数 → 整手；缺股数/现价/港股手数时不给手数，只报比例
     const sSellPlan = sAlert ? stockSellPlan(parseFloat(s.shares)||0, parseFloat(s.currentPrice)||0, sAlert.tier.sell, stockLotSizeOf(s)) : null;
     const card = document.createElement('div');
     card.className = 'fund-card';
+    // 2026-11-01 三栏收口：止盈参考 / 买入参考 / 价值评估
+    const dualHtml = dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0);
+    const dipPadHtml = sDipGate.needPad ? dipPadHintHtml() : '';
+    const buyBanner = sDipGate.light ? stockBuyBannerHtml(sDip, sPlan, dCostStock) : '';
+    const sellBanner = sAlert ? stockSellBannerHtml(sAlert, sSellPlan) + tierDoneBtnHtml('stock', s.id, sAlert.tier.ret) : '';
+    const profitRef = profitRefHtml(sAlert, nextTier, ret, sSellPlan, s);
+    const buyRef = buyRefHtml(sRef, pillCls, s, dev, sDipGate, sPlan, dCostStock, dualHtml, sDip, dipPadHtml, buyBanner);
+    const valueRef = valueAssessmentHtml(vRow, valueIndRef ? valueIndRef.byL2 : null, !!valueState);
     card.innerHTML = `
       <div class="fund-head" data-sid="${s.id}">
         <div class="fund-head-left">
           <div class="fund-name">${escapeHtml(s.name || '未命名股票')}</div>
-          <div class="fund-meta">${exchangeLabel(s.code)} · ${s.shares||0} 股 · 市值 ${fmtMoney(stockMvOf(s))}${s.priceDate?' · '+s.priceDate:''} · ${profitMetaText(sAlert, nextTier)}</div>
+          <div class="fund-meta">${exchangeLabel(s.code)} · ${s.shares||0} 股 · 市值 ${fmtMoney(stockMvOf(s))}${s.priceDate?' · '+s.priceDate:''}</div>
         </div>
         <div class="fund-return ${ret!==null&&ret>=0?'ret-pos':'ret-neg'}">${fmtPct(ret,1)}</div>
         ${sAlert?'<span class="trade-badge sell">🔴 止盈</span>':''}${sDipGate.light?'<span class="trade-badge buy">🟢 抄底</span>':''}
         <div class="chevron" id="schev-${s.id}">▸</div>
       </div>
       <div class="signal-strip">
-        <span class="signal-pill ${pillCls}">买入参考·${sRef.label}</span>
         ${scorePillHtml(s)}
-        ${valuePillHtml(vRow)}
         ${researchPillHtml(fundamentals.get(String(s.code)) || null)}
         ${disclosurePillHtml(calDisclosures[String(s.code || '').trim()] || null, calStatus)}
       </div>
-      <div class="signal-reason">${sRef.text}</div>
-      <div class="signal-price">现价 ${s.currentPrice||'--'}${s.ma60?' · MA60 '+Number(s.ma60).toFixed(2):''}${s.ma120?' · MA120 '+Number(s.ma120).toFixed(2):''}</div>
-      ${dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0)}
-      ${sAlert ? stockSellBannerHtml(sAlert, sSellPlan) + tierDoneBtnHtml('stock', s.id, sAlert.tier.ret) : ''}
-      ${sDipGate.needPad ? dipPadHintHtml() : ''}
-      ${sDipGate.light ? stockBuyBannerHtml(sDip, sPlan, dCostStock) : ''}
-      ${vetoNote}
+      ${profitRef}
+      ${buyRef}
+      ${valueRef}
+      ${sellBanner}
       <div class="fund-body" id="sbody-${s.id}"></div>
     `;
     list.appendChild(card);
