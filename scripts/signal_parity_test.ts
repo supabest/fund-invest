@@ -20,6 +20,7 @@ import {
   dipAlertStock as pageDipAlertStock, dipAlertFundLadder as pageDipFundLadder,
   dipAlertStockCost as pageDipStockCost,
   stockPadSet as pageStockPadSet, stockDipGate as pageStockDipGate,
+  stockBuyRef as pageStockBuyRef,
   buyBannerHtml as pageBuyBanner,
   stockAddPlan as pageStockAddPlan, stockBuyBannerHtml as pageStockBuyBanner,
   stockSellPlan as pageStockSellPlan, stockSellBannerHtml as pageStockSellBanner,
@@ -454,6 +455,91 @@ Deno.test("双端矩阵：stockDipGate 与 stockPadSet 在（双腿 × 是否已
   }
 });
 
+// ── 2026-11-01 用户裁决：股票「买入参考」不再只吃均线单腿，改三腿合成 ──
+// 现场：000338 折叠卡只显示「买入参考·加强」，用户看不出这个「加强」是均线给的还是回撤给的，
+// 而同一张卡片上其实已经算着 52 周回撤达档（dipAlertStock）与成本安全垫（dipAlertStockCost）。
+// 三腿沿用既有词表与档位区间（双倍≥3/加强≥1/正常≥−1/减半≥−3/其余暂停），不新增阈值数字；
+// 价值硬否决仍只标注、不参与降级（2026-10-31 裁决不变）。
+const LAD_NA = null;                                    // 回撤未达档
+const LAD_30 = { dd: 32, add: 30 };
+const LAD_40 = { dd: 40, add: 40 };
+const LAD_60 = { dd: 55, add: 60 };
+const PAD_ON = { kind: "cost", ret: -12, target: -8, shout: true };
+const PAD_HUSH = { kind: "cost", ret: -12, target: -8, shout: false };
+
+Deno.test("三腿合成 golden：未达档/未破垫贡献 0，两条新腿缺席时必须退化回原均线档", () => {
+  const R = pageStockBuyRef;
+  const nail = (dev: number | null, ladder: Any, cost: Any, padSet: boolean, label: string, score: number, text: string) => {
+    const tag = `dev=${dev} add=${ladder ? ladder.add : '未达档'} pad=${cost ? cost.shout : 'null'} padSet=${padSet}`;
+    const r = R(dev, ladder, cost, padSet);
+    assertEquals(`${r.label}/${r.score}`, `${label}/${score}`, tag);
+    assertEquals(r.text, text, `三腿明细 ${tag}`);
+  };
+  const noPad = "回撤未达档·安全垫未设";
+  // 均线单腿（原 stockTierLabel 的每一档；旧代码这里返回同名标签，null 返回「缺数据」）
+  nail(-20, LAD_NA, null, false, "加强", 2, `均线+2·${noPad}`);
+  nail(-10, LAD_NA, null, false, "加强", 1, `均线+1·${noPad}`);
+  nail(-4, LAD_NA, null, false, "正常", 0, `均线0·${noPad}`);
+  nail(0, LAD_NA, null, false, "正常", 0, `均线0·${noPad}`);
+  nail(4, LAD_NA, null, false, "正常", -1, `均线-1·${noPad}`);
+  nail(15, LAD_NA, null, false, "减半", -2, `均线-2·${noPad}`);
+  nail(null, LAD_NA, null, false, "正常", 0, `均线缺数据·${noPad}`);
+  // 回撤腿：档位沿用 DD_STEPS（add≥40 记 +2，add=30 记 +1），不另设门槛
+  nail(-10, LAD_30, null, true, "加强", 2, "均线+1·回撤+1·安全垫未破");
+  nail(-10, LAD_40, null, true, "双倍", 3, "均线+1·回撤+2·安全垫未破");
+  nail(-10, LAD_60, null, true, "双倍", 3, "均线+1·回撤+2·安全垫未破");
+  nail(0, LAD_40, null, true, "加强", 2, "均线0·回撤+2·安全垫未破");
+  // 安全垫腿：跌穿记 +1，已设未破记 0，压根没设记 0 并在明细里点名
+  nail(0, LAD_NA, PAD_ON, true, "加强", 1, "均线0·回撤未达档·安全垫跌破");
+  nail(0, LAD_NA, null, true, "正常", 0, "均线0·回撤未达档·安全垫未破");
+  nail(-10, LAD_40, PAD_ON, true, "双倍", 4, "均线+1·回撤+2·安全垫跌破");
+  // 明显高位（dev≥10）：后两腿只陈述事实、不计分（沿用 dipAlertStockCost 里 shout=false 那条边界）
+  nail(12, LAD_40, PAD_HUSH, true, "减半", -2, "均线-2·回撤高位不计·安全垫高位不计");
+  nail(12, LAD_40, null, true, "减半", -2, "均线-2·回撤高位不计·安全垫未破");
+  nail(12, LAD_NA, null, false, "减半", -2, `均线-2·回撤未达档·安全垫未设`);
+  // 均线缺数据 + 双腿齐备：不再整条造「缺数据」词，缺的是哪条腿由明细披露
+  nail(null, LAD_40, PAD_ON, true, "双倍", 3, "均线缺数据·回撤+2·安全垫跌破");
+});
+
+Deno.test("三腿合成后「双倍」终于可达、「暂停」仍不可达（最负只到 −2，不为此造负腿）", () => {
+  const devs: Array<number | null> = [null, -20, -15, -10, -6, -5, -4, 0, 2, 3, 5, 9.9, 10, 25];
+  const ladders: Array<Any> = [LAD_NA, LAD_30, LAD_40, LAD_60];
+  const costs: Array<Any> = [null, PAD_ON, PAD_HUSH];
+  const labels = new Set<string>();
+  let minScore = Infinity, maxScore = -Infinity;
+  for (const dev of devs) for (const l of ladders) for (const c of costs) for (const set of [true, false]) {
+    const r = pageStockBuyRef(dev, l, c, set);
+    labels.add(r.label);
+    minScore = Math.min(minScore, r.score);
+    maxScore = Math.max(maxScore, r.score);
+  }
+  assertEquals(labels.has("双倍"), true, "深回撤 + 均线低位 + 跌穿安全垫要能报到「双倍」（均线单腿时代最高 +2，永远够不到）");
+  assertEquals(labels.has("暂停"), false, "三条腿最负 −2+0+0，「暂停」不可达是事实，不为了凑出它臆造负腿");
+  assertEquals(minScore, -2);
+  assertEquals(maxScore, 5);
+});
+
+Deno.test("三腿合成双端矩阵：页面 stockBuyRef 与邮件端镜像在（dev × 回撤档 × 安全垫 × 是否已设）全格一致", () => {
+  const devs: Array<number | null> = [null, -20, -15, -14.9, -10, -6, -5.1, -5, -4.9, -4, 0, 2, 2.9, 3, 5, 9.9, 10, 10.1, 25];
+  const ladders: Array<Any> = [LAD_NA, LAD_30, LAD_40, LAD_60];
+  const costs: Array<Any> = [null, PAD_ON, PAD_HUSH];
+  let cells = 0;
+  for (const dev of devs) {
+    for (const l of ladders) {
+      for (const c of costs) {
+        for (const set of [true, false]) {
+          const tag = `dev=${dev} add=${l ? l.add : 'null'} pad=${c ? c.shout : 'null'} padSet=${set}`;
+          const page = pageStockBuyRef(dev, l, c, set);
+          const srv = D.stockBuyRef(dev, l, c, set);
+          assertEquals(srv, page, `双端三腿合成必须逐字同值：${tag}`);
+          cells++;
+        }
+      }
+    }
+  }
+  assert(cells >= 100, `矩阵格数不足（${cells}）说明循环写坏了`);
+});
+
 // 规则翻转（本日上线）：旧行为「任一腿突破就出横幅」全部作废，单腿一律空串。
 Deno.test("股票抄底横幅：双腿齐备才出，单腿一律空串；明显高位只陈述、不留悬空箭头", () => {
   const ladder = { dd: 36, add: 40 };
@@ -829,6 +915,38 @@ Deno.test("接线守卫：股票安全垫有输入框、保存写 s.targetDrawdo
   assert(/成本安全垫/.test(server), "股票行必须如实写出成本安全垫状态");
 });
 
+// 2026-11-01 两件事必须由源码钉住，否则「矩阵全绿而生产走岔路」的老毛病会重犯：
+// ① 页面折叠行的胶囊条要换行——.fund-card 是 overflow:hidden，缺 flex-wrap 时右侧胶囊被剪在视口外
+//    （390px 视口实测：四颗需 456px、可用 388px，「价值 硬否决 ⛔」整颗看不见）；
+// ② 买入参考两端都必须走同一个三腿合成函数，禁止任何一侧还留均线单腿。
+Deno.test("接线守卫：折叠行胶囊条必须换行，股票买入参考两端都走 stockBuyRef", async () => {
+  const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
+  assert(/\.signal-strip\{[^}]*flex-wrap:wrap[^}]*\}/.test(html),
+    ".signal-strip 必须带 flex-wrap:wrap（否则手机端「价值 硬否决」胶囊被 overflow:hidden 剪掉）");
+  assert(/const sRef = stockBuyRef\(dev, sDip, dCostStock, stockPadSet\(s\)\);/.test(html),
+    "页面股票卡片必须由 dipAlertStock + dipAlertStockCost + stockPadSet 的合成结果出档位");
+  assert(/const pillCls = dualPillClass\(sRef\.label\);/.test(html),
+    "页面买入参考胶囊配色必须跟着合成档位走（沿用现成的 dualPillClass，不再按 dev 手写）");
+  assert(/<span class="signal-pill \$\{pillCls\}">买入参考·\$\{sRef\.label\}<\/span>/.test(html),
+    "页面胶囊文案 = 买入参考·<合成档位>");
+  assert(/<span class="dual-tag">三腿 \$\{sRef\.text\}<\/span>/.test(html),
+    "折叠行必须当面写出三条腿各给了几分（用户投诉「只显示加强、看不出为什么」）");
+  assert(/function stockTierLabel\(/.test(html) === false,
+    "均线单腿函数必须随合成上线一起删掉（留着说明还有卡片没换）");
+  assert(/买入参考·\$\{tier\}/.test(html) === false, "胶囊不得再渲染单腿变量 tier");
+
+  const server = await Deno.readTextFile(new URL("../supabase/functions/daily-update/index.ts", import.meta.url));
+  assert(/export function stockBuyRef\(/.test(server), "邮件端必须导出同判据的 stockBuyRef");
+  assert(/const sRef = stockBuyRef\(dev, sLadder, sCostDip, stockPadSet\(s\)\);/.test(server),
+    "邮件股票腿必须把回撤档与安全垫两条腿并进买入参考（与页面同一格输入）");
+  assert(/const tier = baseSignalLabel\(dev\);/.test(server) === false,
+    "邮件股票腿不得再退回均线单腿（baseSignalLabel 只留给基金腿）");
+  assertEquals((server.match(/tier: sRef\.label \+ \(dev === null \? '（数据不足）' : ''\)/g) || []).length,
+    2, "落库行与报告行都要用合成档位，并保留「缺均线数据」的事随后缀");
+  assert(/refText: sRef\.text/.test(server), "邮件报告行要带上三腿明细");
+  assert(/｜三腿 ' \+ r\.refText \+ ' · 现价/.test(server), "邮件正文必须把三腿明细写在买入参考后面");
+});
+
 Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对的函数（防「测试绿但生产走岔路」）", async () => {
   const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
   assert(/const sig = evalFundSignal\(f\);/.test(html), "页面基金卡片必须调用 evalFundSignal(f)");
@@ -862,12 +980,10 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
   // 系数只看档位是否就绪（与页面同款）：暂停时 multiplier=0，金额本就为 0，不许再加 multiplier 守卫
   assert(/const coef = bl \? bl\.coef : 1;/.test(server),
     "邮件系数必须写成 `const coef = bl ? bl.coef : 1;`（与页面同款；加 multiplier>0 守卫会让「不参考」豁免再次失效）");
-  // 股票腿刻意只传 dev：页面对股票没有「均线档位」，只有对照策略（估值分位 × 回撤）——
-  // 若哪天把 pct 也传进股票腿，必须同期在页面造出对应展示，否则邮件会出现页面没有的档位。
-  assert(/const tier = baseSignalLabel\(dev\);/.test(server),
-    "股票腿必须保持 dev 单腿（页面对股票无均线档位；改动需同步 spec 与页面）");
+  // 2026-10-28 立这条时股票腿确实只有均线一条腿；2026-11-01 用户裁决改三腿合成后，
+  // 「单腿」守卫由上一条（stockBuyRef 接线）取代，这里只保留「邮件不得凭空多出一条页面没有的腿」。
   assert(/baseSignalLabel\([^)]*,/.test(server) === false,
-    "基金侧取消估值分位后，baseSignalLabel 不得再接受第二个参数（基金/股票都只传 dev）");
+    "基金侧取消估值分位后，baseSignalLabel 不得再接受第二个参数（基金腿只传 dev）");
   assert(/const ladder = dipLadder\(f, close, null\);/.test(server),
     "邮件基金腿必须走统一门槛的 dipLadder，且不传分位（基金侧无高估否决）");
   assert(/const sLadder = dipLadder\(s, close, readPct\(s\)\);/.test(server),

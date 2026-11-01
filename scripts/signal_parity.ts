@@ -48,7 +48,7 @@ const EXPORT_NAMES = [
   'marketLevel', 'DD_STEPS', 'ddAddPct', 'pctTier', 'drawdownFrom', 'dualSignal',
   'computeDeviation', 'effectiveCost', 'computeReturn', 'themeMarketValue', 'themeCapAmount', 'fundBenchKey',
   'baseSignal', 'evalFundSignal', 'fmtWan', 'fmtSigned', 'fmtMoney', 'fmtPct',
-  'dipAlertStock', 'dipAlertFundLadder', 'dipAlertStockCost', 'stockPadSet', 'stockDipGate', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml', 'stockLotSizeOf', 'lotFromTxQuote', 'dipPadHintHtml',
+  'dipAlertStock', 'dipAlertFundLadder', 'dipAlertStockCost', 'stockPadSet', 'stockDipGate', 'stockBuyRef', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml', 'stockLotSizeOf', 'lotFromTxQuote', 'dipPadHintHtml',
   'sellBannerHtml', 'stockSellPlan', 'stockSellBannerHtml',
   'profitNextTier', 'profitMetaText', 'profitAlertFromRet',
   'supabaseBaseUrl',
@@ -134,6 +134,19 @@ export const stockDipGate = F.stockDipGate as (
   ladder: { dd: number; add: number } | null, cost: StockCostDip | null, padSet: boolean,
 ) => StockDipGate;
 export const dipPadHintHtml = F.dipPadHintHtml as () => string;
+/**
+ * 股票买入参考·三腿合成（2026-11-01 用户裁决）：均线腿 + 52 周回撤达档腿 + 成本安全垫腿。
+ * dev≥10（邮件口径「明显高位」，与安全垫 shout=false 同一条边界）时后两条腿只陈述事实、不计分。
+ */
+export type StockBuyRef = {
+  devScore: number; ddScore: number; padScore: number; score: number; label: string; text: string;
+};
+export const stockBuyRef = F.stockBuyRef as (
+  dev: number | null | undefined,
+  ladder: { dd: number; add: number } | null,
+  cost: { shout?: boolean } | null,
+  padSet: boolean,
+) => StockBuyRef;
 export const buyBannerHtml = F.buyBannerHtml as (
   list: Array<{ kind: string; dd?: number; add?: number; ret?: number; target?: number; shout: boolean }>,
 ) => string;

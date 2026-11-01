@@ -501,6 +501,87 @@ Deno.test("接线：股票踩线但均线明显高位（dev≥+10%）→ 横幅�
   }
 });
 
+// ── 2026-11-01 用户裁决：股票「买入参考」由均线单腿改三腿合成（页面同判据，双端矩阵钉住在
+// scripts/signal_parity_test.ts）。这两条端到端只管「邮件正文真的把合成档位与三条腿写出来了」：
+// 纯函数矩阵绿不代表 r.tier / r.refText 接进了 📊 那一行。
+Deno.test("邮件接线：股票买入参考写三腿合成——深低位+回撤达档+跌穿安全垫要能报到「双倍」", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      // 收盘 14：MA60/MA120 都钉在 ≈19.9/19.95 ⇒ dev ≈−29.7%（均线 +2）
+      // 52周高点 25 ⇒ 回撤 44.0% ⇒ +40 档（回撤腿 +2）；成本 20 ⇒ 收益 −30.0% 破 −25% 安全垫（安全垫 +1）
+      // 均线单腿时代最高只能到「加强」（+2），这里合计 +5 必须是「双倍」
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: {
+          funds: [],
+          stocks: [{ code: "600031", name: "三一重工", shares: 500, cost: 20, targetDrawdown: 25, high52w: 25 }],
+        },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) {
+      return Promise.resolve(new Response(txJson("sh600031", txRowsCloses(new Array(129).fill(20).concat([14]))), { status: 200 }));
+    }
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
+    assertEquals(stockSeg.includes('买入参考：<b style="color:#A87C2E;">双倍</b>'), true,
+      "三条腿合计 +5 必须报「双倍」，只报「加强」说明回撤/安全垫两条腿又没并进买入参考：" + stockSeg.slice(0, 500));
+    assertEquals(stockSeg.includes("均线+2·回撤+2·安全垫跌破"), true,
+      "买入参考后面要当面写出三条腿各给了几分：" + stockSeg.slice(0, 500));
+    assertEquals(/NaN|Infinity|undefined/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
+Deno.test("邮件接线：明显高位（dev≥+10%）时回撤档与安全垫只陈述事实，不得把买入参考抬进买入指令", async () => {
+  const real = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    if (method === "POST") return Promise.resolve(Response.json({}, { status: 201 }));
+    if (url.includes("dingtou_state")) {
+      // 收盘 20：129 根 10 ⇒ dev ≈+97.5%（均线 −2）；高点 30 ⇒ 回撤 33.3%（+30 档）；
+      // 成本 30 ⇒ 收益 −33.3% 已破 −30 安全垫 —— 两条新腿都成立，但被同一条高位边界压住
+      return Promise.resolve(Response.json([{
+        user_id: "u1",
+        data: { funds: [], stocks: [{ code: "600031", name: "三一重工", shares: 100, cost: 30, targetDrawdown: 30, high52w: 30 }] },
+      }]));
+    }
+    if (url.includes("push2his")) return Promise.resolve(Response.json({ data: {} }));
+    if (url.includes("ifzq.gtimg.cn")) {
+      return Promise.resolve(new Response(txJson("sh600031", txRowsCloses(new Array(129).fill(10).concat([20]))), { status: 200 }));
+    }
+    return Promise.resolve(Response.json([]));
+  }) as typeof fetch;
+  let mail = "";
+  const logs = captureErrorLogs();
+  try {
+    const res = await handle(req({ force: true }), { sendMail: (_s: string, html: string) => { mail = html; return Promise.resolve(); } });
+    assertEquals(res.status, 200);
+    const stockSeg = mail.slice(mail.indexOf("💹 股票分析"));
+    assertEquals(stockSeg.includes('买入参考：<b style="color:#A87C2E;">减半</b>'), true,
+      "明显高位时买入参考必须退回均线单腿档（−2 ⇒ 减半）：" + stockSeg.slice(0, 500));
+    assertEquals(stockSeg.includes("均线-2·回撤高位不计·安全垫高位不计"), true,
+      "被压住的两条腿要点名「高位不计」，不能悄悄消失：" + stockSeg.slice(0, 500));
+    assertEquals(/NaN|Infinity|undefined/.test(mail), false);
+  } finally {
+    globalThis.fetch = real;
+    logs.restore();
+  }
+});
+
 Deno.test("并发预取后单项失败仍隔离：坏基金不拖倒好基金，也不整链失败", async () => {
   // 并发改造最容易引入的回归是"一个 worker 抛错把整池炸掉"，这条就是钉这个边界。
   const real = globalThis.fetch;

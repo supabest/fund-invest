@@ -46,6 +46,13 @@
 //   达标档标记（profit_tier 落库 + 「止盈X%达标」标签）与横幅共用同一次 sellAlert 结果，杜绝两套口径。
 //   同日补齐：收益率后的档位备注三态抽成 tierNoteHtml(r)，两腿共用——股票腿此前「全部执行完」写成空串，
 //   「没有下一档了」只有基金腿和页面会说。
+// v14 (2026-11-01): 股票「买入参考」由均线单腿改三腿合成 stockBuyRef（页面同批，双端 100+ 格矩阵钉住）。
+//   起因（用户投诉 000338）：卡片只写「买入参考·加强」，看不出这个档位是均线给的还是回撤给的，而同一张卡片
+//   早已算着 52 周回撤达档与成本安全垫。均线单腿最高 +2、最低 −2，「双倍」永远够不到、「暂停」永远不出现。
+//   判据全部复用现成阈值：回撤腿吃 DD_STEPS 档位（add≥40 → +2、add=30 → +1），安全垫腿吃 shout（跌破 → +1）；
+//   dev≥+10%（即本邮件「明显高位」，也是 sGate.shout=false 那条线）时后两腿只陈述事实、不计分，
+//   否则会出现「现价高于均线 12% 却喊加强」的自相矛盾。价值硬否决照旧只标注、不参与降级（v12 裁决不变）。
+//   落库 stock_signal_state.tier 的词表不变；正文在档位后追加「｜三腿 均线+2·回撤+2·安全垫跌破」。
 // 触发方式: POST /functions/v1/daily-update，Authorization: Bearer <DAILY_UPDATE_TOKEN>
 // 可选 body: {"force":true} 无变化也发送报告
 const GOAL_DEFAULT = 200000;
@@ -303,6 +310,46 @@ export function stockDipGate(
 ): StockDipGate {
   const light = !!(ladder && cost);
   return { light, needPad: !!(ladder && !padSet && !cost), shout: light ? !!(cost && cost.shout) : false };
+}
+
+// 股票买入参考·三腿合成（2026-11-01 用户裁决，与页面 stockBuyRef 逐格同判据）：
+// 均线腿 + 52 周回撤达档腿 + 成本安全垫腿；沿用既有词表与区间（双倍≥3/加强≥1/正常≥−1/减半≥−3/其余暂停），
+// 均线腿就是原单腿分档，回撤腿吃 DD_STEPS 现成档位（add≥40 → +2、add=30 → +1），安全垫腿吃 shout（跌破 → +1）。
+// dev≥STOCK_HOT_DEV（本邮件口径的「明显高位」，与安全垫 shout=false 同一条线）时后两腿只陈述事实、不计分，
+// 否则会出现「现价高于均线 12% 却喊加强」这种自相矛盾的指令。价值硬否决照旧只标注、不参与降级。
+export type StockBuyRef = {
+  devScore: number; ddScore: number; padScore: number; score: number; label: string; text: string;
+};
+export function stockBuyRef(
+  dev: number | null,
+  ladder: { dd: number; add: number } | null,
+  cost: { shout?: boolean } | null,
+  padSet: boolean,
+): StockBuyRef {
+  const hasDev = !(dev === null || dev === undefined || !isFinite(Number(dev)));
+  const d = hasDev ? Number(dev) : null;
+  let devScore = 0;
+  if (d !== null) {
+    if (d <= -15) devScore = 2;
+    else if (d <= -5) devScore = 1;
+    else if (d >= 10) devScore = -2;
+    else if (d >= 3) devScore = -1;
+  }
+  const hot = d !== null && d >= 10;
+  const ddScore = (!hot && ladder) ? (Number(ladder.add) >= 40 ? 2 : 1) : 0;
+  const padScore = (!hot && cost && cost.shout) ? 1 : 0;
+  const score = devScore + ddScore + padScore;
+  let label: string;
+  if (score >= 3) label = '双倍';
+  else if (score >= 1) label = '加强';
+  else if (score >= -1) label = '正常';
+  else if (score >= -3) label = '减半';
+  else label = '暂停';
+  const sgn = (n: number) => (n > 0 ? '+' : '') + n;
+  const devTxt = d === null ? '均线缺数据' : '均线' + sgn(devScore);
+  const ddTxt = !ladder ? '回撤未达档' : (ddScore === 0 ? '回撤高位不计' : '回撤' + sgn(ddScore));
+  const padTxt = !padSet ? '安全垫未设' : (padScore === 1 ? '安全垫跌破' : (cost ? '安全垫高位不计' : '安全垫未破'));
+  return { devScore, ddScore, padScore, score, label, text: devTxt + '·' + ddTxt + '·' + padTxt };
 }
 
 // 回撤加仓阶梯：与页面 DD_STEPS（index.html 2562）同表；改表必须双端同步，否则页面与邮件给出不同加仓档。
@@ -1079,19 +1126,21 @@ export async function handle(
             ag.n += 1;
             if (scost > 0) ag.nCost += 1;
           }
-          const tier = baseSignalLabel(dev);
           const tiers = (s.profitTiers && s.profitTiers.length) ? s.profitTiers : DEFAULT_TIERS;
           // 与基金腿同源：达标档交给 sellAlert 判定，不再自己扫「最高达标且未执行」的档
           const sell = sellAlert(ret, s);
           const newTier: number | null = sell ? sell.tier.ret : null;
-
-          stockSignalRows.push({ user_id: userId, code, tier: tier.label + (dev === null ? '（数据不足）' : ''), profit_tier: newTier, updated_at: new Date().toISOString() });
-
-          const sname = s.name || k.name || '';
-          const nextTier = profitNextTier(tiers, s.profitTaken || [], ret);
           const sLadder = dipLadder(s, close, readPct(s));
           const sCostDip = stockDipAlert(s, ret, dev);
           const sGate = stockDipGate(sLadder, sCostDip, stockPadSet(s));
+          // 2026-11-01 用户裁决：买入参考改三腿合成（均线 + 回撤达档 + 成本安全垫），与页面同一格输入；
+          // 缺均线数据不再整条造词，由「（数据不足）」后缀与三腿明细里的「均线缺数据」共同披露
+          const sRef = stockBuyRef(dev, sLadder, sCostDip, stockPadSet(s));
+
+          stockSignalRows.push({ user_id: userId, code, tier: sRef.label + (dev === null ? '（数据不足）' : ''), profit_tier: newTier, updated_at: new Date().toISOString() });
+
+          const sname = s.name || k.name || '';
+          const nextTier = profitNextTier(tiers, s.profitTaken || [], ret);
           // 2026-10-31 用户裁决：双腿（回撤达档 + 跌穿安全垫）齐备才进顶部抄底横幅，与页面同判据
           if (sGate.light) (stockDips[userId] = stockDips[userId] || []).push({ code, name: sname || code, ...sCostDip! });
           // 手数：A股主板固定 100；港股按标的读（腾讯行情），取不到再回落页面同步来的 lotSize，仍无则不给金额
@@ -1100,7 +1149,7 @@ export async function handle(
           const sellPlan = sell ? stockSellPlan(sShare, close, sell.tier.sell, lotSize) : null;
           (stockReport[userId] = stockReport[userId] || []).push({
             code, name: sname || code, close, date: k.date, dev, ma60, ma120, below,
-            tier: tier.label + (dev === null ? '（数据不足）' : ''), ret, nextTier,
+            tier: sRef.label + (dev === null ? '（数据不足）' : ''), refText: sRef.text, ret, nextTier,
             sell, sellPlan, ladder: sLadder, addPlan, costDip: sCostDip,
             dipLight: sGate.light, padMissing: sGate.needPad, dipShout: sGate.shout
           });
@@ -1284,7 +1333,7 @@ export async function handle(
           + '<b>【' + r.code + '】' + r.name + '</b> ' + retChipHtml(r.ret)
           + sellMarkHtml(r.sell, r.sellPlan)
           + buyMarkHtml(r.dipShout ? r.ladder : null, r.dipShout ? r.addPlan : null)
-          + '<div style="margin:4px 0;">📊 买入参考：<b style="color:#A87C2E;">' + r.tier + '</b> · 现价 ' + r.close + '（' + r.date + '）</div>'
+          + '<div style="margin:4px 0;">📊 买入参考：<b style="color:#A87C2E;">' + r.tier + '</b>｜三腿 ' + r.refText + ' · 现价 ' + r.close + '（' + r.date + '）</div>'
           + '<div style="color:#707C8C;font-size:13px;">📈 较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (trendStr ? '｜' + trendStr : '')
           + (r.costDip ? '｜收益 ' + fmtSigned(r.costDip.ret) + ' 已跌破 ' + String(r.costDip.target) + '% 成本安全垫' : '') + legNote + '</div>'
           + '<div style="color:#707C8C;font-size:13px;">💰 ' + profitStr + '</div>'

@@ -77,7 +77,9 @@
   .chevron{margin-left:10px; color:var(--muted); font-size:12px; transition:transform .2s ease;}
   .chevron.open{transform:rotate(90deg);}
 
-  .signal-strip{display:flex; align-items:center; gap:8px; padding:0 16px 14px 16px;}
+  /* 2026-11-01：.fund-card 是 overflow:hidden，这条胶囊条不换行时手机端右侧整颗胶囊被剪在视口外
+     （390px 实测四颗需 456px、可用 388px，「价值 硬否决 ⛔」完全看不见）——照 .dual-strip 同款收口 */
+  .signal-strip{display:flex; align-items:center; gap:6px 8px; padding:0 16px 14px 16px; flex-wrap:wrap;}
   .signal-pill{font-size:12px; padding:4px 10px; border-radius:20px; font-weight:600; white-space:nowrap;}
   .pill-double{background:var(--gold-dim); color:var(--gold);}
   .pill-strong{background:var(--jade-dim); color:var(--jade);}
@@ -3025,6 +3027,33 @@ function stockDipGate(ladder, cost, padSet){
   const light = !!(ladder && cost);
   return { light, needPad: !!(ladder && !padSet && !cost), shout: light ? !!cost.shout : false };
 }
+// 股票买入参考·三腿合成（2026-11-01 用户裁决）：均线腿 + 52 周回撤达档腿 + 成本安全垫腿。
+// 沿用既有词表与区间（双倍≥3 / 加强≥1 / 正常≥−1 / 减半≥−3 / 其余暂停），不新增任何阈值数字：
+// 均线腿就是原 stockTierLabel 的分档，回撤腿吃 DD_STEPS 现成档位（add≥40 → +2、add=30 → +1），
+// 安全垫腿吃 dipAlertStockCost 的 shout（跌破 → +1）。
+// dev≥10 就是邮件口径的「明显高位」，与安全垫 shout=false 同一条边界：此时后两条腿只陈述事实、
+// 不计进买入参考——否则会出现「现价高于均线 12% 却喊加强」这种自相矛盾的指令。
+// 价值硬否决照旧只标注、不参与降级（2026-10-31 裁决不变）。
+function stockBuyRef(dev, ladder, cost, padSet){
+  const hasDev = !(dev===null || dev===undefined || !isFinite(Number(dev)));
+  const d = hasDev ? Number(dev) : null;
+  let devScore = 0;
+  if(d!==null){
+    if(d<=-15) devScore=2; else if(d<=-5) devScore=1; else if(d>=10) devScore=-2; else if(d>=3) devScore=-1;
+  }
+  const hot = (d!==null && d>=10);
+  const ddScore = (!hot && ladder) ? (Number(ladder.add)>=40 ? 2 : 1) : 0;
+  const padScore = (!hot && cost && cost.shout) ? 1 : 0;
+  const score = devScore + ddScore + padScore;
+  let label;
+  if(score>=3) label='双倍'; else if(score>=1) label='加强'; else if(score>=-1) label='正常';
+  else if(score>=-3) label='减半'; else label='暂停';
+  const sgn = n => (n>0?'+':'')+n;
+  const devTxt = d===null ? '均线缺数据' : '均线'+sgn(devScore);
+  const ddTxt = !ladder ? '回撤未达档' : (ddScore===0 ? '回撤高位不计' : '回撤'+sgn(ddScore));
+  const padTxt = !padSet ? '安全垫未设' : (padScore===1 ? '安全垫跌破' : (cost ? '安全垫高位不计' : '安全垫未破'));
+  return {devScore, ddScore, padScore, score, label, text: devTxt+'·'+ddTxt+'·'+padTxt};
+}
 // 股票加仓计划：档位比例按「整体持仓市值」计（2026-10-29 用户裁决：不是定投基数），
 // 按标的整手股数向下折算（A股 100、港股按标的读）——不足一手时只报目标金额，绝不四舍五入出虚构手数
 function stockAddPlan(mv, price, add, lotSize){
@@ -3165,16 +3194,6 @@ function exchangeLabel(code){
   if(/^\d{5}$/.test(code)) return '港股';
   if(code.startsWith('6')) return '沪A';
   return '深A';
-}
-function stockTierLabel(dev){
-  if(dev===null || dev===undefined) return '缺数据';
-  let score = 0;
-  if(dev<=-15) score+=2; else if(dev<=-5) score+=1; else if(dev>=10) score-=2; else if(dev>=3) score-=1;
-  if(score>=3) return '双倍';
-  if(score>=1) return '加强';
-  if(score>=-1) return '正常';
-  if(score>=-3) return '减半';
-  return '暂停';
 }
 
 function render(){
@@ -3376,12 +3395,14 @@ function renderStockSection(){
   }
   stocks.forEach(s=>{
     const dev = (s.ma60 && s.ma120) ? ((s.currentPrice-s.ma60)/s.ma60 + (s.currentPrice-s.ma120)/s.ma120)/2*100 : (s.ma60 ? (s.currentPrice-s.ma60)/s.ma60*100 : null);
-    const tier = stockTierLabel(dev);
     const ret = (parseFloat(s.cost)>0 && s.currentPrice>0) ? (s.currentPrice-parseFloat(s.cost))/parseFloat(s.cost)*100 : null;
-    const nextTier = nextProfitTier(s, ret);    const pillCls = dev===null ? 'pill-normal' : (dev<=-5 ? 'pill-strong' : (dev>=3 ? 'pill-half' : 'pill-normal'));
+    const nextTier = nextProfitTier(s, ret);
     const sAlert = profitAlertFromRet(ret, s);
     const sDip = dipAlertStock(s);
     const dCostStock = dipAlertStockCost(s, dev);
+    // 买入参考 = 均线 + 回撤达档 + 安全垫三腿合成（2026-11-01），配色沿用现成的 dualPillClass
+    const sRef = stockBuyRef(dev, sDip, dCostStock, stockPadSet(s));
+    const pillCls = dualPillClass(sRef.label);
     const sDipGate = stockDipGate(sDip, dCostStock, stockPadSet(s));
     const sPlan = sDipGate.light ? stockAddPlan(stockMvOf(s), parseFloat(s.currentPrice)||0, sDip.add, stockLotSizeOf(s)) : null;
     // 价值否决只在灯亮时标注一次（用户裁定：只标注，不改指令）；取不到本批次行 = null = 未判定，不等于合格
@@ -3402,7 +3423,8 @@ function renderStockSection(){
         <div class="chevron" id="schev-${s.id}">▸</div>
       </div>
       <div class="signal-strip">
-        <span class="signal-pill ${pillCls}">买入参考·${tier}</span>
+        <span class="signal-pill ${pillCls}">买入参考·${sRef.label}</span>
+        <span class="dual-tag">三腿 ${sRef.text}</span>
         ${scorePillHtml(s)}
         ${valuePillHtml(vRow)}
         ${researchPillHtml(fundamentals.get(String(s.code)) || null)}
