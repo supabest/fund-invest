@@ -847,9 +847,19 @@ Deno.test("股票止盈横幅：剩余 1 手时不再给百分比分批指令，
 Deno.test("接线守卫：止盈卡片下一档与已达档走纯函数；标记执行写 profitTaken 并保存", async () => {
   const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
   assert(/const nextTier = nextProfitTier\(f, ret\);/.test(html), "基金卡片必须把当前收益率传给 nextProfitTier");
-  assert(/profitMetaText\(alert, nextTier\)/.test(html), "基金卡片元信息必须用 profitMetaText 消歧");
+  assert(/profitRefHtml\(alert, nextTier, ret, null, f\)/.test(html),
+    "基金「止盈参考」栏必须吃 profitAlertFromRet + nextProfitTier 的结果（判据不许在模板里就地重算）");
   assert(/const nextTier = nextProfitTier\(s, ret\);/.test(html), "股票卡片必须把当前收益率传给 nextProfitTier");
-  assert(/profitMetaText\(sAlert, nextTier\)/.test(html), "股票卡片元信息必须用 profitMetaText 消歧");
+  assert(/profitRefHtml\(sAlert, nextTier, ret, sSellPlan, s\)/.test(html),
+    "股票「止盈参考」栏同上，并把整手卖出计划一起传入");
+  // 2026-11-01 三栏收口：档位消歧（已达档 / 下一档 / 各档执行完毕）从元信息行挪进「止盈参考」栏，
+  // 一个口径只许有一处话术——模板里再各自拼一遍，就会与栏内文案漂成两套。
+  assertEquals(/\$\{profitMetaText\(/.test(html), false,
+    "卡片元信息不得再各自拼档位话术（已由 profitRefHtml 一处说）");
+  const profitRefBody = (html.match(/function profitRefHtml\([\s\S]*?\n\}/) || [''])[0];
+  assert(/已达/.test(profitRefBody) && /下一止盈档/.test(profitRefBody),
+    "「已达档 / 下一档」的消歧必须在 profitRefHtml 这一处实现体里");
+  assert(/不足 1 手/.test(profitRefBody), "整手不足时股票侧要如实说不足 1 手，不报虚构手数");
   assert(/function markProfitTaken\(/.test(html), "必须有标记已执行的写入口");
   assert(/item\.profitTaken = Array\.from\(new Set\(/.test(html), "标记执行必须写入 profitTaken（去重）");
   assert(/const add = tiers\.filter\(t => t\.ret <= hit\)\.map\(t => t\.ret\);/.test(html), "标记高档时更低档也要一并写入");
@@ -900,8 +910,11 @@ Deno.test("接线守卫：档位备注三态两腿共用一个函数，「执行
   const done = "各止盈档已执行完毕";
   assert(new RegExp("function tierNoteHtml[\\s\\S]{0,400}?" + done).test(server),
     "「执行完毕」态必须由共用的 tierNoteHtml 给出，不是某条腿临时补的字符串");
-  assert(new RegExp("function profitMetaText[\\s\\S]{0,300}?" + done).test(html),
-    "页面这一态仍是同一句文案（邮件与页面不许各说各话）");
+  const profitRefBody = html.slice(html.indexOf('function profitRefHtml('), html.indexOf('function buyRefHtml('));
+  assert(html.includes('function profitRefHtml(') && profitRefBody.includes(done),
+    "页面这一态仍是同一句文案，且必须由卡片实际调用的 profitRefHtml 给出（旧 profitMetaText 已不被调用）");
+  assert(/\$\{profitMetaText\(/.test(html) === false,
+    '卡片不得再 interpolate 旧的 profitMetaText（它已不被三栏调用，留着也只可能是死代码）');
 });
 
 Deno.test("接线守卫：股票安全垫有输入框、保存写 s.targetDrawdown、页面与邮件都走双腿仲裁", async () => {
@@ -914,13 +927,19 @@ Deno.test("接线守卫：股票安全垫有输入框、保存写 s.targetDrawdo
   assert(/const sDipGate = stockDipGate\(sDip, dCostStock, stockPadSet\(s\)\);/.test(html),
     "股票卡片必须走 stockDipGate 双腿仲裁");
   assert(/sDip \|\| dCostStock/.test(html) === false, "旧的「任一腿突破就亮」表达式必须彻底删掉");
-  assert(/\$\{sDipGate\.light \? stockBuyBannerHtml\(sDip, sPlan, dCostStock\) : ''\}/.test(html),
+  // 2026-11-01 三栏收口：横幅与补填提示先按灯算成变量，再由 buyRefHtml 收进「买入参考」栏——
+  // 判据（light / needPad）一个字没动，只是位置从模板内联挪到了调用点
+  assert(/const buyBanner = sDipGate\.light \? stockBuyBannerHtml\(sDip, sPlan, dCostStock\) : '';/ .test(html),
     "横幅只在双腿齐备时出现");
+  assert(/\$\{buyRef\}/.test(html), "买入参考栏要渲染进卡片");
+  assert(/const buyRef = buyRefHtml\(sRef, pillCls, s, dev, sDipGate, sPlan, dCostStock, dualHtml, sDip, dipPadHtml, buyBanner\);/.test(html),
+    "横幅与补填提示必须经 buyRefHtml 传入，不能在栏外另起一处");
+  assert(/if\(buyBannerHtml\) parts\.push\(/.test(html), "buyRefHtml 内部要按传入判空，未传入不得凭空出横幅");
   assert(/\$\{sDipGate\.light\?'<span class="trade-badge buy">🟢 抄底<\/span>':''\}/.test(html),
     "🟢 抄底角标必须与横幅同判据（只看 light）");
   assert(/const sPlan = sDipGate\.light \? stockAddPlan\(stockMvOf\(s\), parseFloat\(s\.currentPrice\)\|\|0, sDip\.add, stockLotSizeOf\(s\)\) : null;/.test(html),
     "加仓计划也要按灯来算（灯灭就不该折算金额）");
-  assert(/\$\{sDipGate\.needPad \? dipPadHintHtml\(\) : ''\}/.test(html),
+  assert(/const dipPadHtml = sDipGate\.needPad \? dipPadHintHtml\(\) : '';/ .test(html),
     "回撤达标但未设安全垫时，卡片必须显式提示补填");
   assert(/未设目标跌幅安全垫/.test(html), "补填提示的文案要写清缺的是哪一腿");
   const server = await Deno.readTextFile(new URL("../supabase/functions/daily-update/index.ts", import.meta.url));
@@ -946,20 +965,21 @@ Deno.test("接线守卫：股票安全垫有输入框、保存写 s.targetDrawdo
 
 // 2026-11-01 两件事必须由源码钉住，否则「矩阵全绿而生产走岔路」的老毛病会重犯：
 // ① 页面折叠行的胶囊条要换行——.fund-card 是 overflow:hidden，缺 flex-wrap 时右侧胶囊被剪在视口外
-//    （390px 视口实测：四颗需 456px、可用 388px，「价值 硬否决 ⛔」整颗看不见）；
+//    （390px 视口实测：四颗需 456px、可用 388px，整颗看不见）；三栏收口后股票条上剩评分/研究/披露三颗，
+//    基金条上仍是双信号那颗，换行规则两者都还要；
 // ② 买入参考两端都必须走同一个三腿合成函数，禁止任何一侧还留均线单腿。
 Deno.test("接线守卫：折叠行胶囊条必须换行，股票买入参考两端都走 stockBuyRef", async () => {
   const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
   assert(/\.signal-strip\{[^}]*flex-wrap:wrap[^}]*\}/.test(html),
-    ".signal-strip 必须带 flex-wrap:wrap（否则手机端「价值 硬否决」胶囊被 overflow:hidden 剪掉）");
+    ".signal-strip 必须带 flex-wrap:wrap（否则手机端最右侧胶囊被 overflow:hidden 剪掉）");
   assert(/const sRef = stockBuyRef\(dev, sDip, dCostStock, stockPadSet\(s\), stockPadInfo\(s, ret\)\);/.test(html),
     "页面股票卡片必须由 dipAlertStock + dipAlertStockCost + stockPadSet 的合成结果出档位，并把安全垫的目标/现价比传进明细（未跌穿也要报数）");
   assert(/const pillCls = dualPillClass\(sRef\.label\);/.test(html),
     "页面买入参考胶囊配色必须跟着合成档位走（沿用现成的 dualPillClass，不再按 dev 手写）");
-  assert(/<span class="signal-pill \$\{pillCls\}">买入参考·\$\{sRef\.label\}<\/span>/.test(html),
-    "页面胶囊文案 = 买入参考·<合成档位>");
-  assert(/<div class="signal-reason">\$\{sRef\.text\}<\/div>/.test(html),
-    "页面必须用基金侧同款的 .signal-reason 灰字行写出三条腿的事实（用户投诉胶囊条里的「三腿 +2/+2/未破」读不懂）");
+  assert(/'<span class="signal-pill ' \+ pillCls \+ '">买入参考·' \+ sRef\.label \+ '<\/span>'/.test(html),
+    "页面胶囊文案 = 买入参考·<合成档位>（2026-11-01 起由 buyRefHtml 渲染，判据不变）");
+  assert(/'<div class="ref-row"[^+]*\+ escapeHtml\(sRef\.text\)/.test(html),
+    "页面必须把三条腿的白话事实整句渲染进栏，且要转义（用户投诉胶囊条里的「三腿 +2/+2/未破」读不懂）");
   assert(/<span class="dual-tag">三腿 \$\{sRef\.text\}<\/span>/.test(html) === false,
     "折叠行胶囊条里不得再塞打分编码的「三腿」标签（那是内部术语，且 +2 没有单位）");
   assert(/三腿 \$\{/.test(html) === false, "页面不得再有把「三腿」拼进用户可见文案的地方");

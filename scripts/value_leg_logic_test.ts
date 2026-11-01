@@ -10,7 +10,8 @@ import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueT
   EM_VAL_MIN_ROWS, valPctSupported, emValUrl, valuationPctFromRows, valPctCaliber, valPctNaWhy,
   valPctNeedFetch, valPctApply, valPctHtml, valPctMerge, valPctLockNote,
   incomeChannelOf, renderIncomeList, foldCardHtml,
-  valueMedian, valueIndStatsOf, ROIC_GATE_PCT, valueVetoClass, valueDipVetoHtml } from "./value_leg_logic.ts";
+  valueMedian, valueIndStatsOf, ROIC_GATE_PCT, valueVetoClass, valueDipVetoHtml, valueAssessmentHtml,
+  profitRefHtml, buyRefHtml } from "./value_leg_logic.ts";
 
 const row = { code:'600031', name:'潍柴', vq:78.4, tier:'qualified', confidence:'A', vetoed:false,
   owner_yield:6.2, margin_of_safety:4.35, cn10y:1.85, roic_med:18.0, v_moat:80, v_cash:70, v_safety:75, v_health:66,
@@ -1099,15 +1100,17 @@ Deno.test('抄底标注：三态各一行、只标注夹不带指令；无本批
   assertEquals(valueDipVetoHtml(undefined, ind, true), '');
 });
 
-Deno.test('接线守卫：否决标注接在抄底灯亮之后，且行业参照确实传进纯函数', async () => {
+Deno.test('接线守卫：价值评估栏每卡常驻，行业参照与批次状态由调用点传入', async () => {
   const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
-  assertEquals(/const vetoNote = sDipGate\.light \? valueDipVetoHtml\(vRow, /.test(html), true,
-    '否决标注必须在灯亮时才算（灯灭不该多出这一行）');
-  assertEquals(html.includes('${vetoNote}'), true, '标注必须渲染进卡片');
+  // 2026-11-01 三栏收口：原来「灯亮才补一行否决标注」改成卡片常驻第三栏——价值只回答值不值，
+  // 与买卖灯位无关，所以调用点前面不得再挂 sDipGate.light 这类指令门禁。
+  assertEquals(/sDipGate\.light \? valueAssessmentHtml\(/.test(html), false,
+    '价值栏一旦跟灯位绑定就又变回「抄底才提醒风险」的附属标注了');
   assertEquals(/const vRow = valueState \? valueState\.rows\.get\(/.test(html), true,
-    '标注必须按 code 取本批次价值行（取不到就是未判定）');
-  assertEquals(/valueDipVetoHtml\(vRow, valueIndRef \? valueIndRef\.byL2 : null, !!valueState\)/.test(html), true,
+    '必须按 code 取本批次价值行（取不到就是未判定）');
+  assertEquals(/const valueRef = valueAssessmentHtml\(vRow, valueIndRef \? valueIndRef\.byL2 : null, !!valueState\);/.test(html), true,
     '行业参照与「批次是否已生成」必须由调用点传入，纯函数不读全局');
+  assertEquals(html.includes('${valueRef}'), true, '评估栏要渲染进卡片');
 });
 
 Deno.test('ROIC_GATE_PCT 与引擎 ROIC_GATE 同值（改一端必须改另一端）', async () => {
@@ -1210,4 +1213,107 @@ Deno.test('接线守卫：折叠按钮必须有委托点击监听（卡片是渲
   for (const t of [".closest('.fold-btn')", "classList.contains('fold-open')", "localStorage.setItem('dinvest_fold_"]) {
     assertEquals(body.includes(t), true, '点击监听缺少：' + t);
   }
+});
+
+// ==== 2026-11-01 三栏收口：价值评估栏的行为契约（2ef0b33 手改实现，本批按 TDD 补测试）====
+// 这一栏替代原「价值 硬否决 ⛔」胶囊与灯亮标注，所以原裁定里最硬的两条必须在它身上重验：
+// ① 不许把「本股高于同行业中位」说成「低于同行业中位」（2026-10-31 双/单否决口径）；
+// ② 只回答「值不值」，不发买卖指令（2026-10-31 指令隔离）。
+const vaVeto = { code:'600001', name:'单/双否决样本', tier:'vetoed', vetoed:true,
+  veto_reasons:['无护城河证据'], ths_l2:'工程机械', roic_med:5.0, v_moat:20, v_health:55, margin_of_safety:12.0 };
+const vaIndHigher = { '工程机械': { med: 4.0, n: 30 } };   // 本股 5.0 > 同行 4.0 ⇒ 只是没过资本成本门槛
+const vaIndLower  = { '工程机械': { med: 9.0, n: 30 } };   // 本股 5.0 ≤ 同行 9.0 ⇒ 与同行一样差
+
+Deno.test('价值评估栏：本股 ROIC 高于同行业中位时，绝不许写「低于同行业中位」', () => {
+  const out = valueAssessmentHtml(vaVeto, vaIndHigher, true);
+  assertEquals(out.includes('未覆盖资本成本'), true, '门槛没过这件事必须说出来');
+  assertEquals(out.includes('低于同行业中位'), false,
+    '本股 5.0% 高于同行中位 4.0%，写「低于同行业中位」是假话：' + out.replace(/<[^>]+>/g, ' '));
+  assertEquals(/高于同行业中位/.test(out), true, '单否决要把「优于同行仍被绝对门槛压住」说清楚');
+});
+
+Deno.test('价值评估栏：本股 ROIC 不高于同行业中位时必须点明「低于同行业中位」并给中位值', () => {
+  const out = valueAssessmentHtml(vaVeto, vaIndLower, true);
+  assertEquals(/低于同行业中位 9\.0%/.test(out), true, '双否决要说清同行中位值：' + out.replace(/<[^>]+>/g, ' '));
+});
+
+Deno.test('价值评估栏：没有同行业参照时不凭空提中位，也不冒充有参照', () => {
+  const out = valueAssessmentHtml(vaVeto, null, true);
+  assertEquals(out.includes('同行业中位'), false, '无参照却提中位是编数据');
+  assertEquals(out.includes('无同行业参照'), true, '要显式说没有参照');
+});
+
+Deno.test('价值评估栏：缺值一律 NA，不拿 0 或 NaN 冒充结论', () => {
+  const empty = { code:'600002', name:'缺值样本', tier:'unqualified', vetoed:false, veto_reasons:[],
+    ths_l2:'工程机械', roic_med:null, v_moat:null, v_health:null, margin_of_safety:null };
+  const out = valueAssessmentHtml(empty, vaIndLower, true);
+  assertEquals(/NaN|null%|undefined|nullpp/.test(out), false, '缺值不许冒充数值：' + out.replace(/<[^>]+>/g, ' '));
+  assertEquals((out.match(/NA/g) || []).length, 4, '四维都缺 ⇒ 四格各写一次 NA：' + out.replace(/<[^>]+>/g, ' '));
+});
+
+Deno.test('价值评估栏：未判定三态分开——无概念/查过取不到/批次未生成', () => {
+  assertEquals(valueAssessmentHtml(undefined, vaIndHigher, true), '', '调用点没有这一行的概念时不刷栏');
+  assertEquals(valueAssessmentHtml(null, vaIndHigher, false), '', '价值批次尚未生成时不刷栏（别处已有降级语）');
+  assertEquals(valueAssessmentHtml(null, vaIndHigher, true).includes('本批次无该股数据（未判定）'), true,
+    '查过但取不到 = 未判定，绝不等于合格');
+});
+
+Deno.test('价值评估栏：本股 ROIC 与同行业中位持平时说「持平」，既不写低于也不写高于', () => {
+  const flat = (h: string) => h.replace(/<[^>]*>/g, '');
+  const out = flat(valueAssessmentHtml({ ...vaVeto, roic_med: 5.0 }, { 工程机械: { med: 5.0, n: 24 } }, true));
+  assertEquals(out.includes('低于同行业中位'), false, '5.0 与中位 5.0 相等，写「低于」是假话：' + out);
+  assertEquals(out.includes('高于同行业中位'), false, '相等也不是「高于」：' + out);
+  assertMatch(out, /同行业中位 5\.0%/);
+});
+
+Deno.test('价值评估栏：只回答值不值，栏内不得出现任何买卖指令话术', () => {
+  const cases = [
+    valueAssessmentHtml(vaVeto, vaIndHigher, true),
+    valueAssessmentHtml(vaVeto, vaIndLower, true),
+    valueAssessmentHtml({ ...row }, vaIndHigher, true),
+    valueAssessmentHtml({ ...row, v_moat: 20, v_health: 20, margin_of_safety: -3, roic_med: 3 }, vaIndHigher, true),
+    valueAssessmentHtml({ ...row, v_moat: 20, v_health: 20, margin_of_safety: -3, roic_med: 3, tier:'unqualified' }, vaIndHigher, true),
+  ];
+  for (const one of cases) {
+    const txt = one.replace(/<[^>]+>/g, ' ');
+    for (const bad of ['建议买入', '加仓', '新建仓', '建仓', '卖出', '可观察等待', '等待更好价格', '→']) {
+      assertEquals(txt.includes(bad), false, '价值评估栏里出现指令话术「' + bad + '」：' + txt);
+    }
+    assertEquals(/NaN|null%|undefined/.test(txt), false, '缺值不许冒充数值：' + txt);
+  }
+  assertEquals(cases.some(c => c.includes('不等于买卖指令')), true, '隔离声明必须在栏内（让用户知道这栏不发指令）');
+});
+
+// ==== 2026-11-01 三栏收口：止盈栏的三态必须由「活着的那支渲染函数」给出 ====
+// 旧页面走 profitMetaText（三态齐全），2026-11-01 手改后卡片改走 profitRefHtml。
+// 邮件端 tierNoteHtml 仍说「各止盈档已执行完毕」；档表恒有 DEFAULT_TIERS 兜底，
+// 所以 nextTier 为空只可能是「全部档已执行」，把它念成「暂无止盈档」是假话。
+Deno.test('止盈参考栏：三态齐全——已达档 / 下一档 / 全部执行完（与邮件同句）', () => {
+  const flat = (h: string) => h.replace(/<[^>]*>/g, '');
+  const hit = profitRefHtml({ tier: { ret: 20, sell: 10 }, ret: 25 }, null, 25, null, { shares: 1000 });
+  assertMatch(flat(hit), /已达 \+20% 止盈档（卖10%）/);
+  const next = profitRefHtml(null, { ret: 20, sell: 10 }, 8, null, { shares: 1000 });
+  assertMatch(flat(next), /下一止盈档 \+20% （卖10%）/);
+  const done = profitRefHtml(null, null, 65, null, { shares: 1000 });
+  const doneTxt = flat(done);
+  assertMatch(doneTxt, /各止盈档已执行完毕/);
+  assertEquals(doneTxt.includes('暂无止盈档'), false,
+    '档表恒有默认档兜底，取不到下一档只可能是已全部执行——「暂无止盈档」是假话：' + doneTxt);
+});
+
+Deno.test('买入参考栏：档位与白话明细都进栏，明细要转义；未传入的提示/横幅不得凭空出现', () => {
+  const ref = { label: '双倍', text: '现价较均线 -16.0%；52 周回撤 38.0%，回撤较深；已跌穿成本安全垫' };
+  const s = { currentPrice: '12.34', ma60: 14.0, ma120: 15.0 };
+  const gate = { light: true, needPad: false, shout: true };
+  const one = buyRefHtml(ref, 'pill-double', s, -16, gate, null, null, '', null, '', '');
+  assertMatch(one, /<span class="signal-pill pill-double">买入参考·双倍<\/span>/);
+  assertEquals(one.includes(ref.text), true, '白话明细整句要渲染进栏：' + one.replace(/<[^>]+>/g, ' '));
+  assertEquals(one.includes('现价 12.34 · MA60 14.00 · MA120 15.00'), true, '均线事实行要如实报数');
+  assertEquals(one.includes('🟢'), false, '横幅未传入时栏内不得凭空出现买入标志');
+  assertEquals(one.includes('未设目标跌幅安全垫'), false, '补填提示未传入时不得凭空出现');
+  // 明细来自纯函数，但内容可能含 < >（脏数据/负号写法），必须转义后再进 HTML
+  const dirty = buyRefHtml({ label: '正常', text: '回撤 <b>38%</b> & 未达档' }, 'pill-normal',
+    { currentPrice: '1' }, null, { light: false, needPad: false, shout: false }, null, null, '', null, '', '');
+  assertEquals(dirty.includes('<b>38%</b>'), false, '明细里的标签必须被转义，不能当成 HTML');
+  assertEquals(dirty.includes('&lt;b&gt;38%&lt;/b&gt;'), true);
 });

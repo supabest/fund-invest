@@ -1071,7 +1071,8 @@ function valueDipVetoHtml(row, indByL2, hasBatch){
 }
 
 // ==== 2026-11-01 三栏收口：止盈参考 / 买入参考 / 价值评估 ====
-// 止盈参考：始终显示，无数据时给"暂无止盈档"
+// 止盈参考：三态与邮件 tierNoteHtml 同句（已达档 / 下一档 / 全部执行完）；
+// 档表恒有 DEFAULT_TIERS 兜底，所以「取不到下一档」只能是已全部执行，不能念成「暂无止盈档」
 function profitRefHtml(sAlert, nextTier, ret, sSellPlan, s){
   var rows = [];
   if(ret !== null){
@@ -1091,7 +1092,7 @@ function profitRefHtml(sAlert, nextTier, ret, sSellPlan, s){
     var dist = nextTier.ret - (ret || 0);
     rows.push('<span class="muted">下一止盈档</span> +' + nextTier.ret + '% <span class="muted">（卖</span>' + nextTier.sell + '%<span class="muted">），距档</span> +' + dist.toFixed(1) + '%');
   } else {
-    rows.push('<span class="ref-empty">暂无止盈档</span>');
+    rows.push('<span class="muted">各止盈档已执行完毕</span>');
   }
   return '<div class="ref-section"><div class="ref-title">止盈参考</div><div class="ref-row">' + rows.join('') + '</div></div>';
 }
@@ -1146,17 +1147,23 @@ function valueAssessmentHtml(vRow, indByL2, hasBatch){
   if(isVetoed){
     verdictCls = 'verdict-warn';
     var hasMoatIssue = reasons.indexOf('无护城河证据') >= 0;
-    var hasQualityIssue = reasons.some(function(x){ return x !== '无护城河证据'; });
+    var qualityIssues = reasons.filter(function(x){ return x !== '无护城河证据'; });
     var roicBelow = roic !== null && roic < ROIC_GATE_PCT;
 
-    if(roicBelow && hasMoatIssue){
-      verdict = '资本回报未覆盖资本成本，护城河不足以补偿';
+    // 排序沿用 2026-10-31 裁定：质地硬伤优先于护城河；资本回报一句里，
+    // 「高于同行中位仍未过门槛」「低于同行中位」「与中位持平」是三种事实，绝不允许互相冒充。
+    if(qualityIssues.length){
+      verdict = '质地存在硬伤：' + escapeHtml(qualityIssues.join('、'));
     } else if(roicBelow){
-      verdict = '资本回报未覆盖资本成本' + (indMed !== null ? '，且低于同行业中位' : '');
+      verdict = '资本回报未覆盖资本成本' + (indMed === null ? '（无同行业参照）'
+        : (roic < indMed ? '，且低于同行业中位 ' + valueFmtPct(indMed)
+        : (roic > indMed ? '（本股高于同行业中位 ' + valueFmtPct(indMed) + '，仍未过资本成本门槛）'
+                         : '（与同行业中位 ' + valueFmtPct(indMed) + ' 持平，未过资本成本门槛）')));
+      if(hasMoatIssue) verdict += '，且未见可识别护城河';
+    } else if(roic === null){
+      verdict = '资本回报维度无数据（金融股按 ROE 口径对标）' + (hasMoatIssue ? '，未见可识别护城河' : '');
     } else if(hasMoatIssue){
       verdict = '未见可识别护城河，长期持有风险偏高';
-    } else if(hasQualityIssue){
-      verdict = '质地存在硬伤：' + escapeHtml(reasons.filter(function(x){ return x !== '无护城河证据'; }).join('、'));
     } else {
       verdict = '价值评估未通过';
     }
@@ -1169,13 +1176,11 @@ function valueAssessmentHtml(vRow, indByL2, hasBatch){
     if(health !== null && health < 40) weakDims.push('财务稳健');
 
     if(weakDims.length === 0){
-      verdict = '具备长期配置价值';
+      verdict = '四维均无短板';
       verdictCls = 'verdict-ok';
-    } else if(weakDims.length <= 2){
-      verdict = weakDims.join('、') + '偏弱，可观察等待更好价格';
     } else {
-      verdict = '多维度偏弱，不建议新建仓';
-      verdictCls = 'verdict-warn';
+      verdict = weakDims.join('、') + '偏弱';
+      if(weakDims.length > 2) verdictCls = 'verdict-warn';
     }
   }
 

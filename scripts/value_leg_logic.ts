@@ -1,6 +1,9 @@
 // scripts/value_leg_logic.ts — 前端价值腿纯逻辑门面（照 research_render_logic.ts 同模式）
 const MARKER = /\/\/ ==== VALUE_PURE_BEGIN ====([\s\S]*?)\/\/ ==== VALUE_PURE_END ====/;
-const SHIM = `function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[m])); }\n`;
+const SHIM = `function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[m])); }\n`
+  // 三栏渲染函数依赖 fmtPct/fmtMoney，二者定义在标记块外；门面按同口径补一份，只服务测试调用
+  + `function fmtPct(n, digits){ if(n===null || n===undefined || isNaN(n)) return '--'; const d=(digits===undefined?1:digits); const s=Number(n).toFixed(d); return (n>0?'+':'')+s+'%'; }\n`
+  + `function fmtMoney(n){ if(isNaN(n)) return '¥0'; return '¥'+Math.round(n).toLocaleString('zh-CN'); }\n`;
 const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter', 'legRange', 'legHasMore', 'legTiebreakCol', 'valueFmtPct', 'valueTierLabel', 'valuePillHtml', 'valueGateHtml', 'renderValueTop10', 'SWAP_GAP', 'divergeLists', 'swapSuggest', 'renderDivergeBoard',
   'TREND_LOOKBACK', 'TREND_KLT', 'TREND_FQT', 'TREND_MIN_MONTHS', 'TREND_POSITION_MA', 'TREND_R2_STEADY', 'TREND_DD_RATIO_MIN', 'monthEndCloses', 'olsLogTrend',
   'longTrendStats', 'longTrendLabel', 'brokenLegOf', 'trendBadgeHtml',
@@ -11,7 +14,8 @@ const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter
   'TREND_LABEL_CN', 'TREND_NA_CN',
   'INCOME_INDUSTRIES', 'INCOME_DY_MIN', 'INCOME_DY5_MIN', 'INCOME_ROIC_MIN', 'INCOME_LIMIT',
   'incomeChannelOf', 'renderIncomeList', 'foldCardHtml',
-  'ROIC_GATE_PCT', 'valueMedian', 'valueIndStatsOf', 'valueMoatVetoHtml', 'valueVetoHtml', 'valueVetoClass', 'valueDipVetoHtml'];
+  'ROIC_GATE_PCT', 'valueMedian', 'valueIndStatsOf', 'valueMoatVetoHtml', 'valueVetoHtml', 'valueVetoClass', 'valueDipVetoHtml', 'valueAssessmentHtml',
+  'profitRefHtml', 'buyRefHtml'];
 
 async function load(): Promise<Record<string, unknown>> {
   const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
@@ -116,4 +120,21 @@ export const valueVetoClass = NS.valueVetoClass as (
 /** 抄底灯亮时的价值标注：只标注不改指令；row=null（查过取不到）写未判定，undefined 表示调用点不适用。 */
 export const valueDipVetoHtml = NS.valueDipVetoHtml as (
   row: Record<string, unknown> | null | undefined, indByL2: Record<string, IndRefLike> | null, hasBatch: boolean,
+) => string;
+/** 价值评估栏（2026-11-01 三栏收口）：四维 + 人话 verdict；只回答「值不值」，不发买卖指令。 */
+export const valueAssessmentHtml = NS.valueAssessmentHtml as (
+  row: Record<string, unknown> | null | undefined, indByL2: Record<string, IndRefLike> | null, hasBatch: boolean,
+) => string;
+/** 止盈参考栏：三态（已达档 / 下一档 / 全部执行完）必须与邮件 tierNoteHtml 同句；缺数据不冒充数值。 */
+type ProfitAlertLike = { tier: { ret: number; sell: number }; ret: number } | null;
+type ProfitTierLike = { ret: number; sell: number } | null;
+export const profitRefHtml = NS.profitRefHtml as (
+  alert: ProfitAlertLike, next: ProfitTierLike, ret: number | null,
+  plan: Record<string, unknown> | null, s: Record<string, unknown>,
+) => string;
+/** 买入参考栏：胶囊档位 + 三条腿白话明细（明细要转义）+ 安全垫补填提示 + 买入横幅。 */
+export const buyRefHtml = NS.buyRefHtml as (
+  ref: { label: string; text: string }, pillCls: string, s: Record<string, unknown>, dev: number | null,
+  gate: { light: boolean; needPad: boolean; shout: boolean }, plan: unknown, cost: unknown,
+  dualHtml: string, dip: unknown, padHint: string, banner: string,
 ) => string;
