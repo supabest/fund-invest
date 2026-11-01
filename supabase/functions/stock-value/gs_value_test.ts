@@ -233,18 +233,28 @@ Deno.test('反向同样成立：q1 中报累计看着达标（≥8）也救不�
 });
 
 /**
- * 2026-10-16 用户裁定「补兜底（缺失即视为不达标）」**推翻**了本条初版取向（当时写的是
- * 「宁缺一个判定，不做一个错判定」）。推翻依据是实测blast radius：换到年报口径后生产有
- * **411 行** `roic_cur` 由有值变 None，它们在 med 已<8 的前提下从「会判」静默退化成「漏杀」，
- * 与否决3 那条「多杀不是漏杀」的 fail-loudly 取向相反。保留的约束：med 达标时不因缺数据惩罚。
+ * 两条裁定叠在同一处，方向相反，务必分清：
+ * 2026-10-16 裁定「缺失即视为不达标」**推翻**本条初版取向（当时写「宁缺一个判定，不做一个错判定」），
+ * 依据是换到年报口径后有 411 行 `roic_cur` 变 None、会静默退化成漏杀；
+ * 2026-11-01 **决议 29** 又推翻那次补兜底：决议 27 生效后同一形态只剩 55 行（2026-10-31 批次实测），
+ * 而门禁层 `roicOk` 只看 `med`（value_engine.ts:84）→ 这些行无论如何进不了合格池，「漏杀」的担忧不成立；
+ * 继续计入的实际效果只剩把「只缺最新一期」断言成「无护城河证据」。
+ * 保留不变的约束：med 达标（≥8）时绝不因缺数据惩罚——本条把这条边界继续钉住。
  */
-Deno.test('最新年报缺失 → 当期 ROIC = NA → 否决4 **视为不达标**（med<8 时缺失计入，2026-10-16 裁定）', () => {
+Deno.test('最新年报缺失 → 当期 ROIC = NA → 否决4 **不触发**（决议29：缺失≠不达标；门禁照挡 unqualified）', () => {
   const r = mergeRoic(['6.5', '6.1', null], ['6', '7', null]).rows.find(x => x.code === '600031.SH')!;
   assertEquals(r.roic, null);                                  // 缺的正是 roic3 末根（2025 年报）
   assertEquals(roicStats(r.roic3).med, 6.5);                   // 前两期仍算得出 med，但 cur 为 NA
-  assertEquals(vetoesOf(r, roicStats(r.roic3).med).includes('无护城河证据'), true);
+  assertEquals(vetoesOf(r, roicStats(r.roic3).med).includes('无护城河证据'), false);
   // med 达标（≥8）时不得因 cur 缺失而否决——本条把「只在第二条腿缺数据时从严」钉成可测边界
   const ok = mergeRoic(['9.9', '6.1', null], ['12', '13', null]).rows.find(x => x.code === '600031.SH')!;
   assertEquals(vetoesOf(ok, roicStats(ok.roic3).med).includes('无护城河证据'), false);
+});
+
+// 决议 29 的地基：`roic_cur/roic_med/roic_min3` 三列把三点序列的**时间顺序**压掉了
+// （med 是中位数、min3 是最小值，谁在哪一年无从还原），而 R2 的第二把尺要的是斜率。
+// 年份直接取自 :168 已锤死的连续性守卫，不在下游重做日期推算。
+Deno.test('stamps.roic_fys 落三年年份（roic_hist 的地基：顺序不能只存在于内存里）', () => {
+  assertEquals(mergeReal().stamps.roic_fys, '2023,2024,2025');
 });
 

@@ -24,6 +24,11 @@ export function buildExtras(
     grp: r.grp,
     owner_cash: r.gate.fcfYield, owner_norm: r.gate.normYield,   // 取小前的两条腿，页面可解释
     veto_reasons: r.gate.vetoReasons,
+    // 三点年报 ROIC 序列连年份一起落库（决议 29 地基）：`roic_med`/`roic_min3` 是顺序无关的统计量，
+    // 斜率只能从原始序列算。上游没给 `roic_fys` 就留 null，不拿 `roic_period` 反推年份。
+    roic_hist: stamps.roic_fys
+      ? { years: stamps.roic_fys.split(','), values: r.roic3 }
+      : null,
   };
 }
 

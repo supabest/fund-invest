@@ -218,6 +218,9 @@ export function mergeValueTables(
   });
   const stamps: Record<string, string> = {
     fin_period: stamp2, val_period: stampOf(K.pe), roic_period: stampOf(roicCurKey),
+    // 决议 29 的地基：`roic_cur/roic_med/roic_min3` 三列不含时间顺序（med 是中位、min3 是最小），
+    // R2 的第二把尺要斜率 → 年份必须随序列落库。值直接取自 :168 已锤死的连续三年守卫，不在这里另算。
+    roic_fys: wantYears,
   };
   if (dyCur) stamps.div_period = stampOf(dyCur);   // spec §8：q5 绑的是哪一期必须可见
   if (roeCur) stamps.roe_period = stampOf(roeCur); // 首夜若它不是 1231 结尾，ROE 就是非年化累计值 → 否决4 需重新裁定

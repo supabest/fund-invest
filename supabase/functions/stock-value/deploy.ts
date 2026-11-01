@@ -61,11 +61,12 @@ function vetoesOf(r: ValueRaw, roicMed: number | null, fin?: { roe: number | nul
   // 否决4 附注：金融股 roic 天然 NA（P-1）→ 改用 ROE 对标；无 roe 输入则不判定
   const med = r.isFin ? fin?.roe ?? null : roicMed;
   const cur = r.isFin ? fin?.roe ?? null : r.roic;
-  // 2026-10-16 用户裁定「缺失即视为不达标」：原先 `cur !== null` 是硬前提，换到年报口径后 411 行
-  // roic_cur 由有值变 None ⇒ 这条腿静默不判，方向是「漏杀」，与否决3 那条「多杀不是漏杀」的
-  // fail-loudly 取向相反。现仅当 med 已<8 时才把 cur 缺失计入（med 达标不因缺数据惩罚）；
-  // 金融股 med/cur 同为 ROE，无 roe 输入 ⇒ med 即 null，Task 5 裁定 2「不判定」原样保留。
-  if (med !== null && med < ROIC_GATE && (cur === null || cur < ROIC_GATE)) out.push('无护城河证据');
+  // 决议 29（2026-11-01 用户批准）撤销 2026-10-16 的「缺失即视为不达标」兜底，改回**两腿都有值才判**。
+  // 那次兜底防的是决议 27 之前的形态：`cur` 绑中报累计列、换年报口径后 411 行静默不判，方向是漏杀。
+  // 决议 27 生效后同一形态只剩 55 行（2026-10-31 批次），且它们的 `med` 照样算得出——缺的只是最新一期。
+  // 关键事实：门禁层 `roicOk` 只看 `med`（本文件 :84），med<8 的行过不了门禁 → 撤销兜底**不扩大合格池**，
+  // 只是不再把「只缺最新一期」这个数据事实断言成「无护城河证据」这个经营结论。落点从 vetoed 变 unqualified。
+  if (med !== null && med < ROIC_GATE && cur !== null && cur < ROIC_GATE) out.push('无护城河证据');
   return out;
 }
 
@@ -479,6 +480,9 @@ function mergeValueTables(
   });
   const stamps: Record<string, string> = {
     fin_period: stamp2, val_period: stampOf(K.pe), roic_period: stampOf(roicCurKey),
+    // 决议 29 的地基：`roic_cur/roic_med/roic_min3` 三列不含时间顺序（med 是中位、min3 是最小），
+    // R2 的第二把尺要斜率 → 年份必须随序列落库。值直接取自 :168 已锤死的连续三年守卫，不在这里另算。
+    roic_fys: wantYears,
   };
   if (dyCur) stamps.div_period = stampOf(dyCur);   // spec §8：q5 绑的是哪一期必须可见
   if (roeCur) stamps.roe_period = stampOf(roeCur); // 首夜若它不是 1231 结尾，ROE 就是非年化累计值 → 否决4 需重新裁定
@@ -557,6 +561,11 @@ function buildExtras(
     grp: r.grp,
     owner_cash: r.gate.fcfYield, owner_norm: r.gate.normYield,   // 取小前的两条腿，页面可解释
     veto_reasons: r.gate.vetoReasons,
+    // 三点年报 ROIC 序列连年份一起落库（决议 29 地基）：`roic_med`/`roic_min3` 是顺序无关的统计量，
+    // 斜率只能从原始序列算。上游没给 `roic_fys` 就留 null，不拿 `roic_period` 反推年份。
+    roic_hist: stamps.roic_fys
+      ? { years: stamps.roic_fys.split(','), values: r.roic3 }
+      : null,
   };
 }
 

@@ -50,6 +50,23 @@ Deno.test('buildExtras：日期戳全部落库（时点纪律）+ cn10ySource + 
   assertEquals(ex.ic_approx, true);
 });
 
+// 决议 29 的地基（R2 第二把尺要的是斜率）：三点年报序列连年份一起落 `extras`。
+// 只落 `roic_cur/roic_med/roic_min3` 不够——med 是中位数、min3 是最小值，时间顺序在落库那一刻就丢了，
+// 事后从这三列无法还原「2023 年是多少」。年份直接来自上游已锤死的连续三年守卫，不在这里重算。
+// ⚠ 序列**必须乱序**：夹具若取升序 [17.1,18.0,18.9]，把实现改成 `.sort()` 的变异体是恒等变换 → 测试假活
+//   （变异检验实测：初版用升序夹具时 M4 在 79 全绿下存活）。乱序才是「保序」这件事的证据。
+Deno.test('buildExtras：roic_hist = 年份 + 三点序列**按年升序原样保留**（不排序、不统计化）', () => {
+  const mix = { ...row, roic3: [18.9, 17.1, 18.0] } as never;    // 2023 最高、2024 掉、2025 回升
+  const ex = buildExtras({ ...STAMPS, roic_fys: '2023,2024,2025' }, mix,
+    { cn10ySource: 'auto', icApprox: true, mainLegs: null });
+  assertEquals(ex.roic_hist, { years: ['2023', '2024', '2025'], values: [18.9, 17.1, 18.0] });
+});
+
+Deno.test('buildExtras：上游没有 roic_fys 时 roic_hist=null（不猜年份，宁缺一个标注）', () => {
+  const ex = buildExtras(STAMPS, row as never, { cn10ySource: 'auto', icApprox: true, mainLegs: null });
+  assertEquals(ex.roic_hist, null);
+});
+
 Deno.test('toDbRow：vetoed 行照落库（veto_reasons 带原因，前视需要被排除的那批）', () => {
   // 引擎对否决者不产 VQ（tier 优先于打分），此处模拟其输出形态，验证 toDbRow 不丢原始位
   const bad = { ...row, tier: 'vetoed', vq: null, gate: { ...row.gate, vetoed: true, vetoReasons: ['资不抵债'] } } as never;

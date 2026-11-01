@@ -60,11 +60,12 @@ export function vetoesOf(r: ValueRaw, roicMed: number | null, fin?: { roe: numbe
   // 否决4 附注：金融股 roic 天然 NA（P-1）→ 改用 ROE 对标；无 roe 输入则不判定
   const med = r.isFin ? fin?.roe ?? null : roicMed;
   const cur = r.isFin ? fin?.roe ?? null : r.roic;
-  // 2026-10-16 用户裁定「缺失即视为不达标」：原先 `cur !== null` 是硬前提，换到年报口径后 411 行
-  // roic_cur 由有值变 None ⇒ 这条腿静默不判，方向是「漏杀」，与否决3 那条「多杀不是漏杀」的
-  // fail-loudly 取向相反。现仅当 med 已<8 时才把 cur 缺失计入（med 达标不因缺数据惩罚）；
-  // 金融股 med/cur 同为 ROE，无 roe 输入 ⇒ med 即 null，Task 5 裁定 2「不判定」原样保留。
-  if (med !== null && med < ROIC_GATE && (cur === null || cur < ROIC_GATE)) out.push('无护城河证据');
+  // 决议 29（2026-11-01 用户批准）撤销 2026-10-16 的「缺失即视为不达标」兜底，改回**两腿都有值才判**。
+  // 那次兜底防的是决议 27 之前的形态：`cur` 绑中报累计列、换年报口径后 411 行静默不判，方向是漏杀。
+  // 决议 27 生效后同一形态只剩 55 行（2026-10-31 批次），且它们的 `med` 照样算得出——缺的只是最新一期。
+  // 关键事实：门禁层 `roicOk` 只看 `med`（本文件 :84），med<8 的行过不了门禁 → 撤销兜底**不扩大合格池**，
+  // 只是不再把「只缺最新一期」这个数据事实断言成「无护城河证据」这个经营结论。落点从 vetoed 变 unqualified。
+  if (med !== null && med < ROIC_GATE && cur !== null && cur < ROIC_GATE) out.push('无护城河证据');
   return out;
 }
 

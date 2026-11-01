@@ -53,15 +53,28 @@ Deno.test('金融股否决4 走 ROE 对标：roic 天然 NA 不得整类误杀�
   assertEquals(vetoesOf(fin, null, undefined).includes('无护城河证据'), false);  // 无 roe 输入 → 不判定，不算触发
 });
 
-// 2026-10-16 用户裁定「补兜底（缺失即视为不达标）」：换到年报口径后 411 行 roic_cur 由有值变 None，
-// 而 `cur !== null` 这个硬前提把它们从「会判」静默降级成「漏杀」——方向与 spec §4 的 fail-loudly 相反。
-Deno.test('否决4 缺失兜底：非金融当期 ROIC 缺失 = 不达标（仅在 med 已<8 时生效，不放宽 med 腿）', () => {
-  assertEquals(vetoesOf(mk({ roic: null }), 5), ['无护城河证据']);   // med<8 且 cur 缺 → 视为双双<8
-  assertEquals(vetoesOf(mk({ roic: null }), 15), []);               // med 达标 → 不因缺失惩罚
-  assertEquals(vetoesOf(mk({ roic: 10 }), 5), []);                  // cur 有值且达标 → 仍不否决
-  assertEquals(vetoesOf(mk({ roic: 5 }), 5), ['无护城河证据']);      // 原语义不变
+// 2026-11-01 决议 29（用户批准 R1）**推翻**上一条 2026-10-16 的「缺失即视为不达标」兜底。依据是两处实测，不是观感：
+// ① 决议 27 把 `roic_cur` 改绑最近年报列后，「缺失」的 blast radius 从 411 行缩到 55 行（2026-10-31 批次），
+//    而这 55 行的 `med` 照样算得出（缺的只是最新一期）→ 它们不是「静默不判」，是「只缺一期」；
+// ② 门禁层 `roicOk` 只看 `med`（本文件 :84 一侧），med<8 的行无论如何过不了门禁 → 摘掉这条否决**不会**让一只行进合格池。
+// 于是「缺失即不达标」的实际后果只剩一件：把「数据不足」写成「无护城河证据」——一个没有证据支撑的断言。
+// 保留的约束一条没动：med 达标时绝不因缺数据惩罚；`cur` 有值且 <8 的双低照旧否决。
+Deno.test('否决4 决议29：当期 ROIC **缺失不再触发否决**（缺失≠不达标）；有值且双低照旧触发', () => {
+  assertEquals(vetoesOf(mk({ roic: null }), 5), []);                // med<8 且 cur 缺 → 不判定护城河（原为 ['无护城河证据']）
+  assertEquals(vetoesOf(mk({ roic: null }), 15), []);               // med 达标 → 同样不触发
+  assertEquals(vetoesOf(mk({ roic: 5 }), 5), ['无护城河证据']);      // 双低（两腿都有值且都<8）语义一字未改
+  assertEquals(vetoesOf(mk({ roic: 10 }), 5), []);                  // 单低照旧不否决
   // 金融股保留 Task 5 裁定 2：med/cur 同为 ROE，无 roe 输入 ⇒ med 也是 null ⇒ 本条天然不触发
   assertEquals(vetoesOf(mk({ isFin: true, roic: null, roic3: [null, null, null] }), null, undefined), []);
+});
+
+// 这条是「决议29 不是放松门禁」的唯一证据。变异预期：把 `roicOk` 写成恒 true（或删掉 `med === null → false`
+// 之外的 med 比较）→ 下面 `passed`/`tooRich` 断言当场红；把否决4 的缺失支路原样加回 → `vetoed` 断言红。
+Deno.test('当期缺失行仍被门禁挡在 unqualified（否决4 摘掉后合格池一只不增）', () => {
+  const g = gateOf(mk({ roic: null, roic3: [6, 7, null] }), 1.85);   // med=6.5<8、最新年报 NA、oy=1.3 → mos=-0.55
+  assertEquals(g.vetoed, false);      // 决议29：不再叫「无护城河证据」
+  assertEquals(g.passed, false);      // 但门禁照挡：不是放松
+  assertEquals(g.tooRich, false);     // 落点必须是「roic 腿不达标」，不是「太贵」
 });
 
 Deno.test('门禁判定：否决 > oy≤0 > roic_med 不达标 > mos 不足（too_rich 不是卖出）', () => {
