@@ -11,6 +11,7 @@ import { valueFmtPct, valueTierLabel, valueGateHtml, renderValueTop10,
   valPctNeedFetch, valPctApply, valPctHtml, valPctMerge, valPctLockNote,
   incomeChannelOf, renderIncomeList, foldCardHtml,
   valueMedian, valueIndStatsOf, ROIC_GATE_PCT, valueAssessmentHtml,
+  valueTrendExempt, ROIC_TREND_FLOOR_PCT,
   profitRefHtml, buyRefHtml } from "./value_leg_logic.ts";
 
 const row = { code:'600031', name:'潍柴', vq:78.4, tier:'qualified', confidence:'A', vetoed:false,
@@ -996,8 +997,8 @@ Deno.test('价值否决文案：无护城河证据 → 本股 ROIC 数值 + 8% �
   const veto = { ...row, tier: 'vetoed', veto_reasons: ['无护城河证据'], ths_l2: '汽车零部件',
     roic_med: 7.654586, roic_cur: 7.654586, roic_min3: 7.012263 };
   const h = valueGateHtml(veto, { '汽车零部件': { med: 6.9027, n: 215 } });
-  for (const t of ['⛔ 硬否决', 'ROIC 未达 8%', 'ROIC 中位 7.7%', '当期 7.7%', '近3年最低 7.0%',
-    '门槛 8%', '同行业中位 6.9%', '汽车零部件 n=215']) {
+  for (const t of ['⛔ 硬否决', 'ROIC 未达 8%', 'ROIC 中位 7.65%', '当期 7.65%', '近3年最低 7.01%',
+    '门槛 8%', '同行业中位 6.90%', '汽车零部件 n=215']) {
     assertEquals(h.includes(t), true, '缺少：' + t);
   }
   // 7.65 高于同业中位 6.90：必须说清「高于同行但未过绝对门槛」，否则读者会以为数据自相矛盾
@@ -1011,8 +1012,8 @@ Deno.test('价值否决文案：缺行业参考时只讲本股与门槛；低于
     roic_med: 5.2, roic_cur: 3.1, roic_min3: null };
   const noInd = valueGateHtml(veto, null);
   assertEquals(noInd.includes('同行业中位'), false);
-  assertEquals(noInd.includes('ROIC 中位 5.2%'), true);
-  assertEquals(noInd.includes('当期 3.1%'), true);
+  assertEquals(noInd.includes('ROIC 中位 5.20%'), true);
+  assertEquals(noInd.includes('当期 3.10%'), true);
   assertEquals(noInd.includes('近3年最低'), false);      // 缺值不硬造一行
   assertEquals(noInd.includes('NA'), false);
   const below = valueGateHtml(veto, { '汽车零部件': { med: 9.5, n: 215 } });
@@ -1174,7 +1175,7 @@ Deno.test('价值评估栏：本股 ROIC 高于同行业中位时，绝不许写
 
 Deno.test('价值评估栏：本股 ROIC 不高于同行业中位时必须点明「低于同行业中位」并给中位值', () => {
   const out = valueAssessmentHtml(vaVeto, vaIndLower, true);
-  assertEquals(/低于同行业中位 9\.0%/.test(out), true, '双否决要说清同行中位值：' + out.replace(/<[^>]+>/g, ' '));
+  assertEquals(/低于同行业中位 9\.00%/.test(out), true, '双否决要说清同行中位值：' + out.replace(/<[^>]+>/g, ' '));
 });
 
 Deno.test('价值评估栏：没有同行业参照时不凭空提中位，也不冒充有参照', () => {
@@ -1203,7 +1204,8 @@ Deno.test('价值评估栏：本股 ROIC 与同行业中位持平时说「持平
   const out = flat(valueAssessmentHtml({ ...vaVeto, roic_med: 5.0 }, { 工程机械: { med: 5.0, n: 24 } }, true));
   assertEquals(out.includes('低于同行业中位'), false, '5.0 与中位 5.0 相等，写「低于」是假话：' + out);
   assertEquals(out.includes('高于同行业中位'), false, '相等也不是「高于」：' + out);
-  assertMatch(out, /同行业中位 5\.0%/);
+  // 锚必须带上分支自己的措辞：只写「同行业中位 5.00%」会被雷达格那句满足，verdict 分支回退一位小数也测不到
+  assertMatch(out, /与同行业中位 5\.00% 持平，未过资本成本门槛/);
 });
 
 Deno.test('价值评估栏：只回答值不值，栏内不得出现任何买卖指令话术', () => {
@@ -1306,20 +1308,20 @@ const flat = (h: string) => h.replace(/<[^>]*>/g, '');
 
 Deno.test('价值评估栏（ROE 对标）：金融股拿到 extras.fin_roe 时，资本回报格按 ROE 报数并标明口径', () => {
   const txt = flat(valueAssessmentHtml(finRow(12.3), null, true));
-  assertMatch(txt, /达标 · 12\.3%（ROE 口径对标）/, 'ROE 数字要看得见、口径要标得清：' + txt);
+  assertMatch(txt, /达标 · 12\.30%（ROE 口径对标）/, 'ROE 数字要看得见、口径要标得清：' + txt);
   assertEquals(txt.includes('无数据'), false, '有 ROE 却写「无数据」是假话：' + txt);
   assertMatch(txt, /质地三维无短板/, '12.3% ≥ 8% 门槛 ⇒ 资本回报不记短板票：' + txt);
 });
 
 Deno.test('价值评估栏（ROE 对标）：低于门槛的金融股 ROE 照记一票短板，与非金融股同权', () => {
   const txt = flat(valueAssessmentHtml(finRow(5.2), null, true));
-  assertMatch(txt, /未达标 · 5\.2%（ROE 口径对标）/);
+  assertMatch(txt, /未达标 · 5\.20%（ROE 口径对标）/);
   assertMatch(txt, /资本回报偏弱/, 'ROE 5.2% < 8% 必须进短板清单（否决4 用的是同一个对标口径）：' + txt);
 });
 
 Deno.test('价值评估栏（ROE 对标）：被否决的金融股要说清 ROE 对标值，不再退回「无数据」', () => {
   const txt = flat(valueAssessmentHtml(finRow(5.2, { tier: 'vetoed', vetoed: true, veto_reasons: ['无护城河证据'] }), null, true));
-  assertMatch(txt, /ROE 口径对标 5\.2%/, '否决句里要带对标值：' + txt);
+  assertMatch(txt, /ROE 口径对标 5\.20%/, '否决句里要带对标值：' + txt);
   assertEquals(txt.includes('未覆盖资本成本'), true, '没过 8% 门槛要说出来：' + txt);
   assertEquals(txt.includes('无数据'), false, '明明有 ROE，写「无数据」是假话：' + txt);
 });
@@ -1342,4 +1344,165 @@ Deno.test('价值评估栏（ROE 对标）：ROE 已过门槛的被否决金融�
 Deno.test('价值评估栏（ROE 对标）：ROE 数字不得与 ROIC 同业中位并排（量纲不同源，会造出假比较）', () => {
   const txt = flat(valueAssessmentHtml(finRow(12.3), { 银行: { med: 8.5, n: 24 } }, true));
   assertEquals(txt.includes('同行业中位'), false, '同业中位取的是 roic_med，跟 ROE 不是一个口径，不能并排写：' + txt);
+});
+
+// ==== 2026-11-02 裁定：走势第二把尺 C 档（R4「末段向上且末值≥5%」），落点=页面标签层 ====
+// 分布依据（台账续四十三，2026-11-01 批次 5028 行实测）：
+//   · 豁免作用域只有「仅无护城河证据」1754 行；含质地硬伤的否决一律不碰（R1 会连带放掉 104 行）。
+//   · 这 1754 行的 roic_med 非空值最大 7.9987 < 8 ⇒ 豁免后仍过不了门禁，落点 vetoed→不合格，合格池零变化。
+//   · 金融股（roic_med NULL）三点齐全 0 行 ⇒ 走势尺对金融股整片不可用，必须显式排除而不是让它误命中。
+const moatRow = (vals: Array<number | null> | null, over: Record<string, unknown> = {}) => ({
+  code: '002852', name: '道道全', ths_l2: '农产品加工', tier: 'vetoed', vetoed: true,
+  veto_reasons: ['无护城河证据'], roic_med: 4.08, roic_cur: 7.96, roic_min3: 5.09,
+  v_moat: 55, v_cash: 60, v_safety: 40, v_health: 60, margin_of_safety: -1.2,
+  owner_yield: 0.6, cn10y: 1.85, rf_fallback: false,
+  extras: vals ? { roic_hist: { years: ['2023', '2024', '2025'], values: vals } } : {},
+  ...over,
+} as never);
+const IND = { 农产品加工: { med: 6.1, n: 12 } };
+
+Deno.test('走势豁免（C 档）：末段向上且末值≥5% ⇒ 命中，并交出年份与原值供文案引用', () => {
+  const hit = valueTrendExempt(moatRow([5.09, 6.44, 7.96]));
+  assertEquals(!!hit, true, '现网 294 行的主形态，必须命中：' + JSON.stringify(hit));
+  assertEquals(hit!.vals, [5.09, 6.44, 7.96], '值要原样给（页面不得自己再算一遍）');
+  assertEquals(hit!.years, ['2023', '2024', '2025']);
+});
+
+Deno.test('走势豁免（C 档）：末段持平也算向上（判据是 ≥，不是 >）', () => {
+  // 变异检验钉边界：改成 v[2] > v[1] 时这条必须翻红
+  assertEquals(!!valueTrendExempt(moatRow([4.0, 6.44, 6.44])), true);
+});
+
+Deno.test('走势豁免（C 档）：末段向下（倒 V）不豁免', () => {
+  assertEquals(valueTrendExempt(moatRow([5.09, 7.96, 6.44])), null, '先涨后跌不是趋势向好');
+});
+
+Deno.test('走势豁免（C 档）：末值 4.6% 不豁免——只方向向上、水平仍低的要挡住', () => {
+  // 读数依据：R1 的 215 行里有 33 行末值 <3%，含一汽解放 [-2.62,-2.27,-1.21] 这类负值回升
+  assertEquals(valueTrendExempt(moatRow([1.2, 3.1, 4.6])), null);
+});
+
+Deno.test('走势豁免（C 档）：末值恰好 5.0% 豁免（下限含等号）', () => {
+  assertEquals(!!valueTrendExempt(moatRow([1.2, 3.1, 5.0])), true);
+});
+
+Deno.test('走势豁免（C 档）：三点不齐一律不豁免（261 行=14.9% 永远吃不到尺子，不许蒙）', () => {
+  assertEquals(valueTrendExempt(moatRow([5.09, null, 7.96])), null);
+  assertEquals(valueTrendExempt(moatRow([5.09, 6.44])), null);
+  assertEquals(valueTrendExempt(moatRow([null, null, null])), null);
+});
+
+Deno.test('走势豁免（C 档）：带质地硬伤的行绝不豁免（104 行误放面的守卫）', () => {
+  for (const extra of ['烧钱加杠杆', '资不抵债', '商誉/净资产>50%']) {
+    const r = moatRow([5.09, 6.44, 7.96], { veto_reasons: ['无护城河证据', extra] });
+    assertEquals(valueTrendExempt(r), null, extra + ' 在列时走势不得放行');
+  }
+});
+
+Deno.test('走势豁免（C 档）：金融股不豁免——roic_med 为空即出局，不看序列长什么样', () => {
+  // 金融股的否决4 走 ROE 对标，extras.roic_hist 是 ROIC 序列，两者不同源；且实测这批三点齐全 0 行
+  assertEquals(valueTrendExempt(moatRow([5.09, 6.44, 7.96], { roic_med: null })), null);
+});
+
+Deno.test('走势豁免（C 档）：非否决行不适用（合格池不因走势重算，门禁原样）', () => {
+  assertEquals(valueTrendExempt(moatRow([5.09, 6.44, 7.96], { tier: 'qualified', vetoed: false, veto_reasons: [] })), null);
+});
+
+Deno.test('走势豁免（C 档·兼容护栏）：旧批次没有 extras.roic_hist 时返回 null，不抛、不冒充', () => {
+  assertEquals(valueTrendExempt(moatRow(null)), null);
+  assertEquals(valueTrendExempt(moatRow([5.09, 6.44, 7.96], { extras: null })), null);
+  assertEquals(valueTrendExempt(moatRow([5.09, 6.44, 7.96], { extras: { roic_hist: null } })), null);
+  assertEquals(valueTrendExempt(moatRow([5.09, 6.44, 7.96], { extras: { roic_hist: { years: ['2023'], values: ['x', 6, 7] } } })), null);
+  assertEquals(valueTrendExempt(null), null);
+});
+
+Deno.test('走势豁免（C 档）：下限 5% 与门槛 8% 差 3pp，两个数各管各的、不得互相顶替', () => {
+  assertEquals(ROIC_TREND_FLOOR_PCT, 5);
+  assertEquals(ROIC_GATE_PCT - ROIC_TREND_FLOOR_PCT, 3);
+});
+
+Deno.test('价值评估栏（走势豁免）：命中行要报出三年原值与回升事实，并明写仍不合格', () => {
+  const txt = flat(valueAssessmentHtml(moatRow([5.09, 6.44, 7.96]), IND, true));
+  assertMatch(txt, /近三年 ROIC 2023 5\.09% → 2025 7\.96% 回升/, '走势事实要带年份与原值：' + txt);
+  assertMatch(txt, /不再算硬否决，但仍不合格/, '要说清改的是标签、不是门禁：' + txt);
+});
+
+Deno.test('价值评估栏（走势豁免）：未命中的否决行文案一字不改（现网 1459 行的形态必须原样）', () => {
+  // 这是 pin：现网这批行今天打印的就是下面这句，改动前后逐字相等（含行业比较三分支之一）。
+  const clause = '；近三年 ROIC 2023 5.09% → 2025 7.96% 回升，不再算硬否决，但仍不合格';
+  const up = flat(valueAssessmentHtml(moatRow([5.09, 6.44, 7.96]), IND, true));
+  const down = flat(valueAssessmentHtml(moatRow([7.96, 6.44, 5.09]), IND, true));
+  assertEquals(down.includes('回升'), false, '末段向下的行不得被走势句污染：' + down);
+  assertEquals(up.replace(clause, ''), down, '豁免只能是追加一句走势事实，原句（含同业比较）一字不许动：' + up);
+});
+
+Deno.test('展开明细（走势豁免）：门禁行由「硬否决」改「不合格（近三年回报回升，门槛未过）」，⛔ 撤下', () => {
+  const txt = flat(valueGateHtml(moatRow([5.09, 6.44, 7.96]), IND));
+  assertEquals(txt.includes('⛔'), false, '豁免行不再亮 ⛔：' + txt);
+  assertMatch(txt, /门禁：不合格（近三年回报回升，门槛未过）/, '门禁一词要留着——不豁免门禁：' + txt);
+  assertMatch(txt, /不合格：ROIC 未达 8% 资本成本门槛/);
+  assertMatch(txt, /本股 ROIC 中位 4\.08% · 当期 7\.96%/, '三条明细行原样保留（本轮只把小数位从一位改两位）：' + txt);
+});
+
+Deno.test('展开明细（兼容护栏）：未豁免的行门禁与 ⛔ 句与现网逐字相同', () => {
+  const txt = flat(valueGateHtml(moatRow([7.96, 6.44, 5.09]), IND));
+  assertMatch(txt, /门禁：硬否决 · ROIC 中位 4\.08% · 安全边际 -1\.20pp（owner yield 0\.6% − 十年国债 1\.85%）/);
+  assertMatch(txt, /⛔ 硬否决：ROIC 未达 8% 资本成本门槛/);
+  const none = flat(valueGateHtml(moatRow(null), IND));
+  assertMatch(none, /⛔ 硬否决：ROIC 未达 8% 资本成本门槛/, '没有 roic_hist 的旧批次保持原形态：' + none);
+});
+
+Deno.test('走势豁免不许冒充数值：命中行的资本回报雷达格仍显示「未达标」', () => {
+  const txt = flat(valueAssessmentHtml(moatRow([5.09, 6.44, 7.96]), IND, true));
+  assertMatch(txt, /未达标 · 4\.08%（同行业中位 6\.10%）/, '走势只改标签，雷达格仍按 8% 门槛判：' + txt);
+  assertEquals(/达标 · 4\.1%/.test(txt.replace(/未达标/g, '')), false, '不得冒出「达标」：' + txt);
+});
+
+Deno.test('走势豁免（C 档）：只作用于硬否决行——合格行即使带着护城河原因也不参与', () => {
+  // 契约测试（变异检验补漏）：撤掉「非否决行不参与」这道守卫时，现网不会出现错行，
+  // 但豁免的语义边界就没了——它会开始给一个没被否决的行贴「不再算硬否决」，那是句假话。
+  const txt = flat(valueAssessmentHtml(
+    moatRow([5.09, 6.44, 7.96], { tier: 'qualified', vetoed: false }), IND, true));
+  assertEquals(txt.includes('不再算硬否决'), false, '合格行不得出现「不再算硬否决」：' + txt);
+  const raw = moatRow([5.09, 6.44, 7.96], { tier: 'qualified', vetoed: false });
+  assertEquals(valueTrendExempt(raw), null, '纯函数同样不得给合格行发豁免');
+});
+
+// ==== 2026-11-02 精度收口：资本回报读数统一两位小数 ====
+// 取证（现网 2026-11-01 批次 5028 行，经 Pages 反代只读分页取全）：1 位小数会把 <8% 的值念成「8.0%」，
+// 与同屏「未达 8% 资本成本门槛」自相矛盾，共 17 行（中位 7 / 当期 6 / 近3年最低 8）；
+// 道道全 roic_cur=7.959025 就是其中一例。改两位后只剩 1 行（002489 med=7.998735→8.00%），已单独钉住。
+// 本轮只动小数位：8% 门槛、比较式、走势五道判据一字未动。
+Deno.test('资本回报读数（两位小数）：7.959% 不得念成「8.0%」——展开明细三项与门禁行同口径', () => {
+  const txt = flat(valueGateHtml(moatRow([5.09, 6.44, 7.96], {
+    roic_med: 6.444812, roic_cur: 7.959025, roic_min3: 5.085701,
+  }), IND));
+  assertMatch(txt, /本股 ROIC 中位 6\.44% · 当期 7\.96% · 近3年最低 5\.09%/,
+    '展开明细三项统一两位小数：' + txt);
+  assertEquals(txt.includes('当期 8.0%'), false, '7.96% 舍成 8.0% 会和同屏「未达 8%」打架：' + txt);
+  assertMatch(txt, /· ROIC 中位 6\.44% · 安全边际/, '门禁行走同一口径：' + txt);
+});
+
+Deno.test('资本回报读数（两位小数）：雷达格、同业中位、ROE 对标值与展开明细同屏同口径', () => {
+  const txt = flat(valueAssessmentHtml(
+    moatRow([5.09, 6.44, 7.96], { roic_med: 7.654586 }), { 农产品加工: { med: 6.9027, n: 12 } }, true));
+  assertMatch(txt, /未达标 · 7\.65%（同行业中位 6\.90%）/, '雷达格两位小数：' + txt);
+  assertMatch(txt, /本股高于同行业中位 6\.90%/, 'verdict 里的同业中位也是同一口径：' + txt);
+});
+
+Deno.test('资本回报读数（两位小数）：三张榜单行的「ROIC中位」不得留一位小数口径', () => {
+  assertMatch(renderValueTop10({ batch: '2026-11-01', top10: [row] as never[] }), /ROIC中位 18\.00%/);
+  assertMatch(renderIncomeList({ batch: '2026-11-01', list: [incRow as never], total: 1 }), /ROIC中位 6\.10%/);
+  const rows = [ v('a', 95, 30, 6), v('d', 92, 28, 5), v('e', 90, 20, 4), v('b', 50, 50, 3), v('c', 10, 95, 1) ]
+    .map(r => ({ ...r, owner_yield: 6.2, roic_med: 18 }));
+  const board = renderDivergeBoard({ batch: '2026-11-01', top10: rows, rows: new Map(rows.map(r => [r.code, r])) } as never);
+  assertMatch(board, /ROIC中位 18\.00%/);
+});
+
+Deno.test('资本回报读数（两位小数·残留取证）：7.998735 改两位后仍显示 8.00%，同屏「未达 8%」不得因此被改掉', () => {
+  // 现网只剩这一行（002489 浙江永强）。它是舍入的固有残留，不是新 bug：
+  // 句子说的仍是「未达 8%」，判据与档位一字未动；把它当假话修掉要动的是舍入方式，不属本轮范围。
+  const txt = flat(valueGateHtml(moatRow(null, { roic_med: 7.998735, roic_cur: 7.998735, roic_min3: 0.618947 }), IND));
+  assertMatch(txt, /本股 ROIC 中位 8\.00%/);
+  assertMatch(txt, /⛔ 硬否决：ROIC 未达 8% 资本成本门槛/, '读数显示 8.00% 也不得改掉「未达 8%」这句判据：' + txt);
 });

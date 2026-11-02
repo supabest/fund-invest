@@ -959,6 +959,39 @@ var ROIC_GATE_PCT = 8;   // 与 supabase/functions/stock-value/value_engine.ts �
 function valueNumOrNull(v){
   return (v === null || v === undefined || isNaN(Number(v))) ? null : Number(v);
 }
+// ---- 走势第二把尺（2026-11-02 用户裁定：C 档 R4 ＋ 落点=页面标签层）----
+// 只做一件事：把「仅无护城河证据」这一票硬否决降级成「不合格」。**8% 门槛与门禁判据一字未动**，
+// 所以合格池、价值 Top10、收益型通道、买入参考全部零变化——分布读数已证明这点：命中批次的
+// `roic_med` 非空值最大 7.9987 < 8（台账续四十三），被豁免者落点必是 `vetoed → unqualified`。
+// 三条硬约束都在下面的判据里：① 带质地硬伤的否决一律不碰（否则会连带放掉 104 行）；
+// ② 金融股不碰（否决4 对它走 ROE，与 `roic_hist` 的 ROIC 序列不同源，且实测三点齐全 0 行）；
+// ③ 序列不足三点不碰（14.9% 的行拿不到，也不许蒙）。
+var ROIC_TREND_FLOOR_PCT = 5;   // 末值水平下限 = ROIC 门槛减 3pp；只看方向的规则会放掉末值<3%的负值回升
+function valueHist3(vRow){
+  var h = ((vRow || {}).extras || {}).roic_hist;
+  if(!h || !Array.isArray(h.values) || h.values.length !== 3) return null;
+  if(!Array.isArray(h.years) || h.years.length !== 3) return null;
+  var v = [valueNumOrNull(h.values[0]), valueNumOrNull(h.values[1]), valueNumOrNull(h.values[2])];
+  if(v[0] === null || v[1] === null || v[2] === null) return null;
+  return { years: [String(h.years[0]), String(h.years[1]), String(h.years[2])], vals: v };
+}
+function valueTrendExempt(vRow){
+  if(!vRow) return null;
+  if(!(vRow.tier === 'vetoed' || vRow.vetoed)) return null;
+  var reasons = vRow.veto_reasons || [];
+  if(reasons.length !== 1 || reasons[0] !== '无护城河证据') return null;
+  if(valueNumOrNull(vRow.roic_med) === null) return null;
+  var h = valueHist3(vRow);
+  if(!h) return null;
+  if(!(h.vals[2] >= h.vals[1] && h.vals[2] >= ROIC_TREND_FLOOR_PCT)) return null;
+  return { years: h.years, vals: h.vals, end: h.vals[2] };
+}
+// 白话事实句：只报年份与原始三点，不露「豁免/档位/尺」这类内部说法。数值取两位小数——
+// 一位小数会把 7.96% 念成 8.0%，与「未达 8% 门槛」自相矛盾。
+function valueTrendClause(ex){
+  return '近三年 ROIC ' + escapeHtml(ex.years[0]) + ' ' + valueFmtPct(ex.vals[0], 2)
+    + ' → ' + escapeHtml(ex.years[2]) + ' ' + valueFmtPct(ex.vals[2], 2) + ' 回升，不再算硬否决，但仍不合格';
+}
 function valueMedian(vals){
   var a = (vals || []).map(valueNumOrNull).filter(function(v){ return v !== null; });
   if(!a.length) return null;
@@ -987,18 +1020,23 @@ function valueMoatVetoHtml(row, indByL2){
     return '<div class="score-warn">⛔ 硬否决：金融股按 ROE 对标，ROE 低于 '+ROIC_GATE_PCT+'% 资本成本门槛</div>';
   }
   var cur = valueNumOrNull(row.roic_cur), min3 = valueNumOrNull(row.roic_min3);
-  var own = '本股 ROIC 中位 ' + valueFmtPct(med);
-  if(cur !== null) own += ' · 当期 ' + valueFmtPct(cur);
-  if(min3 !== null) own += ' · 近3年最低 ' + valueFmtPct(min3);
-  var out = '<div class="score-warn">⛔ 硬否决：ROIC 未达 '+ROIC_GATE_PCT+'% 资本成本门槛</div>'
-    + '<div class="score-warn" style="color:var(--muted)">' + own + '（门槛 '+ROIC_GATE_PCT+'% 是资本成本锚，不随行业浮动）</div>';
+  // 资本回报读数一律两位：一位会把 7.96% 念成「8.0%」，与同屏「未达 8%」自相矛盾（现网 2026-11-01 批次 17 行）
+  var own = '本股 ROIC 中位 ' + valueFmtPct(med, 2);
+  if(cur !== null) own += ' · 当期 ' + valueFmtPct(cur, 2);
+  if(min3 !== null) own += ' · 近3年最低 ' + valueFmtPct(min3, 2);
+  var ex = valueTrendExempt(row);
+  var out = ex
+    ? '<div class="score-warn" style="color:var(--muted)">不合格：ROIC 未达 '+ROIC_GATE_PCT+'% 资本成本门槛</div>'
+    : '<div class="score-warn">⛔ 硬否决：ROIC 未达 '+ROIC_GATE_PCT+'% 资本成本门槛</div>';
+  out += '<div class="score-warn" style="color:var(--muted)">' + own + '（门槛 '+ROIC_GATE_PCT+'% 是资本成本锚，不随行业浮动）</div>';
   var ind = (indByL2 && row.ths_l2) ? indByL2[row.ths_l2] : null;
   var im = ind ? valueNumOrNull(ind.med) : null;
   if(im !== null){
-    out += '<div class="score-warn" style="color:var(--muted)">同行业中位 ' + valueFmtPct(im)
+    out += '<div class="score-warn" style="color:var(--muted)">同行业中位 ' + valueFmtPct(im, 2)
       + '（' + escapeHtml(String(row.ths_l2)) + ' n=' + Number(ind.n || 0) + '，仅参考）'
       + (med > im ? '——本股高于同行业中位，仍未过门槛' : '——本股也低于同行业中位') + '</div>';
   }
+  if(ex) out += '<div class="score-warn" style="color:var(--muted)">' + valueTrendClause(ex) + '</div>';
   return out;
 }
 function valueVetoHtml(row, indByL2){
@@ -1083,13 +1121,14 @@ function valueAssessmentHtml(vRow, indByL2, hasBatch){
   var ind = (indByL2 && vRow.ths_l2) ? indByL2[vRow.ths_l2] : null;
   var indMed = ind ? valueNumOrNull(ind.med) : null;
   // 同业中位取的是 roic_med，与 ROE 不是一个量纲；ROE 口径下并排等于造出一个假比较（2026-11-02 裁定③）
-  var indTxt = indMed !== null ? '（同行业中位 ' + valueFmtPct(indMed) + '）' : '';
+  var indTxt = indMed !== null ? '（同行业中位 ' + valueFmtPct(indMed, 2) + '）' : '';
 
   // Verdict：人话事实，不露算式与内部术语
   var verdict = '';
   var verdictCls = '';
   var reasons = (vRow.veto_reasons || []);
   var isVetoed = vRow.tier === 'vetoed' || vRow.vetoed;
+  var trendEx = valueTrendExempt(vRow);
 
   if(isVetoed){
     verdictCls = 'verdict-warn';
@@ -1103,13 +1142,13 @@ function valueAssessmentHtml(vRow, indByL2, hasBatch){
       verdict = '质地存在硬伤：' + escapeHtml(qualityIssues.join('、'));
     } else if(roicBelow && retIsRoe){
       // ROE 口径不做同业比较（量纲不同源），只报对标值本身
-      verdict = '资本回报未覆盖资本成本（ROE 口径对标 ' + valueFmtPct(retVal) + '）';
+      verdict = '资本回报未覆盖资本成本（ROE 口径对标 ' + valueFmtPct(retVal, 2) + '）';
       if(hasMoatIssue) verdict += '，且未见可识别护城河';
     } else if(roicBelow){
       verdict = '资本回报未覆盖资本成本' + (indMed === null ? '（无同行业参照）'
-        : (roic < indMed ? '，且低于同行业中位 ' + valueFmtPct(indMed)
-        : (roic > indMed ? '（本股高于同行业中位 ' + valueFmtPct(indMed) + '，仍未过资本成本门槛）'
-                         : '（与同行业中位 ' + valueFmtPct(indMed) + ' 持平，未过资本成本门槛）')));
+        : (roic < indMed ? '，且低于同行业中位 ' + valueFmtPct(indMed, 2)
+        : (roic > indMed ? '（本股高于同行业中位 ' + valueFmtPct(indMed, 2) + '，仍未过资本成本门槛）'
+                         : '（与同行业中位 ' + valueFmtPct(indMed, 2) + ' 持平，未过资本成本门槛）')));
       if(hasMoatIssue) verdict += '，且未见可识别护城河';
     } else if(retVal === null){
       verdict = '资本回报维度无数据（金融股按 ROE 口径对标）' + (hasMoatIssue ? '，未见可识别护城河' : '');
@@ -1118,6 +1157,8 @@ function valueAssessmentHtml(vRow, indByL2, hasBatch){
     } else {
       verdict = '价值评估未通过';
     }
+    // 走势只追加一句事实，不改上面任何一条原判据句（含同业比较的三分支）。
+    if(trendEx) verdict += '；' + valueTrendClause(trendEx);
   } else {
     // 短板票只数质地三维（2026-11-02 裁定 B）。阈值 40/70 与 8%、以及 `>2` 才转 warn 的分界一字未动。
     var weakDims = [];
@@ -1137,7 +1178,7 @@ function valueAssessmentHtml(vRow, indByL2, hasBatch){
   var html = '<div class="ref-section"><div class="ref-title">价值评估</div>';
   html += '<div class="value-radar">';
   html += '<div class="value-dim"><div class="dim-label">护城河</div><div class="dim-val ' + moatCls + '">' + moatLabel + '</div></div>';
-  html += '<div class="value-dim"><div class="dim-label">资本回报</div><div class="dim-val ' + roicCls + '">' + roicLabel + (retVal !== null ? ' · ' + valueFmtPct(retVal) : '') + (retIsRoe ? '（ROE 口径对标）' : indTxt) + '</div></div>';
+  html += '<div class="value-dim"><div class="dim-label">资本回报</div><div class="dim-val ' + roicCls + '">' + roicLabel + (retVal !== null ? ' · ' + valueFmtPct(retVal, 2) : '') + (retIsRoe ? '（ROE 口径对标）' : indTxt) + '</div></div>';
   html += '<div class="value-dim"><div class="dim-label">安全边际</div><div class="dim-val ' + mosCls + '">' + mosLabel + '</div></div>';
   html += '<div class="value-dim"><div class="dim-label">财务稳健</div><div class="dim-val ' + healthCls + '">' + healthLabel + '</div></div>';
   html += '</div>';
@@ -1151,12 +1192,13 @@ function valueGateHtml(row, indByL2){
   if(!row) return '';
   const bar = (v,l)=>'<div class="score-bar"><span>'+l+'</span><i style="--w:'+Math.max(0,Math.min(100, v==null?0:Number(v)))+'%"></i><em>'+(v==null?'NA':Number(v).toFixed(0))+'</em></div>';
   const veto = valueVetoHtml(row, indByL2);
+  const gateEx = valueTrendExempt(row);
   const mos = row.margin_of_safety===null||row.margin_of_safety===undefined
     ? (row.rf_fallback ? '无风险利率口径缺失 → 改用绝对下限（rf_fallback）' : 'NA')
     : valueFmtPp(row.margin_of_safety, 2)+'（owner yield '+valueFmtPct(row.owner_yield)+' − 十年国债 '+valueFmtPct(row.cn10y, 2)+'）';
   return '<div class="score-detail">'+bar(row.v_moat,'资本回报护城河')+bar(row.v_cash,'现金回报')
     +bar(row.v_safety,'安全边际')+bar(row.v_health,'财务稳健')
-    +'<div>门禁：'+escapeHtml(valueTierLabel(row.tier))+' · ROIC 中位 '+valueFmtPct(row.roic_med)+' · 安全边际 '+mos+'</div>'
+    +'<div>门禁：'+escapeHtml(gateEx ? '不合格（近三年回报回升，门槛未过）' : valueTierLabel(row.tier))+' · ROIC 中位 '+valueFmtPct(row.roic_med, 2)+' · 安全边际 '+mos+'</div>'
     +veto+'<div style="color:var(--muted)">价值分回答“值不值”，不等于买卖指令；与评分分不可互相替代。</div></div>';
 }
 // ---- 折叠壳（2026-10-30 用户要求：三张榜单卡默认收起、记住选择）----
@@ -1180,7 +1222,7 @@ function renderValueTop10(state, trendMap){
       +'<span class="score-pill">'+Number(r.vq).toFixed(1)+'分</span>'
       +trendBadgeHtml(trendMap ? trendMap[String(r.code)] : null)
       +'<span style="color:var(--muted);font-size:11px">owner yield '+valueFmtPct(r.owner_yield)
-      +' · 安全边际 '+valueFmtPp(r.margin_of_safety,2)+' · ROIC中位 '+valueFmtPct(r.roic_med)
+      +' · 安全边际 '+valueFmtPp(r.margin_of_safety,2)+' · ROIC中位 '+valueFmtPct(r.roic_med, 2)
       + (r.pool_n && r.pool_rank ? ' · 池内 P' + Math.max(1, Math.round(100 - r.pool_rank / r.pool_n * 100)) : '')
       +'</span></div>').join('')
       : '<div class="score-row" style="color:var(--muted)">本批次无 A 级合格标的</div>')
@@ -1228,7 +1270,7 @@ function renderIncomeList(state){
         + (r.alreadyQualified ? '<span class="score-pill">已在价值榜</span>' : '')
         + (r.highLeverage ? '<span class="score-pill score-pill-warn">高杠杆</span>' : '')
         +'<span style="color:var(--muted);font-size:11px">'+escapeHtml(String(r.ths_l2 || ''))
-        +' · 5年股息 '+valueFmtPct(r.div_yield_5y, 2)+' · ROIC中位 '+valueFmtPct(r.roic_med)
+        +' · 5年股息 '+valueFmtPct(r.div_yield_5y, 2)+' · ROIC中位 '+valueFmtPct(r.roic_med, 2)
         +' · 有息负债率 '+(debt === null ? 'NA' : (debt * 100).toFixed(0)+'%')
         +'</span></div>';
     }).join('')
@@ -1296,7 +1338,7 @@ function divergeRowHtml(r, tag){
     + '<span style="color:var(--muted);font-size:11.5px">' + escapeHtml(String(r.code)) + '</span>'
     + '<span class="score-pill">VQ ' + Number(r.vq).toFixed(1) + '(P' + Math.round(r.vp) + ') / 主分 ' + Number(r.main_final).toFixed(1) + '(P' + Math.round(r.mp) + ')</span>'
     + '<span style="color:var(--muted);font-size:11px">owner yield ' + valueFmtPct(r.owner_yield)
-    + ' · 安全边际 ' + valueFmtPp(r.margin_of_safety, 2) + ' · ROIC中位 ' + valueFmtPct(r.roic_med) + ' · ' + escapeHtml(why) + '</span></div>';
+    + ' · 安全边际 ' + valueFmtPp(r.margin_of_safety, 2) + ' · ROIC中位 ' + valueFmtPct(r.roic_med, 2) + ' · ' + escapeHtml(why) + '</span></div>';
 }
 
 function renderDivergeBoard(state){

@@ -15,6 +15,7 @@ const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter
   'INCOME_INDUSTRIES', 'INCOME_DY_MIN', 'INCOME_DY5_MIN', 'INCOME_ROIC_MIN', 'INCOME_LIMIT',
   'incomeChannelOf', 'renderIncomeList', 'foldCardHtml',
   'ROIC_GATE_PCT', 'valueMedian', 'valueIndStatsOf', 'valueMoatVetoHtml', 'valueVetoHtml', 'valueAssessmentHtml',
+  'ROIC_TREND_FLOOR_PCT', 'valueTrendExempt',
   'profitRefHtml', 'buyRefHtml'];
 
 async function load(): Promise<Record<string, unknown>> {
@@ -111,6 +112,10 @@ export const valueMoatVetoHtml = NS.valueMoatVetoHtml as (row: Record<string, un
 export const valueVetoHtml = NS.valueVetoHtml as (row: Record<string, unknown> | null, indByL2?: Record<string, IndRef> | null) => string;
 /** 参照值放宽到 number|null：价值评估栏要把脏参照行（med:null）判成「无参照」，而不是把它当 0。 */
 type IndRefLike = { med: number | null; n?: number };
+/** 走势第二把尺（2026-11-02 裁定 C 档）：命中时交出年份与三点原值供文案引用；不命中一律 null。 */
+export type TrendExempt = { years: string[]; vals: number[]; end: number };
+export const ROIC_TREND_FLOOR_PCT = NS.ROIC_TREND_FLOOR_PCT as number;
+export const valueTrendExempt = NS.valueTrendExempt as (row: Record<string, unknown> | null) => TrendExempt | null;
 /** 价值评估栏（2026-11-01 三栏收口）：四维 + 人话 verdict；只回答「值不值」，不发买卖指令。 */
 export const valueAssessmentHtml = NS.valueAssessmentHtml as (
   row: Record<string, unknown> | null | undefined, indByL2: Record<string, IndRefLike> | null, hasBatch: boolean,
