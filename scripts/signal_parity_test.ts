@@ -25,11 +25,13 @@ import {
   stockAddPlan as pageStockAddPlan, stockBuyBannerHtml as pageStockBuyBanner,
   stockSellPlan as pageStockSellPlan, stockSellBannerHtml as pageStockSellBanner,
   sellBannerHtml as pageSellBanner,
-  profitNextTier as pageProfitNextTier, profitMetaText as pageProfitMetaText,
+  profitNextTier as pageProfitNextTier,
   profitAlertFromRet as pageProfitAlert,
   stockLotSizeOf as pageStockLotSizeOf, lotFromTxQuote as pageLotFromTxQuote,
   supabaseBaseUrl as pageSupabaseBaseUrl,
 } from "./signal_parity.ts";
+// 三栏收口后卡片走 profitRefHtml（VALUE_PURE 块），旧的 profitMetaText 已删；矩阵里「页面文案与三态判据自洽」这条校验改用栏函数。
+import { profitRefHtml as pageProfitRefHtml } from "./value_leg_logic.ts";
 
 Deno.env.set("DAILY_UPDATE_DISABLE_SERVE", "1");
 const D = await import("../supabase/functions/daily-update/index.ts");
@@ -776,11 +778,8 @@ Deno.test("止盈下一档：只取高于当前收益率且未执行的档，执
   assertEquals(pageProfitNextTier(tiers, [20], 83), null, "高收益下已执行档不影响「没有下一档」");
 });
 
-Deno.test("止盈卡片元信息：已达档写「已达」，无下一档写「已执行完毕」，不再出现自相矛盾的下一档", () => {
-  assertEquals(pageProfitMetaText({ ret: 83, tier: { ret: 80, sell: 50 } }, null), "已达 +80% 止盈档（卖50%）");
-  assertEquals(pageProfitMetaText(null, { ret: 100, sell: 25 }), "下一止盈档 +100%（卖25%）");
-  assertEquals(pageProfitMetaText(null, null), "各止盈档已执行完毕");
-});
+// 「已达 / 下一档 / 已执行完毕」三态的单句断言已迁到 value_leg_logic_test（profitRefHtml 栏），
+// 本文件只在下面的 125 格矩阵里逐格校验「页面文案与该格判据自洽」。
 
 // 2026-10-31 用户裁决 A：邮件端 sellAlert 的「回退到更低的已越过档」改掉——
 // 页面只看最高达标档，该档标记已执行就整条闭嘴；邮件曾从「达标且未执行」里取最高档，
@@ -818,9 +817,9 @@ Deno.test("下一止盈档双端同判据：邮件必须调 profitNextTier，ret
         const state = (hit: unknown, next: unknown) => (hit ? "已达" : next ? "下一档" : "收尾");
         assertEquals(state(D.sellAlert(ret, item), e), state(D.sellAlert(ret, item), p),
           "双端三态分叉：taken=[" + taken + "] ret=" + ret);
-        const pageText = pageProfitMetaText(D.sellAlert(ret, item), p);
+        const pageText = pageProfitRefHtml(D.sellAlert(ret, item), p, ret, null, {}).replace(/<[^>]*>/g, "");
         assertEquals(state(D.sellAlert(ret, item), p),
-          pageText.startsWith("已达") ? "已达" : pageText.startsWith("下一") ? "下一档" : "收尾",
+          pageText.includes("已达") ? "已达" : pageText.includes("下一止盈档") ? "下一档" : "收尾",
           "页面文案与三态判据不自洽：" + pageText);
       }
     }
@@ -854,8 +853,8 @@ Deno.test("接线守卫：止盈卡片下一档与已达档走纯函数；标记
     "股票「止盈参考」栏同上，并把整手卖出计划一起传入");
   // 2026-11-01 三栏收口：档位消歧（已达档 / 下一档 / 各档执行完毕）从元信息行挪进「止盈参考」栏，
   // 一个口径只许有一处话术——模板里再各自拼一遍，就会与栏内文案漂成两套。
-  assertEquals(/\$\{profitMetaText\(/.test(html), false,
-    "卡片元信息不得再各自拼档位话术（已由 profitRefHtml 一处说）");
+  assertEquals(/profitMetaText/.test(html), false,
+    "旧的 profitMetaText 已随三栏收口整簇删除（页面不得再出现该符号，档位话术只由 profitRefHtml 一处说）");
   const profitRefBody = (html.match(/function profitRefHtml\([\s\S]*?\n\}/) || [''])[0];
   assert(/已达/.test(profitRefBody) && /下一止盈档/.test(profitRefBody),
     "「已达档 / 下一档」的消歧必须在 profitRefHtml 这一处实现体里");
@@ -913,8 +912,8 @@ Deno.test("接线守卫：档位备注三态两腿共用一个函数，「执行
   const profitRefBody = html.slice(html.indexOf('function profitRefHtml('), html.indexOf('function buyRefHtml('));
   assert(html.includes('function profitRefHtml(') && profitRefBody.includes(done),
     "页面这一态仍是同一句文案，且必须由卡片实际调用的 profitRefHtml 给出（旧 profitMetaText 已不被调用）");
-  assert(/\$\{profitMetaText\(/.test(html) === false,
-    '卡片不得再 interpolate 旧的 profitMetaText（它已不被三栏调用，留着也只可能是死代码）');
+  assert(/profitMetaText/.test(html) === false,
+    '页面不得再残留 profitMetaText（三栏收口后它是零调用死代码，已随本簇删除）');
 });
 
 Deno.test("接线守卫：股票安全垫有输入框、保存写 s.targetDrawdown、页面与邮件都走双腿仲裁", async () => {
@@ -1107,4 +1106,51 @@ Deno.test("国内可达性：Supabase 基址按域名分派（Pages 走同源 /s
   assertEquals(pageSupabaseBaseUrl("PAGES.DEV", "https://PAGES.DEV", direct), direct, "裸域名不是 Pages 项目域");
   // 末尾斜杠不许把路径叠成 //sb
   assertEquals(pageSupabaseBaseUrl("a.pages.dev", "https://a.pages.dev/", direct), "https://a.pages.dev/sb");
+});
+
+// ==== 2026-11-02 裁定：手机端正文字号上抬（B 档）====
+// 用户原话「手机端字体适当加大一些方便阅读」。字号是纯 CSS，行为矩阵测不到它，所以用源码契约钉住三件事：
+// ① 基础块（= 手机端读的这套）每条字号必须等于 B 档值；② 桌面覆盖值一字未动；
+// ③ 桌面 ≥ 手机（既有约定，抬基础值时不许反向覆盖桌面）。
+// .score-pill / .trend-badge / .conf-badge 只有基础值、没有桌面覆盖，抬它们会破坏 ③，所以本轮不参与。
+Deno.test("字号契约：手机端 B 档 20 条 + 桌面覆盖未被动", async () => {
+  const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
+  const cut = html.indexOf("@media (min-width: 768px)");
+  assert(cut > 0, "桌面块必须存在，否则切片锚失效");
+  const base = html.slice(0, cut);
+  const desk = html.slice(cut);
+  // 只认「整行以该选择器开头 + 紧跟 {」的规则，避免 .signal-pill 被 .dual-strip .signal-pill 顶掉
+  const fontOf = (css: string, sel: string): number => {
+    const esc = sel.replace(/[.*+?^${}()|[\]\\]/g, (c) => "\\" + c);
+    const m = new RegExp(`(?:^|\\n)\\s*${esc}\\{[^}]*?font-size:([\\d.]+)px`).exec(css);
+    if (!m) throw new Error(`该块里找不到 ${sel} 的 font-size`);
+    return Number(m[1]);
+  };
+  const CONTRACT: [string, number, number][] = [
+    [".fund-meta", 13, 13.5],
+    [".signal-pill", 13, 14],
+    [".signal-amount", 13, 14],
+    [".signal-reason", 13, 14],
+    [".ref-title", 11.5, 12],
+    [".ref-row", 13.5, 14],
+    [".ref-empty", 13, 13],
+    [".value-dim", 13, 13],
+    [".value-dim .dim-label", 11.5, 11.5],
+    [".value-verdict", 13.5, 14],
+    [".value-note", 11.5, 11.5],
+    [".dual-tag", 11.5, 12.5],
+    [".disclosure-pill", 11.5, 12.5],
+    [".disclosure-na", 11.5, 12.5],
+    [".dual-amt", 13, 13.5],
+    [".valpct-chip", 11.5, 12.5],
+    [".valpct-na", 11.5, 12.5],
+    [".valpct-stale", 11, 11.5],
+    [".trade-banner", 13.5, 14.5],
+    [".trade-badge", 11.5, 12],
+  ];
+  for (const [sel, mobile, desktop] of CONTRACT) {
+    assertEquals(fontOf(base, sel), mobile, `手机端 ${sel} 基础字号应为 B 档 ${mobile}px`);
+    assertEquals(fontOf(desk, sel), desktop, `桌面 ${sel} 覆盖字号本轮不许动（应为 ${desktop}px）`);
+    assert(desktop >= mobile, `${sel} 桌面(${desktop}) 必须 ≥ 手机(${mobile})`);
+  }
 });

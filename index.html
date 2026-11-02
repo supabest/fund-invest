@@ -70,7 +70,7 @@
   .fund-head{display:flex; justify-content:space-between; align-items:center; padding:14px 16px; cursor:pointer;}
   .fund-head-left{flex:1; min-width:0;}
   .fund-name{font-size:15px; font-weight:600;}
-  .fund-meta{font-size:11.5px; color:var(--muted); margin-top:3px;}
+  .fund-meta{font-size:13px; color:var(--muted); margin-top:3px;}
   .fund-return{font-size:15px; font-weight:600; margin-left:12px; white-space:nowrap;}
   .ret-pos{color:var(--jade);}
   .ret-neg{color:var(--brick);}
@@ -80,44 +80,43 @@
   /* 2026-11-01：.fund-card 是 overflow:hidden，这条胶囊条不换行时手机端右侧整颗胶囊被剪在视口外
      （390px 实测四颗需 456px、可用 388px，「价值 硬否决 ⛔」完全看不见）——照 .dual-strip 同款收口 */
   .signal-strip{display:flex; align-items:center; gap:6px 8px; padding:0 16px 14px 16px; flex-wrap:wrap;}
-  .signal-pill{font-size:12px; padding:4px 10px; border-radius:20px; font-weight:600; white-space:nowrap;}
+  .signal-pill{font-size:13px; padding:4px 10px; border-radius:20px; font-weight:600; white-space:nowrap;}
   .pill-double{background:var(--gold-dim); color:var(--gold);}
   .pill-strong{background:var(--jade-dim); color:var(--jade);}
   .pill-normal{background:var(--panel-2); color:var(--ivory);}
   .pill-half{background:rgba(180,150,90,0.14); color:#C7A15E;}
   .pill-pause{background:var(--brick-dim); color:var(--brick);}
-  .signal-amount{font-size:12px; color:var(--muted);}
-  .signal-price{font-size:12px; color:var(--muted); padding:0 16px 12px 16px; white-space:nowrap; overflow-x:auto;}
-  .signal-reason{font-size:11.5px; color:var(--muted); padding:0 16px 14px 16px; line-height:1.6;}
+  .signal-amount{font-size:13px; color:var(--muted);}
+  .signal-reason{font-size:13px; color:var(--muted); padding:0 16px 14px 16px; line-height:1.6;}
 
   /* 2026-11-01：止盈/买入/价值三栏收口，浅色底块 + 标题左对齐，替代原来散落各处的横幅与胶囊 */
   .ref-section{margin:0 16px 12px 16px; padding:12px 14px; border-radius:8px; background:var(--panel-2); border:1px solid var(--line);}
-  .ref-title{font-size:11px; font-weight:600; color:var(--muted); letter-spacing:.5px; margin-bottom:8px; text-transform:uppercase;}
-  .ref-row{font-size:12.5px; color:var(--ivory); line-height:1.7;}
+  .ref-title{font-size:11.5px; font-weight:600; color:var(--muted); letter-spacing:.5px; margin-bottom:8px; text-transform:uppercase;}
+  .ref-row{font-size:13.5px; color:var(--ivory); line-height:1.7;}
   .ref-row .muted{color:var(--muted);}
-  .ref-empty{font-size:12px; color:var(--muted); font-style:italic;}
+  .ref-empty{font-size:13px; color:var(--muted); font-style:italic;}
   /* 价值四维雷达：2×2 网格，每格一个维度 */
   .value-radar{display:grid; grid-template-columns:1fr 1fr; gap:8px 12px; margin-bottom:10px;}
-  .value-dim{font-size:11.5px; line-height:1.5;}
-  .value-dim .dim-label{color:var(--muted); font-size:10.5px;}
+  .value-dim{font-size:13px; line-height:1.5;}
+  .value-dim .dim-label{color:var(--muted); font-size:11.5px;}
   .value-dim .dim-val{color:var(--ivory); font-weight:500;}
   .value-dim .dim-val.warn{color:var(--brick);}
   .value-dim .dim-val.ok{color:var(--jade);}
-  .value-verdict{font-size:12.5px; color:var(--ivory); line-height:1.6; padding-top:8px; border-top:1px solid var(--line);}
+  .value-verdict{font-size:13.5px; color:var(--ivory); line-height:1.6; padding-top:8px; border-top:1px solid var(--line);}
   .value-verdict .verdict-warn{color:var(--brick);}
   .value-verdict .verdict-ok{color:var(--jade);}
-  .value-note{font-size:10.5px; color:var(--muted); margin-top:6px; font-style:italic;}
+  .value-note{font-size:11.5px; color:var(--muted); margin-top:6px; font-style:italic;}
 
   .dual-strip{display:flex; align-items:center; gap:8px; padding:0 16px 6px 16px; flex-wrap:wrap;}
-  .dual-tag{font-size:11px; color:var(--muted); border:1px dashed var(--line-strong); border-radius:4px; padding:2px 6px; white-space:nowrap;}
+  .dual-tag{font-size:11.5px; color:var(--muted); border:1px dashed var(--line-strong); border-radius:4px; padding:2px 6px; white-space:nowrap;}
   /* 财报日历只做提醒、不参与任何信号，所以配色走中性灰，不与买卖档的 jade/gold 抢注意力 */
-  .disclosure-pill{font-size:11px; color:var(--muted); border:1px solid var(--line-strong); border-radius:12px; padding:1px 7px; white-space:nowrap; cursor:help;}
-  .disclosure-na{font-size:11px; color:var(--gold); border:1px dashed rgba(255,255,255,.18); border-radius:12px; padding:1px 7px; white-space:nowrap;}
-  .dual-amt{font-size:12px; color:var(--muted);}
+  .disclosure-pill{font-size:11.5px; color:var(--muted); border:1px solid var(--line-strong); border-radius:12px; padding:1px 7px; white-space:nowrap; cursor:help;}
+  .disclosure-na{font-size:11.5px; color:var(--gold); border:1px dashed rgba(255,255,255,.18); border-radius:12px; padding:1px 7px; white-space:nowrap;}
+  .dual-amt{font-size:13px; color:var(--muted);}
   /* 估值分位口径：数值旁边必须跟着「谁的历史、多长样本、什么口径」，否则同一只股两次快照跳档无从判断 */
-  .valpct-chip{font-size:11px; color:var(--jade); background:var(--jade-dim); border-radius:12px; padding:2px 8px; white-space:nowrap; cursor:help;}
-  .valpct-na{font-size:11px; color:var(--gold); border:1px dashed rgba(255,255,255,.18); border-radius:12px; padding:1px 7px; white-space:nowrap; cursor:help;}
-  .valpct-stale{font-size:10px; color:var(--gold); margin-left:5px; white-space:nowrap; opacity:.8; font-style:normal;} /* 旧值当面声明截止日：与 .trend-stale 同一条纪律 */
+  .valpct-chip{font-size:11.5px; color:var(--jade); background:var(--jade-dim); border-radius:12px; padding:2px 8px; white-space:nowrap; cursor:help;}
+  .valpct-na{font-size:11.5px; color:var(--gold); border:1px dashed rgba(255,255,255,.18); border-radius:12px; padding:1px 7px; white-space:nowrap; cursor:help;}
+  .valpct-stale{font-size:11px; color:var(--gold); margin-left:5px; white-space:nowrap; opacity:.8; font-style:normal;} /* 旧值当面声明截止日：与 .trend-stale 同一条纪律 */
 
   .fund-body{border-top:1px solid var(--line); padding:16px; display:none;}
   .fund-body.open{display:block;}
@@ -147,10 +146,10 @@
   .btn.ghost{color:var(--muted);}
 
   /* 止盈/抄底醒目横幅（2026-10-09）：卖出砖红、买入翠玉，复用既有 token 不新造色 */
-  .trade-banner{margin:0 16px 10px 16px; padding:11px 14px; border-radius:8px; font-size:13px; font-weight:600; line-height:1.6; border:1.5px solid;}
+  .trade-banner{margin:0 16px 10px 16px; padding:11px 14px; border-radius:8px; font-size:13.5px; font-weight:600; line-height:1.6; border:1.5px solid;}
   .trade-banner.sell{background:rgba(191,68,60,.14); border-color:var(--brick); color:var(--brick);}
   .trade-banner.buy{background:rgba(63,150,113,.14); border-color:var(--jade); color:var(--jade);}
-  .trade-badge{align-self:center; margin-right:8px; font-size:11px; font-weight:600; padding:2px 8px; border-radius:99px; border:1px solid; white-space:nowrap;}
+  .trade-badge{align-self:center; margin-right:8px; font-size:11.5px; font-weight:600; padding:2px 8px; border-radius:99px; border:1px solid; white-space:nowrap;}
   .trade-badge.sell{border-color:var(--brick); color:var(--brick);}
   .trade-badge.buy{border-color:var(--jade); color:var(--jade);}
   .tier-done-btn{margin:-4px 16px 10px 16px; padding:4px 10px; border-radius:6px; border:1px solid var(--line-strong); background:transparent; color:var(--muted); font-size:11.5px; cursor:pointer; font-family:var(--sans);}
@@ -174,7 +173,6 @@
 
   .mkt-strip{display:flex; align-items:center; gap:10px; margin-top:14px; font-size:12px; color:var(--muted); flex-wrap:wrap;}
   .mkt-strip .signal-pill{font-size:11.5px;}
-  .mkt-text{flex:1; min-width:0;}
   .mkt-items{display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; flex:1; min-width:0;}
   .mkt-item{display:inline-flex; align-items:center; gap:5px;}
   .mkt-label{white-space:nowrap; color:var(--ivory);}
@@ -184,8 +182,6 @@
   .tab-btn.active{background:var(--gold); color:#241a05; font-weight:600; border-color:var(--gold);}
   .settings-row{display:flex; align-items:center; gap:8px; flex-wrap:wrap; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:12px; font-size:12.5px; color:var(--muted);}
   .settings-row input{width:140px; background:var(--panel-2); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font-size:13px; color:var(--ivory); font-family:var(--sans);}
-  .stock-alert{margin:0 16px 10px 16px; padding:8px 12px; background:var(--brick-dim); border-radius:7px; font-size:12px; color:var(--brick); line-height:1.6;}
-  .stock-meta{font-size:11.5px; color:var(--muted); margin-top:3px;}
 
   /* 量化评分（stock_score 批次）：Top10 区块 / 持仓胶囊 / 四因子明细 */
   .score-card-title{font-family:var(--serif); font-size:14px; color:var(--ivory); font-weight:600; padding:14px 16px 4px;}
@@ -331,7 +327,6 @@
     .signal-strip{padding:0 20px 16px 20px;}
     .signal-pill{font-size:14px;}
     .signal-amount{font-size:14px;}
-    .signal-price{font-size:14px; padding:0 20px 14px 20px;}
     .signal-reason{font-size:14px; padding:0 20px 16px 20px;}
     .ref-section{margin:0 20px 14px 20px; padding:14px 16px;}
     .ref-title{font-size:12px;}
@@ -370,7 +365,6 @@
     .tab-btn{font-size:15px;}
     .settings-row{font-size:13.5px;}
     .settings-row input{font-size:14px;}
-    .stock-alert{font-size:13.5px;}
     .sync-strip{font-size:13.5px;}
     .sync-btn{font-size:13px;}
     .modal h2{font-size:20px;}
@@ -389,8 +383,7 @@
   .rp-flat{background:rgba(120,120,120,.08);color:var(--muted);}
   .rp-cool{background:rgba(200,130,0,.08);color:#a06000;border-color:#c88200;}
   .rp-bad{background:rgba(180,60,50,.08);color:var(--brick);border-color:var(--brick);}
-  .rp-run,.rp-fail{color:var(--muted);}
-  .rp-fail{color:var(--brick);border-color:var(--brick);}
+  .rp-run{color:var(--muted);}
   .rp-card{margin-top:10px;}
   .rp-head{font-weight:600;margin-bottom:6px;}
   .rp-summary{margin-bottom:8px;}
@@ -959,17 +952,6 @@ var VALUE_TABLE = { qualified:'合格', too_rich:'质量达标、价太贵', unq
 function valueFmtPct(v, d){ if(v===null || v===undefined || isNaN(Number(v))) return 'NA'; return Number(v).toFixed(d===undefined?1:d)+'%'; }
 function valueFmtPp(v, d){ if(v===null || v===undefined || isNaN(Number(v))) return 'NA'; return Number(v).toFixed(d===undefined?1:d)+'pp'; }
 function valueTierLabel(t){ return (t && VALUE_TABLE[t]) ? VALUE_TABLE[t] : '—'; }
-function valuePillHtml(row){
-  if(!row) return '';
-  // 引擎不变式（value_engine.ts:211）：`vq = tier==='qualified' && vcov>=VCOV_MIN ? vq0 : null`
-  // ⇒ 否决行的 vq **必为 null**。所以「是不是否决」必须排在「有没有分」之前判：
-  // 旧顺序让硬否决胶囊整颗消失（返回 ''），使「被硬否决」与「价值腿尚未生成」在持仓条上视觉完全相同，
-  // 而 tier='vetoed' 这个明确结论就在同一行数据里被丢弃（违反 spec §7.1 否决标记 + §7.4，也违反展示层铁律）。
-  if(row.tier === 'vetoed' || row.vetoed) return '<span class="score-pill score-pill-warn">价值 硬否决 ⛔</span>';
-  if(row.vq===null || row.vq===undefined) return '';       // 其它无分档（too_rich/unqualified/覆盖度不足）维持现状，见控制方裁定第 1 条
-  const pctPos = (row.pool_n && row.pool_rank) ? ' 池内 P' + Math.max(1, Math.round(100 - row.pool_rank/row.pool_n*100)) : '';
-  return '<span class="score-pill">价值 '+Number(row.vq).toFixed(1)+pctPos+'</span>';
-}
 // 否决原因的人话版（2026-10-30 用户：原句「无护城河证据」会让人读成「找不到数据」）：
 // 先给本股数值，再给门槛，最后给同行业中位作参照——门槛是绝对资本成本锚，不随行业浮动，
 // 所以同行业只作「仅供参考」的比较，不能暗示「高于同行就合格」。
@@ -1028,47 +1010,6 @@ function valueVetoHtml(row, indByL2){
   if(moat) out += valueMoatVetoHtml(row, indByL2);
   return out;
 }
-// 否决分类（2026-10-31 用户裁定口径）：质地硬伤（资不抵债/商誉/烧钱加杠杆）优先于护城河；
-// 仅「无护城河证据」时按同行业中位分双/单——≤ 中位是「本股和同行一样差」（双否决），
-// > 中位是「本股优于同行、只被 8% 资本成本绝对门槛压住」（单否决）；恰好相等归双，
-// 不许把「和同行一样差」说成「比同行好」。roic_med 为 NA 是金融股（引擎按 ROE 对标）；
-// 没有行业参照则不硬分。
-function valueVetoClass(row, indByL2){
-  var reasons = (row && row.veto_reasons) || [];
-  if(!reasons.length) return null;
-  if(reasons.some(function(x){ return x !== '无护城河证据'; })) return 'quality';
-  var med = valueNumOrNull(row.roic_med);
-  if(med === null) return 'fin';
-  var ind = (indByL2 && row.ths_l2) ? indByL2[row.ths_l2] : null;
-  var im = ind ? valueNumOrNull(ind.med) : null;
-  if(im === null) return 'noind';
-  return med <= im ? 'dual' : 'single';
-}
-var VALUE_VETO_CLASS_CN = { dual:'行业双否决', single:'行业单否决', quality:'质地', fin:'金融 ROE 口径', noind:'无同行业参照' };
-// 抄底灯亮时的价值标注：只标注、不改任何买入指令（2026-10-31 用户裁定）。
-// row=undefined 表示调用点根本没有这一行的概念；row=null 表示查过取不到 ⇒ 未判定，
-// 两者都不许悄悄当成「没有否决」。批次尚未生成时不刷这行（页面别处已有降级语）。
-function valueDipVetoHtml(row, indByL2, hasBatch){
-  if(row === undefined) return '';
-  if(row === null) return hasBatch ? '<div class="trade-banner" style="background:#FBECE8;border-color:#B14A34;color:#8A3928;">⛔ 价值：本批次无该股数据（未判定）</div>' : '';
-  var cls = valueVetoClass(row, indByL2);
-  if(!cls) return '';
-  var why = '';
-  if(cls === 'quality'){
-    why = '：' + escapeHtml(((row.veto_reasons || []).filter(function(x){ return x !== '无护城河证据'; })).join('、'));
-  } else if(cls === 'fin'){
-    why = '：金融股按 ROE 对标，低于 ' + ROIC_GATE_PCT + '% 资本成本门槛';
-  } else {
-    var med = valueNumOrNull(row.roic_med);
-    var ind = (indByL2 && row.ths_l2) ? indByL2[row.ths_l2] : null;
-    var im = ind ? valueNumOrNull(ind.med) : null;
-    if(cls === 'dual') why = '：本股 ROIC ' + valueFmtPct(med) + ' ≤ 同行业中位 ' + valueFmtPct(im);
-    else if(cls === 'single') why = '：本股 ROIC ' + valueFmtPct(med) + ' 高于同行业中位 ' + valueFmtPct(im) + '，仅未过 ' + ROIC_GATE_PCT + '% 资本成本门槛';
-    else why = '：本股 ROIC ' + valueFmtPct(med) + ' 未达 ' + ROIC_GATE_PCT + '% 门槛，且无同行业参照';
-  }
-  return '<div class="trade-banner" style="background:#FBECE8;border-color:#B14A34;color:#8A3928;">⛔ 价值 硬否决·'
-    + VALUE_VETO_CLASS_CN[cls] + why + '（仅标注，不改变本条指令）</div>';
-}
 
 // ==== 2026-11-01 三栏收口：止盈参考 / 买入参考 / 价值评估 ====
 // 止盈参考：三态与邮件 tierNoteHtml 同句（已达档 / 下一档 / 全部执行完）；
@@ -1122,20 +1063,26 @@ function valueAssessmentHtml(vRow, indByL2, hasBatch){
   var health = valueNumOrNull(vRow.v_health);
   var roic = valueNumOrNull(vRow.roic_med);
   var mos = valueNumOrNull(vRow.margin_of_safety);
+  // 金融股没有 ROIC（引擎把否决4 换成同批 ROE 列对标），extras.fin_roe 落的就是那个数本身
+  // （stock-value/index.ts 的 finRoe 表由 s.roe 建，判定与展示同源）。2026-11-02 裁定③。
+  var finRoe = valueNumOrNull((vRow.extras || {}).fin_roe);
+  var retIsRoe = roic === null && finRoe !== null;
+  var retVal = roic !== null ? roic : finRoe;
 
   // 四维判定（阈值内嵌，不对外露）
   var moatLabel = moat === null ? 'NA' : (moat >= 70 ? '宽' : moat >= 40 ? '窄' : '无');
   var moatCls = moat === null ? '' : (moat >= 40 ? 'ok' : 'warn');
   var healthLabel = health === null ? 'NA' : (health >= 70 ? '强' : health >= 40 ? '中' : '弱');
   var healthCls = health === null ? '' : (health >= 40 ? 'ok' : 'warn');
-  var roicLabel = roic === null ? 'NA' : (roic >= ROIC_GATE_PCT ? '达标' : '未达标');
-  var roicCls = roic === null ? '' : (roic >= ROIC_GATE_PCT ? 'ok' : 'warn');
+  var roicLabel = retVal === null ? 'NA' : (retVal >= ROIC_GATE_PCT ? '达标' : '未达标');
+  var roicCls = retVal === null ? '' : (retVal >= ROIC_GATE_PCT ? 'ok' : 'warn');
   var mosLabel = mos === null ? 'NA' : (mos > 0 ? '正 ' + valueFmtPp(mos, 1) : '负 ' + valueFmtPp(mos, 1));
   var mosCls = mos === null ? '' : (mos > 0 ? 'ok' : 'warn');
 
   // 同行参照（仅参考，不参与 verdict）
   var ind = (indByL2 && vRow.ths_l2) ? indByL2[vRow.ths_l2] : null;
   var indMed = ind ? valueNumOrNull(ind.med) : null;
+  // 同业中位取的是 roic_med，与 ROE 不是一个量纲；ROE 口径下并排等于造出一个假比较（2026-11-02 裁定③）
   var indTxt = indMed !== null ? '（同行业中位 ' + valueFmtPct(indMed) + '）' : '';
 
   // Verdict：人话事实，不露算式与内部术语
@@ -1148,19 +1095,23 @@ function valueAssessmentHtml(vRow, indByL2, hasBatch){
     verdictCls = 'verdict-warn';
     var hasMoatIssue = reasons.indexOf('无护城河证据') >= 0;
     var qualityIssues = reasons.filter(function(x){ return x !== '无护城河证据'; });
-    var roicBelow = roic !== null && roic < ROIC_GATE_PCT;
+    var roicBelow = retVal !== null && retVal < ROIC_GATE_PCT;
 
     // 排序沿用 2026-10-31 裁定：质地硬伤优先于护城河；资本回报一句里，
     // 「高于同行中位仍未过门槛」「低于同行中位」「与中位持平」是三种事实，绝不允许互相冒充。
     if(qualityIssues.length){
       verdict = '质地存在硬伤：' + escapeHtml(qualityIssues.join('、'));
+    } else if(roicBelow && retIsRoe){
+      // ROE 口径不做同业比较（量纲不同源），只报对标值本身
+      verdict = '资本回报未覆盖资本成本（ROE 口径对标 ' + valueFmtPct(retVal) + '）';
+      if(hasMoatIssue) verdict += '，且未见可识别护城河';
     } else if(roicBelow){
       verdict = '资本回报未覆盖资本成本' + (indMed === null ? '（无同行业参照）'
         : (roic < indMed ? '，且低于同行业中位 ' + valueFmtPct(indMed)
         : (roic > indMed ? '（本股高于同行业中位 ' + valueFmtPct(indMed) + '，仍未过资本成本门槛）'
                          : '（与同行业中位 ' + valueFmtPct(indMed) + ' 持平，未过资本成本门槛）')));
       if(hasMoatIssue) verdict += '，且未见可识别护城河';
-    } else if(roic === null){
+    } else if(retVal === null){
       verdict = '资本回报维度无数据（金融股按 ROE 口径对标）' + (hasMoatIssue ? '，未见可识别护城河' : '');
     } else if(hasMoatIssue){
       verdict = '未见可识别护城河，长期持有风险偏高';
@@ -1168,15 +1119,14 @@ function valueAssessmentHtml(vRow, indByL2, hasBatch){
       verdict = '价值评估未通过';
     }
   } else {
-    // 非否决：看四维整体
+    // 短板票只数质地三维（2026-11-02 裁定 B）。阈值 40/70 与 8%、以及 `>2` 才转 warn 的分界一字未动。
     var weakDims = [];
     if(moat !== null && moat < 40) weakDims.push('护城河');
-    if(roic !== null && roic < ROIC_GATE_PCT) weakDims.push('资本回报');
-    if(mos !== null && mos <= 0) weakDims.push('安全边际');
+    if(retVal !== null && retVal < ROIC_GATE_PCT) weakDims.push('资本回报');
     if(health !== null && health < 40) weakDims.push('财务稳健');
 
     if(weakDims.length === 0){
-      verdict = '四维均无短板';
+      verdict = '质地三维无短板';
       verdictCls = 'verdict-ok';
     } else {
       verdict = weakDims.join('、') + '偏弱';
@@ -1187,7 +1137,7 @@ function valueAssessmentHtml(vRow, indByL2, hasBatch){
   var html = '<div class="ref-section"><div class="ref-title">价值评估</div>';
   html += '<div class="value-radar">';
   html += '<div class="value-dim"><div class="dim-label">护城河</div><div class="dim-val ' + moatCls + '">' + moatLabel + '</div></div>';
-  html += '<div class="value-dim"><div class="dim-label">资本回报</div><div class="dim-val ' + roicCls + '">' + roicLabel + (roic !== null ? ' · ' + valueFmtPct(roic) : '') + indTxt + '</div></div>';
+  html += '<div class="value-dim"><div class="dim-label">资本回报</div><div class="dim-val ' + roicCls + '">' + roicLabel + (retVal !== null ? ' · ' + valueFmtPct(retVal) : '') + (retIsRoe ? '（ROE 口径对标）' : indTxt) + '</div></div>';
   html += '<div class="value-dim"><div class="dim-label">安全边际</div><div class="dim-val ' + mosCls + '">' + mosLabel + '</div></div>';
   html += '<div class="value-dim"><div class="dim-label">财务稳健</div><div class="dim-val ' + healthCls + '">' + healthLabel + '</div></div>';
   html += '</div>';
@@ -2080,11 +2030,6 @@ function sectorRowM60(row, accCounts){
   if(v === null) return null;
   return sectorIsDegenerate(row, accCounts) ? null : v;
 }
-function sectorSplitRows(rows){
-  const tradable = [], accumulating = [];
-  (rows||[]).forEach(r=>{ (sectorIsAccumulating(r) ? accumulating : tradable).push(r); });
-  return { tradable, accumulating };
-}
 function sectorSplitDegenerate(rows, accCounts){
   const ranked = [], degenerate = [];
   (rows||[]).forEach(r=>{ (sectorIsDegenerate(r, accCounts) ? degenerate : ranked).push(r); });
@@ -2230,12 +2175,6 @@ function sectorBuildAccCounts(rows, fetchCount){
     try{ n = await fetchCount(r.pk_etf); }catch(e){ n = null; }
     return [String(r.pk_etf), (typeof n === 'number' && isFinite(n)) ? n : null];
   })).then(pairs=>new Map(pairs));
-}
-// 修复轮2（评审 I1）竞态守卫的谓词：卡片移出 autoRefresh 关键路径（fire-and-forget）后，focus 重入/切页签可让
-// 多个 loadSectorRotation 同时在飞；请求开始时 begin() 取自增序号，写 sectorState/渲染前先 isStaleReq(本次, 最新) ——
-// 只要本请求序号不是最新（迟到的旧响应）就判弃，后到者不得覆盖新批次渲染。序号错乱也按陈旧处理（宁严勿宽）。
-function sectorIsStaleReq(reqSeq, latestSeq){
-  return reqSeq !== latestSeq;
 }
 // 修复轮2（评审 I1）：自增请求序号发生器（闭包持有 seq）。begin() 抢占并返回本次序号；isCurrent(id) 判定 id 是否仍为最新。
 function sectorCreateReqGuard(){
@@ -3342,12 +3281,6 @@ function profitNextTier(tiers, taken, ret){
   const tk = taken || [];
   const r = (ret === null || ret === undefined || isNaN(Number(ret))) ? null : Number(ret);
   return t.find(x => !tk.includes(x.ret) && (r === null || r < x.ret)) || null;
-}
-// 卡片元信息三态：已达档 / 下一档 / 全部执行完（与邮件 tierNote 同口径）
-function profitMetaText(alert, next){
-  if(alert) return '已达 +'+alert.tier.ret+'% 止盈档（卖'+alert.tier.sell+'%）';
-  if(next) return '下一止盈档 +'+next.ret+'%（卖'+next.sell+'%）';
-  return '各止盈档已执行完毕';
 }
 // ==== LADDER_PURE_END ====
 

@@ -373,10 +373,16 @@ Deno.test("sectorBuildAccCounts: 只对累积中行发请求；空输入 → 空
   assertEquals(m1.get("Y"), null);
 });
 
-Deno.test("sectorIsStaleReq: 只有最新请求可写状态/渲染；迟到的旧响应（fire-and-forget 重入）一律判弃", () => {
-  assertEquals(P.sectorIsStaleReq(1, 1), false, "本请求即最新 → 不得被误杀");
-  assertEquals(P.sectorIsStaleReq(1, 2), true, "后发起的请求已抢占序号 → 旧响应必须丢弃");
-  assertEquals(P.sectorIsStaleReq(3, 2), true, "序号错乱（理论上不应出现）也按陈旧处理，守卫宁严勿宽");
+// 2026-11-02 死代码清扫：原 `sectorIsStaleReq` 谓词已删（页面从未调用它，活性守卫是 sectorReqGuard.isCurrent）。
+// 覆盖不跟着删——改测真正在用的那个守卫，语义一致：迟到的旧响应必须判弃。
+Deno.test("sectorCreateReqGuard: begin() 自增抢占序号，isCurrent 只认最新；旧请求的迟到响应一律判弃", () => {
+  const g = P.sectorCreateReqGuard();
+  const first = g.begin();
+  assertEquals(g.isCurrent(first), true, "刚抢占的序号就是最新，不得被误杀");
+  const second = g.begin();
+  assertEquals(g.isCurrent(first), false, "后发起的请求已抢占序号 → 旧响应必须丢弃");
+  assertEquals(g.isCurrent(second), true);
+  assertEquals(g.isCurrent(first + 999), false, "序号错乱（理论上不应出现）也按陈旧处理，守卫宁严勿宽");
 });
 
 // ---------- 常量表（渲染层与脚注共用） ----------

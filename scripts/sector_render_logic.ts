@@ -146,11 +146,11 @@ const EXPORT_NAMES = [
   "SECTOR_ENTANGLED_STATE", "SECTOR_LABEL_DOT", "SECTOR_THEME_ORDER",
   "SECTOR_NOT_COVERED_THEMES", "SECTOR_M60_MIN_BARS", "SECTOR_MA_FULL_BARS",
   "sectorStateWorstRank", "sectorIsAccumulating", "sectorBarsN", "sectorIsDegenerate",
-  "sectorRowM60", "sectorSplitRows", "sectorSplitDegenerate", "sectorRankLists",
+  "sectorRowM60", "sectorSplitDegenerate", "sectorRankLists",
   "sectorSummaryCounts", "sectorDisplayMetrics", "sectorWorstRow", "sectorThemeGroups",
   "sectorThemeSummaries", "sectorNum", "fmtRatioPct", "fmtPoints", "fmtScoreVal",
   "fmtVr", "fmtProsperity", "prosperityBand", "sectorLabelDots", "matchApproxPools",
-  "sectorBuildAccCounts", "sectorIsStaleReq", "sectorCreateReqGuard", "sectorFoldState",
+  "sectorBuildAccCounts", "sectorCreateReqGuard", "sectorFoldState",
   "sectorPrefCollapsed",
   "sectorStockOverview", "sectorLegCompleteness", "sectorUnderwaterView",
 ];
@@ -203,12 +203,6 @@ export function sectorIsDegenerate(row: SectorRow | null | undefined, accCounts?
 }
 export function sectorRowM60(row: SectorRow | null | undefined, accCounts?: BarsCounts): number | null {
   return fn("sectorRowM60")(row, accCounts ?? null);
-}
-export function sectorSplitRows(rows: SectorRow[] | null | undefined): {
-  tradable: SectorRow[];
-  accumulating: SectorRow[];
-} {
-  return fn("sectorSplitRows")(rows ?? []);
 }
 export function sectorSplitDegenerate(
   rows: SectorRow[] | null | undefined,
@@ -264,9 +258,6 @@ export function sectorBuildAccCounts(
   fetchCount: AccCountFetcher,
 ): Promise<Map<string, number | null>> {
   return fn("sectorBuildAccCounts")(rows ?? [], fetchCount);
-}
-export function sectorIsStaleReq(reqSeq: number, latestSeq: number): boolean {
-  return fn("sectorIsStaleReq")(reqSeq, latestSeq);
 }
 export function sectorCreateReqGuard(): SectorReqGuard {
   return fn("sectorCreateReqGuard")() as SectorReqGuard;

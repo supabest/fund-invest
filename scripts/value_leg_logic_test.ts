@@ -1,6 +1,6 @@
 // scripts/value_leg_logic_test.ts
 import { assertEquals, assertMatch } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueTop10,
+import { valueFmtPct, valueTierLabel, valueGateHtml, renderValueTop10,
   LEG_PAGE_SIZE, legOrderOpts, legFilter, legRange, legHasMore, legTiebreakCol,
   TREND_LOOKBACK, TREND_KLT, TREND_FQT, TREND_MIN_MONTHS, TREND_POSITION_MA, TREND_R2_STEADY, TREND_DD_RATIO_MIN,
   monthEndCloses, olsLogTrend, longTrendStats, longTrendLabel, brokenLegOf,
@@ -10,7 +10,7 @@ import { valueFmtPct, valueTierLabel, valuePillHtml, valueGateHtml, renderValueT
   EM_VAL_MIN_ROWS, valPctSupported, emValUrl, valuationPctFromRows, valPctCaliber, valPctNaWhy,
   valPctNeedFetch, valPctApply, valPctHtml, valPctMerge, valPctLockNote,
   incomeChannelOf, renderIncomeList, foldCardHtml,
-  valueMedian, valueIndStatsOf, ROIC_GATE_PCT, valueVetoClass, valueDipVetoHtml, valueAssessmentHtml,
+  valueMedian, valueIndStatsOf, ROIC_GATE_PCT, valueAssessmentHtml,
   profitRefHtml, buyRefHtml } from "./value_leg_logic.ts";
 
 const row = { code:'600031', name:'潍柴', vq:78.4, tier:'qualified', confidence:'A', vetoed:false,
@@ -35,19 +35,6 @@ Deno.test('valueTierLabel：四档均有中文文案，too_rich 不得读成“�
   assertEquals(valueTierLabel(null), '—');
 });
 
-Deno.test('valuePillHtml：无行→空串；有分→分 + 池内分位；否决行（引擎真实形状 vq=null）必须可见', () => {
-  assertEquals(valuePillHtml(null), '');
-  assertEquals(valuePillHtml({ ...row, pool_rank: 12, pool_n: 200 }).includes('池内 P94'), true);
-  // 否决行 = 引擎产出的 { tier:'vetoed', vetoed:true, vq:null }。旧断言写 vq:78.4 是被测代码永不收到的形状。
-  const vetoedRow = { ...row, vq: null, tier: 'vetoed', vetoed: true };
-  const h = valuePillHtml(vetoedRow);
-  assertEquals(h.includes('硬否决'), true);
-  assertEquals(h.includes('score-pill-warn'), true);
-  assertEquals(h.includes('⛔'), true);
-  assertEquals(h === '', false);                                              // 这条才是 I-2 的实质：胶囊不得整颗消失
-  // 无分且未被否决（如覆盖度不足）→ 仍不渲染，别把「还没算出来」伪装成结论
-  assertEquals(valuePillHtml({ ...row, vq: null, tier: 'unqualified', vetoed: false }), '');
-});
 
 Deno.test('valueGateHtml：四维度横条 + owner_yield 明细 + mos/cn10y 判定过程均可见；mos null 时走 rfFallback 文案', () => {
   const h = valueGateHtml(row);
@@ -1051,54 +1038,7 @@ Deno.test('价值否决文案：其它否决原因原样可见（不被护城河
 // 三态按质地/行业中位分：普通＝资不抵债/商誉/烧钱加杠杆这类与行业无关的硬伤；
 // 双否决＝护城河否决且本股 ROIC 不高于同行业中位（绝对门槛里、同行比较里都输）；
 // 单否决＝护城河否决但本股高于同行业中位（只被 8% 资本成本锚这一条绝对门槛压住）。
-Deno.test('否决分类：质地硬伤优先于护城河；仅护城河按行业中位分双/单；相等归双', () => {
-  const ind = { '汽车零部件': { med: 6.9, n: 215 } };
-  const moat = (roicMed: number | null, reasons: string[] = ['无护城河证据']) =>
-    ({ ...row, tier: 'vetoed', vetoed: true, veto_reasons: reasons, ths_l2: '汽车零部件', roic_med: roicMed });
-  assertEquals(valueVetoClass(moat(5.2), ind), 'dual', 'ROIC 5.2 < 同业中位 6.9 ⇒ 双否决');
-  assertEquals(valueVetoClass(moat(7.65), ind), 'single', 'ROIC 7.65 > 同业中位 ⇒ 只是没过绝对门槛');
-  assertEquals(valueVetoClass(moat(6.9), ind), 'dual', '恰好等于中位要归双：不许把「和同行一样差」说成「比同行好」');
-  assertEquals(valueVetoClass(moat(null), ind), 'fin', 'roic_med 为 NA 是金融股（引擎按 ROE 对标）');
-  assertEquals(valueVetoClass(moat(5.2), null), 'noind', '没有行业参照时不硬分双/单');
-  assertEquals(valueVetoClass(moat(5.2, ['无护城河证据'] ), { '汽车零部件': { med: null, n: 0 } }), 'noind', '参照行为脏值同样不硬分');
-  assertEquals(valueVetoClass(moat(5.2, ['无护城河证据', '资不抵债']), ind), 'quality', '硬伤与护城河并存 ⇒ 以质地硬伤为准');
-  assertEquals(valueVetoClass(moat(5.2, ['资不抵债', '商誉/净资产>50%']), ind), 'quality');
-  assertEquals(valueVetoClass({ ...row, veto_reasons: [] }, ind), null, '没被否决就没有分类');
-  assertEquals(valueVetoClass({ ...row, tier: 'vetoed', vetoed: true, veto_reasons: [] }, ind), null,
-    '引擎不变式是「否决⇔原因非空」；真出现空原因按未判定处理，绝不编造分类');
-  assertEquals(valueVetoClass(null, ind), null, '无数据不是「没被否决」，由调用点单独显示未判定');
-});
 
-Deno.test('抄底标注：三态各一行、只标注夹不带指令；无本批次数据写「未判定」，批次未生成不刷这行', () => {
-  const ind = { '汽车零部件': { med: 6.9, n: 215 } };
-  const base = { ...row, tier: 'vetoed', vetoed: true, ths_l2: '汽车零部件', roic_cur: 3.1 };
-  const dual = valueDipVetoHtml({ ...base, veto_reasons: ['无护城河证据'], roic_med: 5.2 }, ind, true);
-  assertMatch(dual, /价值 硬否决·行业双否决/);
-  assertMatch(dual, /本股 ROIC 5\.2% ≤ 同行业中位 6\.9%/);
-  const single = valueDipVetoHtml({ ...base, veto_reasons: ['无护城河证据'], roic_med: 7.65 }, ind, true);
-  assertMatch(single, /价值 硬否决·行业单否决/);
-  assertMatch(single, /高于同行业中位/);
-  assertMatch(single, /8% 资本成本门槛/);
-  const quality = valueDipVetoHtml({ ...base, veto_reasons: ['资不抵债', '商誉/净资产>50%'], roic_med: 5.2 }, ind, true);
-  assertMatch(quality, /价值 硬否决·质地/);
-  assertMatch(quality, /资不抵债/);
-  assertMatch(quality, /商誉/);
-  const fin = valueDipVetoHtml({ ...base, veto_reasons: ['无护城河证据'], roic_med: null }, ind, true);
-  assertMatch(fin, /价值 硬否决·金融 ROE 口径/);
-  assertEquals(fin.includes('ROIC'), false, '金融股不是 ROIC 口径，别混着写');
-  const noInd = valueDipVetoHtml({ ...base, veto_reasons: ['无护城河证据'], roic_med: 5.2 }, null, true);
-  assertMatch(noInd, /价值 硬否决·无同行业参照/);
-  // 用户裁定「只标注，不改指令」：这一行里不得出现任何买入话术，也不得出现被压掉的指令残留
-  for (const one of [dual, single, quality, fin, noInd]) {
-    assertEquals(/建议买入|可分批|加仓|→/.test(one), false, '否决标注里不许出现指令话术：' + one);
-    assertEquals(/NaN|null%|undefined/.test(one), false, '缺值不许冒充数值：' + one);
-  }
-  // 无数据两态必须分开（展示层铁律：缺数据不等于结论）
-  assertMatch(valueDipVetoHtml(null, ind, true), /本批次无该股数据（未判定）/);
-  assertEquals(valueDipVetoHtml(null, ind, false), '', '价值批次尚未生成时不刷这行，页面别处已有降级语');
-  assertEquals(valueDipVetoHtml(row, ind, true), '', '合格行无标注');
-  assertEquals(valueDipVetoHtml(undefined, ind, true), '');
-});
 
 Deno.test('接线守卫：价值评估栏每卡常驻，行业参照与批次状态由调用点传入', async () => {
   const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
@@ -1285,7 +1225,7 @@ Deno.test('价值评估栏：只回答值不值，栏内不得出现任何买卖
 });
 
 // ==== 2026-11-01 三栏收口：止盈栏的三态必须由「活着的那支渲染函数」给出 ====
-// 旧页面走 profitMetaText（三态齐全），2026-11-01 手改后卡片改走 profitRefHtml。
+// 三态只由 profitRefHtml 一处给出（手改后卡片改走它；旧的 profitMetaText 已于 2026-11-02 作为零调用死代码删除）。
 // 邮件端 tierNoteHtml 仍说「各止盈档已执行完毕」；档表恒有 DEFAULT_TIERS 兜底，
 // 所以 nextTier 为空只可能是「全部档已执行」，把它念成「暂无止盈档」是假话。
 Deno.test('止盈参考栏：三态齐全——已达档 / 下一档 / 全部执行完（与邮件同句）', () => {
@@ -1316,4 +1256,90 @@ Deno.test('买入参考栏：档位与白话明细都进栏，明细要转义；
     { currentPrice: '1' }, null, { light: false, needPad: false, shout: false }, null, null, '', null, '', '');
   assertEquals(dirty.includes('<b>38%</b>'), false, '明细里的标签必须被转义，不能当成 HTML');
   assertEquals(dirty.includes('&lt;b&gt;38%&lt;/b&gt;'), true);
+});
+
+// ==== 2026-11-02 裁定 B：短板票只数质地三维，安全边际只作事实展示 ====
+// 依据 #80 分布：`margin_of_safety ≤ 0` 占非否决样本 80.9%，它作为一票时几乎人人背票，
+// 「均无短板」变成稀缺荣誉、warn 配色失去区分度。裁定只撤它这一票，四维雷达格照旧如实报正/负，
+// 40/70 与 8% 门槛、`>2` 才转 warn 的判据一字不动。
+Deno.test('价值评估栏（裁定 B）：安全边际为负不记短板票，但雷达格必须照实显示负值', () => {
+  const r = { code: '600003', name: '仅安全边际为负', tier: 'qualified', vetoed: false, veto_reasons: [],
+    ths_l2: '工程机械', roic_med: 12.0, v_moat: 60, v_health: 60, margin_of_safety: -1.2 };
+  const txt = valueAssessmentHtml(r, vaIndHigher, true).replace(/<[^>]*>/g, '');
+  assertEquals(txt.includes('安全边际偏弱'), false, '裁定 B：mos 不再参与短板计数：' + txt);
+  assertMatch(txt, /负 -1\.2pp/, '雷达格仍要如实报出安全边际为负：' + txt);
+  assertEquals(txt.includes('四维均无短板'), false, 'mos 明明是负数，再写「四维均无短板」就是假话：' + txt);
+  assertMatch(txt, /质地三维无短板/, '无票时只说被计票的质地三维：' + txt);
+});
+
+Deno.test('价值评估栏（裁定 B）：warn 配色要质地三维全弱；两弱普通色，且句子只列被计票的维', () => {
+  const two = valueAssessmentHtml({ code: '600004', name: '两弱', tier: 'qualified', vetoed: false, veto_reasons: [],
+    ths_l2: '工程机械', roic_med: 3.0, v_moat: 20, v_health: 60, margin_of_safety: -3 }, vaIndHigher, true);
+  assertEquals(two.includes('verdict-warn'), false, '两票仍普通色（`>2` 判据不动）：' + two.replace(/<[^>]*>/g, ' '));
+  assertMatch(two.replace(/<[^>]*>/g, ''), /护城河、资本回报偏弱/, '短板句只列质地两维，不得把 mos 混进来：' + two);
+
+  const three = valueAssessmentHtml({ code: '600005', name: '三弱', tier: 'qualified', vetoed: false, veto_reasons: [],
+    ths_l2: '工程机械', roic_med: 3.0, v_moat: 20, v_health: 20, margin_of_safety: -3 }, vaIndHigher, true);
+  assertMatch(three.replace(/<[^>]*>/g, ''), /护城河、资本回报、财务稳健偏弱/);
+  assertEquals(three.includes('verdict-warn'), true, '三票全弱必须转 warn（>2 的分界就是三）：' + three.replace(/<[^>]*>/g, ' '));
+});
+
+Deno.test('价值评估栏（裁定 B）：安全边际为正时与为负时同句，不因 mos 换措辞', () => {
+  const one = (mos: number) => valueAssessmentHtml({ code: '600006', name: '对照', tier: 'qualified', vetoed: false,
+    veto_reasons: [], ths_l2: '工程机械', roic_med: 12.0, v_moat: 60, v_health: 60, margin_of_safety: mos }, vaIndHigher, true);
+  assertEquals(one(4.2).replace(/<[^>]*>/g, '').includes('质地三维无短板'), true);
+  assertEquals(one(-4.2).replace(/<[^>]*>/g, '').includes('质地三维无短板'), true,
+    'mos 只影响雷达格，不影响 verdict 句子');
+  assertEquals(one(4.2) === one(-4.2), false, '雷达格里的正/负必须不同，别让断言变成同义反复');
+});
+
+// ==== 2026-11-02 裁定③：金融股确实没有资本回报数据时，暂按 ROE 口径对标 ====
+// 引擎侧早就这么判否决4（value_engine.ts:61-62 把 med/cur 两条腿都换成 ROE），但那个数只在运行时存在、
+// 从不落库，页面只能写「无数据」——现在有 extras.fin_roe 后仍写「无数据」就是假话。
+// 旧批次没有该键（现网 2026-11-01 即是），所以两种形态必须分别有断言。
+const finRow = (roe: number | null, over: Record<string, unknown> = {}) => ({
+  code: '600001', name: '样本银行', tier: 'qualified', vetoed: false, veto_reasons: [],
+  ths_l2: '银行', roic_med: null, v_moat: 60, v_health: 60, margin_of_safety: 4.0,
+  extras: roe === null ? {} : { fin_roe: roe }, ...over,
+} as never);
+const flat = (h: string) => h.replace(/<[^>]*>/g, '');
+
+Deno.test('价值评估栏（ROE 对标）：金融股拿到 extras.fin_roe 时，资本回报格按 ROE 报数并标明口径', () => {
+  const txt = flat(valueAssessmentHtml(finRow(12.3), null, true));
+  assertMatch(txt, /达标 · 12\.3%（ROE 口径对标）/, 'ROE 数字要看得见、口径要标得清：' + txt);
+  assertEquals(txt.includes('无数据'), false, '有 ROE 却写「无数据」是假话：' + txt);
+  assertMatch(txt, /质地三维无短板/, '12.3% ≥ 8% 门槛 ⇒ 资本回报不记短板票：' + txt);
+});
+
+Deno.test('价值评估栏（ROE 对标）：低于门槛的金融股 ROE 照记一票短板，与非金融股同权', () => {
+  const txt = flat(valueAssessmentHtml(finRow(5.2), null, true));
+  assertMatch(txt, /未达标 · 5\.2%（ROE 口径对标）/);
+  assertMatch(txt, /资本回报偏弱/, 'ROE 5.2% < 8% 必须进短板清单（否决4 用的是同一个对标口径）：' + txt);
+});
+
+Deno.test('价值评估栏（ROE 对标）：被否决的金融股要说清 ROE 对标值，不再退回「无数据」', () => {
+  const txt = flat(valueAssessmentHtml(finRow(5.2, { tier: 'vetoed', vetoed: true, veto_reasons: ['无护城河证据'] }), null, true));
+  assertMatch(txt, /ROE 口径对标 5\.2%/, '否决句里要带对标值：' + txt);
+  assertEquals(txt.includes('未覆盖资本成本'), true, '没过 8% 门槛要说出来：' + txt);
+  assertEquals(txt.includes('无数据'), false, '明明有 ROE，写「无数据」是假话：' + txt);
+});
+
+Deno.test('价值评估栏（ROE 对标·兼容护栏）：旧批次没有 extras.fin_roe 时退回原句，不冒充数值', () => {
+  // 这条在改动前就是绿的，它是**护栏**而不是 RED：防止新加的 ROE 分支把「缺数」形态也念成有数。
+  const out = valueAssessmentHtml(finRow(null, { tier: 'vetoed', vetoed: true, veto_reasons: ['无护城河证据'] }), null, true);
+  assertMatch(flat(out), /资本回报维度无数据（金融股按 ROE 口径对标）/, '缺数就说缺数（现网 2026-11-01 批次就是这形态）');
+  assertEquals(/NaN|null%|undefined/.test(flat(out)), false, '缺键不许冒数值：' + flat(out));
+});
+
+Deno.test('价值评估栏（ROE 对标）：ROE 已过门槛的被否决金融股，不得退回「无数据」', () => {
+  // 变异检验补漏：把「无数据」分支的判空从 retVal 改回 roic 时，现网会冒出这条假话
+  // ——金融股 roic_med 恒为 null，但 extras.fin_roe 有值且已达标，句子却说维度无数据。
+  const txt = flat(valueAssessmentHtml(finRow(12.3, { tier: 'vetoed', vetoed: true, veto_reasons: ['无护城河证据'] }), null, true));
+  assertEquals(txt.includes('无数据'), false, 'ROE 12.3% 达标却说无数据是假话：' + txt);
+  assertMatch(txt, /未见可识别护城河/, '否决原因只剩护城河时要说护城河：' + txt);
+});
+
+Deno.test('价值评估栏（ROE 对标）：ROE 数字不得与 ROIC 同业中位并排（量纲不同源，会造出假比较）', () => {
+  const txt = flat(valueAssessmentHtml(finRow(12.3), { 银行: { med: 8.5, n: 24 } }, true));
+  assertEquals(txt.includes('同行业中位'), false, '同业中位取的是 roic_med，跟 ROE 不是一个口径，不能并排写：' + txt);
 });

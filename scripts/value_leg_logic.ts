@@ -4,7 +4,7 @@ const SHIM = `function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({
   // 三栏渲染函数依赖 fmtPct/fmtMoney，二者定义在标记块外；门面按同口径补一份，只服务测试调用
   + `function fmtPct(n, digits){ if(n===null || n===undefined || isNaN(n)) return '--'; const d=(digits===undefined?1:digits); const s=Number(n).toFixed(d); return (n>0?'+':'')+s+'%'; }\n`
   + `function fmtMoney(n){ if(isNaN(n)) return '¥0'; return '¥'+Math.round(n).toLocaleString('zh-CN'); }\n`;
-const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter', 'legRange', 'legHasMore', 'legTiebreakCol', 'valueFmtPct', 'valueTierLabel', 'valuePillHtml', 'valueGateHtml', 'renderValueTop10', 'SWAP_GAP', 'divergeLists', 'swapSuggest', 'renderDivergeBoard',
+const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter', 'legRange', 'legHasMore', 'legTiebreakCol', 'valueFmtPct', 'valueTierLabel', 'valueGateHtml', 'renderValueTop10', 'SWAP_GAP', 'divergeLists', 'swapSuggest', 'renderDivergeBoard',
   'TREND_LOOKBACK', 'TREND_KLT', 'TREND_FQT', 'TREND_MIN_MONTHS', 'TREND_POSITION_MA', 'TREND_R2_STEADY', 'TREND_DD_RATIO_MIN', 'monthEndCloses', 'olsLogTrend',
   'longTrendStats', 'longTrendLabel', 'brokenLegOf', 'trendBadgeHtml',
   'trendNaWhy', 'trendStaleHtml', 'trendStaleDays', 'fetchStatBump', 'trendPick', 'secidOf',
@@ -14,7 +14,7 @@ const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter
   'TREND_LABEL_CN', 'TREND_NA_CN',
   'INCOME_INDUSTRIES', 'INCOME_DY_MIN', 'INCOME_DY5_MIN', 'INCOME_ROIC_MIN', 'INCOME_LIMIT',
   'incomeChannelOf', 'renderIncomeList', 'foldCardHtml',
-  'ROIC_GATE_PCT', 'valueMedian', 'valueIndStatsOf', 'valueMoatVetoHtml', 'valueVetoHtml', 'valueVetoClass', 'valueDipVetoHtml', 'valueAssessmentHtml',
+  'ROIC_GATE_PCT', 'valueMedian', 'valueIndStatsOf', 'valueMoatVetoHtml', 'valueVetoHtml', 'valueAssessmentHtml',
   'profitRefHtml', 'buyRefHtml'];
 
 async function load(): Promise<Record<string, unknown>> {
@@ -31,7 +31,6 @@ const NS = await load();
 export const VALUE_TABLE = NS.VALUE_TABLE as Record<string, string>;
 export const valueFmtPct = NS.valueFmtPct as (v: number | null, d?: number) => string;
 export const valueTierLabel = NS.valueTierLabel as (t: string | null) => string;
-export const valuePillHtml = NS.valuePillHtml as (row: Record<string, unknown> | null) => string;
 export const valueGateHtml = NS.valueGateHtml as (row: Record<string, unknown> | null, indByL2?: Record<string, { med: number; n: number }> | null) => string;
 export const renderValueTop10 = NS.renderValueTop10 as (state: { batch: string; top10: Record<string, unknown>[] } | null, trendMap?: Record<string, Record<string, unknown>> | null) => string;
 export const SWAP_GAP = NS.SWAP_GAP as number;
@@ -110,17 +109,8 @@ export type IndRef = { med: number; n: number };
 export const valueIndStatsOf = NS.valueIndStatsOf as (rows: Record<string, unknown>[]) => Record<string, IndRef>;
 export const valueMoatVetoHtml = NS.valueMoatVetoHtml as (row: Record<string, unknown> | null, indByL2?: Record<string, IndRef> | null) => string;
 export const valueVetoHtml = NS.valueVetoHtml as (row: Record<string, unknown> | null, indByL2?: Record<string, IndRef> | null) => string;
-/** 否决分类：质地硬伤 > 金融（roic_med 为 NA）> 无参照 > 双否决（≤ 同业中位）> 单否决；未被否决返回 null。
- *  参照值放宽到 number|null：纯函数要把脏参照行（med:null）判成「无参照」，而不是把它当 0。 */
+/** 参照值放宽到 number|null：价值评估栏要把脏参照行（med:null）判成「无参照」，而不是把它当 0。 */
 type IndRefLike = { med: number | null; n?: number };
-export type ValueVetoClass = 'quality' | 'fin' | 'noind' | 'dual' | 'single';
-export const valueVetoClass = NS.valueVetoClass as (
-  row: Record<string, unknown> | null | undefined, indByL2: Record<string, IndRefLike> | null,
-) => ValueVetoClass | null;
-/** 抄底灯亮时的价值标注：只标注不改指令；row=null（查过取不到）写未判定，undefined 表示调用点不适用。 */
-export const valueDipVetoHtml = NS.valueDipVetoHtml as (
-  row: Record<string, unknown> | null | undefined, indByL2: Record<string, IndRefLike> | null, hasBatch: boolean,
-) => string;
 /** 价值评估栏（2026-11-01 三栏收口）：四维 + 人话 verdict；只回答「值不值」，不发买卖指令。 */
 export const valueAssessmentHtml = NS.valueAssessmentHtml as (
   row: Record<string, unknown> | null | undefined, indByL2: Record<string, IndRefLike> | null, hasBatch: boolean,

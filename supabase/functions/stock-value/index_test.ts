@@ -343,3 +343,33 @@ Deno.test('readMainSnapshot：主分快照同样分页——池内 1116 只不�
   assertEquals(m.map.get('001115')?.momentum, 30);
   assertEquals(calls, 3);                        // 1 次批次 + 2 次明细
 });
+
+// ==== 2026-11-02 裁定③：金融股按 ROE 口径对标 —— 那个数必须落库，页面才敢照它说话 ====
+// 否决4 在运行时用 finRoe（value_engine.ts:61-62），但它从不进 `stock_value`：`roic_med` 对金融股是 NULL，
+// 于是卡片只能说「资本回报维度无数据」。落 `extras.fin_roe` 而不是加列：extras 是既有 JSONB，
+// 页面已经 `select('*')` 拿到，无需迁移。键值必须与否决4 用的同一个（同源，不允许页面另算一遍）。
+const finValRow = { ...row, code: '600001.SH', name: '样本银行', isFin: true, roe: 12.3 } as never;
+const exOf = (db: Record<string, unknown>) => db.extras as Record<string, unknown>;
+
+Deno.test('toDbRow：金融股把本批 ROE 落进 extras.fin_roe（与否决4 同源，页面据此报数）', () => {
+  const db = toDbRow(finValRow, '2026-11-02', new Set(), new Map(), STAMPS);
+  assertEquals(exOf(db).fin_roe, 12.3);
+  assertEquals(db.roic_med, 18);        // roic_med 仍取引擎的 ROIC 统计量，不被 ROE 顶替
+});
+
+Deno.test('toDbRow：非金融行 extras.fin_roe=null，即使 roe 列有值也不落（防页面把 ROE 当资本回报）', () => {
+  const db = toDbRow(row as never, '2026-11-02', new Set(), new Map(), STAMPS);
+  assertEquals(row.roe, 3.1);                       // 夹具本身带 roe，证明这条断言不是同义反复
+  assertEquals(exOf(db).fin_roe, null, '非金融股不参与 ROE 对标，落值会让价值栏误用它');
+});
+
+Deno.test('toDbRow：金融股本批 ROE 缺 → extras.fin_roe=null，不冒充 0（缺数与零不等价）', () => {
+  const db = toDbRow({ ...row, code: '600002.SH', isFin: true, roe: null } as never, '2026-11-02', new Set(), new Map(), STAMPS);
+  assertEquals(exOf(db).fin_roe, null);
+});
+
+Deno.test('buildDbRows：编排层把两行的 fin_roe 各写各的（漏接线时本条必红，同 poolRanks 的教训）', () => {
+  const dbs = buildDbRows([finValRow, row] as never[], '2026-11-02', new Set(), new Map(), STAMPS);
+  assertEquals(exOf(dbs[0]).fin_roe, 12.3);
+  assertEquals(exOf(dbs[1]).fin_roe, null);
+});

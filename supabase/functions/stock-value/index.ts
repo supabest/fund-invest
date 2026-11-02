@@ -24,6 +24,10 @@ export function buildExtras(
     grp: r.grp,
     owner_cash: r.gate.fcfYield, owner_norm: r.gate.normYield,   // 取小前的两条腿，页面可解释
     veto_reasons: r.gate.vetoReasons,
+    // 金融股否决4 的对标值（2026-11-02 裁定③）。**同源**：`finRoe` 就是 index.ts 里 `s.roe !== null` 建的那把表，
+    // 引擎读的也是它，所以页面显示的数与判定否决4 的数是同一个，不存在页面另算一遍。
+    // 非金融股一律 null：它们的 `roe` 列虽有值，但资本回报走 ROIC，落进来会让价值栏把 ROE 当成资本回报。
+    fin_roe: r.isFin ? r.roe ?? null : null,
     // 三点年报 ROIC 序列连年份一起落库（决议 29 地基）：`roic_med`/`roic_min3` 是顺序无关的统计量，
     // 斜率只能从原始序列算。上游没给 `roic_fys` 就留 null，不拿 `roic_period` 反推年份。
     roic_hist: stamps.roic_fys

@@ -50,7 +50,7 @@ const EXPORT_NAMES = [
   'baseSignal', 'evalFundSignal', 'fmtWan', 'fmtSigned', 'fmtMoney', 'fmtPct',
   'dipAlertStock', 'dipAlertFundLadder', 'dipAlertStockCost', 'stockPadSet', 'stockPadInfo', 'stockDipGate', 'stockBuyRef', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml', 'stockLotSizeOf', 'lotFromTxQuote', 'dipPadHintHtml',
   'sellBannerHtml', 'stockSellPlan', 'stockSellBannerHtml',
-  'profitNextTier', 'profitMetaText', 'profitAlertFromRet',
+  'profitNextTier', 'profitAlertFromRet',
   'supabaseBaseUrl',
   '__setState',
 ];
@@ -182,11 +182,6 @@ export const profitNextTier = F.profitNextTier as (
   taken: number[] | null | undefined,
   ret: number | null | undefined,
 ) => { ret: number; sell: number } | null;
-/** 卡片元信息：已达档 / 下一档 / 全部执行完，三选一，避免「+83% 还写下一档 +20%」。 */
-export const profitMetaText = F.profitMetaText as (
-  alert: SellAlert | null | undefined,
-  next: { ret: number; sell: number } | null | undefined,
-) => string;
 /** 止盈命中判定：只看最高达标档；该档已执行返回 null（绝不回退到更低的已越过档）。 */
 export const profitAlertFromRet = F.profitAlertFromRet as (
   ret: number | null,
