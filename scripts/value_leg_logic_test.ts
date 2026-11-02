@@ -1506,3 +1506,14 @@ Deno.test('资本回报读数（两位小数·残留取证）：7.998735 改两�
   assertMatch(txt, /本股 ROIC 中位 8\.00%/);
   assertMatch(txt, /⛔ 硬否决：ROIC 未达 8% 资本成本门槛/, '读数显示 8.00% 也不得改掉「未达 8%」这句判据：' + txt);
 });
+
+Deno.test('价值评估栏：口径披露——护城河只看资本回报，不得让「宽」冒充市场份额与行业格局（2026-11-02 裁定 A）', () => {
+  const disclosed = '护城河只看近三年资本回报（ROIC），不含市场份额与行业格局';
+  for (const out of [
+    flat(valueAssessmentHtml(vaVeto, vaIndHigher, true)),
+    flat(valueAssessmentHtml({ ...row }, vaIndHigher, true)),
+  ]) {
+    assertEquals(out.includes(disclosed), true, '本栏四维里「护城河」实际只量资本回报，须当场说清：' + out);
+    assertEquals(out.includes('不等于买卖指令'), true, '原有的指令隔离句不得被换掉：' + out);
+  }
+});
