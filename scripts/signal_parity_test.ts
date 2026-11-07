@@ -18,6 +18,8 @@ import {
   marketLevel as pageMarketLevel, baseSignal, evalFundSignal, fundBenchKey, computeDeviation,
   computeReturn as pageComputeReturn, dualSignal, pctTier, setState,
   dipAlertStock as pageDipAlertStock, dipAlertFundLadder as pageDipFundLadder,
+  fundHistPeak as pageFundHistPeak, dipAlertFundLump as pageDipFundLump,
+  fundLumpPlan as pageFundLumpPlan, fundHistPeakLine as pageFundHistLine, fundDipList as pageFundDipList,
   dipAlertStockCost as pageDipStockCost,
   stockPadSet as pageStockPadSet, stockPadInfo as pageStockPadInfo, stockDipGate as pageStockDipGate,
   stockBuyRef as pageStockBuyRef,
@@ -956,7 +958,7 @@ Deno.test("接线守卫：股票安全垫有输入框、保存写 s.targetDrawdo
   assert(/buyMarkHtml\(r\.dipShout \? r\.ladder : null, r\.dipShout \? r\.addPlan : null\)/.test(server),
     "股票行的 🟢 建议买入标志必须由灯位+高位仲裁驱动（灯灭或明显高位则连金额一起收，但回撤事实仍要写）");
   assert(/buyMarkHtml\(r\.multiplier > 0 \? r\.ladder : null\)/.test(server),
-    "基金行不受本次规则影响（基金没有安全垫输入，仍按主信号发）");
+    "基金行不受本次规则影响（基金没有安全垫输入，仍按主信号发）；阶梯标记与一次性腿三腿并列，互不吞掉");
   assert(/dipBannerHtml\(\[\.\.\.\(fundDips\[userId\] \|\| \[\]\), \.\.\.\(stockDips\[userId\] \|\| \[\]\)\]\)/.test(server),
     "顶部「🟢 抄底提示」横幅必须同时列基金与股票（否则邮件里股票永远不出现）");
   assert(/成本安全垫/.test(server), "股票行必须如实写出成本安全垫状态");
@@ -1153,4 +1155,329 @@ Deno.test("字号契约：手机端 B 档 20 条 + 桌面覆盖未被动", async
     assertEquals(fontOf(desk, sel), desktop, `桌面 ${sel} 覆盖字号本轮不许动（应为 ${desktop}px）`);
     assert(desktop >= mobile, `${sel} 桌面(${desktop}) 必须 ≥ 手机(${mobile})`);
   }
+});
+
+// ==== 2026-11-07 基金「持仓亏损率」一次性买入腿 + 「距历史最高净值」事实行 ====
+// 裁定更正（2026-11-07，作废 2026-11-02 的口径）：>40% 指的是**持仓亏损率**——
+// 现净值相对每份成本的跌幅（computeReturn），不是距历史最高净值的回撤。
+// 基数 = 相同持仓数量 × 成本单价 = 当前持仓总成本，语义是把成本价拉低的一次性投入；
+// 档位取 DD_STEPS 同表。三条腿各管一件事、互不接管：成本安全垫＝恢复定投边界，
+// 一次性＝拉低成本，52 周阶梯＝市场口径加仓档。距历史最高净值只作事实展示，不进判据。
+// 主信号暂停时只陈述事实，不给指令。
+
+Deno.test("历史峰口径：fromPeak 是「现值距历史最高」，不是「曾经最深」——深跌后已修复的基金不得常亮", () => {
+  const a = pageFundHistPeak([1.0, 2.0, 1.2]);
+  assertEquals(a?.histHigh, 2.0);
+  assertEquals(Number(a?.fromPeak.toFixed(6)), -0.4, "1.2/2.0−1 = −40%");
+
+  const up = pageFundHistPeak([1.0, 1.5, 2.0]);
+  assertEquals(up?.histHigh, 2.0);
+  assertEquals(up?.fromPeak, 0, "现值就是历史峰 ⇒ 0，不触发");
+
+  // 关键区分：这一串曾经从 2.0 跌到 0.5（mdd = −75%），但已修复到 1.9 ⇒ 现在只距峰 −5%
+  const healed = pageFundHistPeak([1.0, 2.0, 0.5, 1.9]);
+  assertEquals(healed?.histHigh, 2.0);
+  assertEquals(Number(healed?.fromPeak.toFixed(6)), -0.05, "误用 mdd 会把这只判成 −75% 而永久喊买");
+
+  assertEquals(pageFundHistPeak([]), null, "空历史不得产出 0 冒充「没回撤」");
+  assertEquals(pageFundHistPeak([0, -1, NaN]), null, "脏值全滤掉后为空 ⇒ null");
+  assertEquals(pageFundHistPeak([1.5])?.fromPeak, 0, "单点即峰");
+});
+
+Deno.test("一次性腿门槛：持仓亏损率严格超过 40% 才亮，40.0% 整与 30–40% 区间一律不亮", () => {
+  const at = (nav: number) => ({ currentNav: nav, costBasis: 100, shares: 1000, marketValue: nav * 1000 });
+  assertEquals(pageDipFundLump(at(70), { level: "watch" }), null, "亏 30% 不亮");
+  assertEquals(pageDipFundLump(at(65), { level: "watch" }), null, "亏 35% 不亮");
+  assertEquals(pageDipFundLump(at(60), { level: "watch" }), null, "亏 40.0% 整不算「超过」");
+  assertEquals(pageDipFundLump(at(59.9), { level: "watch" })?.add, 40, "亏 40.1% → 40 档");
+  assertEquals(pageDipFundLump(at(50.1), { level: "watch" })?.add, 40, "亏 49.9% 仍 40 档");
+  assertEquals(pageDipFundLump(at(50), { level: "watch" })?.add, 60, "亏 50% → 60 档（DD_STEPS 最深档）");
+  assertEquals(Number(pageDipFundLump(at(54.9), { level: "watch" })?.loss.toFixed(6)), 45.1);
+});
+
+Deno.test("一次性腿踩线容差：数学上恰好 40% 的亏损率不得因浮点误差被读成「超过」", () => {
+  // 1.20006 / 2.0001 数学上是 0.6，但 (1.20006−2.0001)/2.0001×100 会落成 −40.000000000000014
+  const f = { currentNav: 1.20006, costBasis: 2.0001, shares: 1000, marketValue: 1200.06 };
+  assertEquals(Number(pageComputeReturn(f as Any)!.toFixed(9)), -40, "夹具本身必须踩在 40% 上");
+  assertEquals(pageDipFundLump(f as Any, { level: "watch" }), null, "浮点尾巴不许把它推进一次性档");
+  // 差 2e-6 个百分点（在 1e-9 容差之外）必须亮
+  const just = { ...f, currentNav: 2.0001 * 0.59999998 };
+  assertEquals(Number(pageComputeReturn(just as Any)!.toFixed(6)), -40.000002);
+  assertEquals(pageDipFundLump(just as Any, { level: "watch" })?.add, 40, "超出容差就要亮");
+});
+
+Deno.test("一次性腿缺值与仲裁：无成本数据不亮、不拿 0 冒充；基金侧不吃估值分位否决", () => {
+  for (const f of [
+    { currentNav: 1, shares: 1000 },
+    { currentNav: 1, costBasis: 0, shares: 1000 },
+    { currentNav: 0, costBasis: 100, shares: 1000 },
+  ]) {
+    assertEquals(pageDipFundLump(f, { level: "watch" }), null, "缺成本/净值不得亮灯：" + JSON.stringify(f));
+  }
+  assertEquals(pageDipFundLump({ currentNav: 50, costBasis: 100, shares: 1000, valuationPercentile: 95 }, { level: "watch" })?.add,
+    60, "基金侧 2026-10-28 已取消估值分位，95 无权否决");
+  assertEquals(pageDipFundLump({ currentNav: 0, costBasis: 100, shares: 1000 }, { level: "watch" }), null,
+    "现净值 0 是取数缺失，不是亏光——不许据此喊出巨额一次性买入");
+  assertEquals(pageDipFundLump({ currentNav: -1, costBasis: 100, shares: 1000 }, { level: "watch" }), null,
+    "现净值为负同样是脏数据");
+});
+
+Deno.test("一次性腿主信号仲裁：暂停时仍报事实但 shout=false，非暂停才 shout=true", () => {
+  const f = { currentNav: 54.9, costBasis: 100, shares: 1000 };
+  assertEquals(pageDipFundLump(f, { level: "pause" })?.shout, false);
+  assertEquals(pageDipFundLump(f, { level: "watch" })?.shout, true);
+  assertEquals(pageDipFundLump(f, null)?.shout, true, "无主信号对象时不凭空暂停");
+});
+
+Deno.test("一次性金额：基数为「持仓份额×成本单价」，占持仓成本与占当前市值并列，可算时给投后成本价", () => {
+  const f = { shares: 1000, costBasis: 10, currentNav: 7, marketValue: 7000 };
+  const p = pageFundLumpPlan(f, 40, 1);
+  assertEquals(p?.baseCost, 10000, "基数 = 1000 份 × 10 元 = 10000，不是每期定投基数");
+  assertEquals(p?.amount, 4000, "10000 × 40% = 4000");
+  assertEquals(p?.basePct, 40);
+  assertEquals(Number(p?.posPct?.toFixed(4)), 57.1429, "4000 / 7000");
+  assertEquals(Number(p?.afterCost?.toFixed(6)), 8.909091, "(10000+4000) / (1000 + 4000/7)");
+
+  const half = pageFundLumpPlan(f, 40, 0.5);
+  assertEquals(half?.amount, 2000, "大盘系数 0.5 ⇒ 金额减半");
+  assertEquals(half?.basePct, 20, "占成本比例随系数走，不能仍写 40%");
+  assertEquals(Number(half?.posPct?.toFixed(4)), 28.5714);
+  assertEquals(pageFundLumpPlan(f, 40, null)?.amount, 4000, "系数缺失按 1");
+
+  assertEquals(pageFundLumpPlan({ ...f, marketValue: 0 }, 40, 1)?.posPct, null, "市值 0 ⇒ 不编占比");
+  assertEquals(pageFundLumpPlan({ shares: 1000, costBasis: 10, currentNav: 7 }, 40, 1)?.posPct, null, "市值缺失 ⇒ null");
+  // 份额缺失时退到 costTotal 当基数，但拿不到投后成本价（没有份额就算不出新的每份成本）
+  const byTotal = pageFundLumpPlan({ costTotal: 10000, currentNav: 7, marketValue: 7000 }, 40, 1);
+  assertEquals(byTotal?.baseCost, 10000);
+  assertEquals(byTotal?.amount, 4000);
+  assertEquals(byTotal?.afterCost, null);
+  assertEquals(pageFundLumpPlan(f, 40, 1, 5)?.afterCost, 14000 / (1000 + 4000 / 5), "第 4 参数换现价（邮件用今夜收盘）");
+  assertEquals(pageFundLumpPlan({ shares: 0, costBasis: 0, costTotal: 0 }, 40, 1), null, "成本全缺 ⇒ 不折算金额");
+  assertEquals(pageFundLumpPlan(f, 0, 1), null, "档位 0 ⇒ null");
+});
+
+Deno.test("历史峰事实行：报「距历史最高净值」而非「历史最大回撤」，缺值显式说未取到", () => {
+  const line = pageFundHistLine({ fromPeakHist: -0.401, histHigh: 2.3456, navDate: "2026-11-01" });
+  assert(line.includes("距历史最高净值"), "口径是 fromPeak，文案必须与它相符：" + line);
+  assert(line.includes("40.1%"), "回撤读数一位小数：" + line);
+  assert(line.includes("2.3456"), "历史最高净值四位小数：" + line);
+  assert(line.includes("2026-11-01"), "带截至日：" + line);
+  assertEquals(line.includes("历史最大回撤"), false, "「历史最大回撤」是 mdd（曾经最深），写它就是假话");
+
+  const missing = pageFundHistLine({});
+  assert(missing.includes("历史净值未取到"), "缺值要显式说，不能静默：" + missing);
+  assertEquals(/NaN|null|undefined/.test(missing), false, "缺值行不得漏出脏字面量：" + missing);
+
+  const dirty = pageFundHistLine({ fromPeakHist: -0.45, histHigh: 2.0, navDate: '<img src=x onerror=alert(1)>' });
+  assertEquals(dirty.includes("<img"), false, "非日期格式的 navDate 不得原样进 HTML：" + dirty);
+});
+
+Deno.test("三腿组装：成本安全垫、持仓亏损一次性、52周阶梯各自独立，命中即并列不接管", () => {
+  // 亏 45.1% 且 52 周回撤 45.1%：一次性 + 阶梯同时成立，两条都要在
+  const deep = { currentNav: 54.9, costBasis: 100, shares: 1000, marketValue: 54900, high52w: 100 };
+  const cost = { kind: "cost", ret: -45.1, target: -40, shout: true };
+  assertEquals(pageFundDipList(cost, deep, { level: "watch" }, 1).map(d => d.kind), ["cost", "lump", "ladder"],
+    "三条腿各管一件事，不得互相吞掉");
+  assertEquals(pageFundDipList(null, deep, { level: "watch" }, 1).map(d => d.kind), ["lump", "ladder"]);
+
+  // 亏 35%、52 周回撤 35% ⇒ 只有阶梯
+  const mid = { currentNav: 65, costBasis: 100, shares: 1000, marketValue: 65000, high52w: 100 };
+  assertEquals(pageFundDipList(null, mid, { level: "watch" }, 1).map(d => d.kind), ["ladder"]);
+  // 亏 25%、52 周回撤 25% ⇒ 空列表
+  assertEquals(pageFundDipList(null, { ...mid, currentNav: 75 }, { level: "watch" }, 1), [],
+    "三腿都不达标 ⇒ 空列表，不留空壳");
+  // 无成本数据 ⇒ 一次性腿不出，市场口径照旧
+  assertEquals(pageFundDipList(null, { currentNav: 50, high52w: 100 }, { level: "watch" }, 1).map(d => d.kind), ["ladder"]);
+});
+
+Deno.test("一次性横幅：喊买时给金额、两个比例与投后成本价；暂停时只陈述事实", () => {
+  const plan = { amount: 2919.95, basePct: 40, baseCost: 7299.89, posPct: 68.3, afterCost: 2.5385 };
+  const shout = pageBuyBanner([{ kind: "lump", loss: 41.5, add: 40, shout: true, plan }]);
+  assert(shout.includes("持仓亏损 41.5%"), "横幅报的是持仓亏损率，不是距峰回撤：" + shout);
+  assertEquals(shout.includes("距历史最高净值"), false, "历史峰只作事实行，不进判据句：" + shout);
+  assert(shout.includes("一次性投入"), "语义是一次性，不是分期加仓：" + shout);
+  assert(shout.includes("2,920"), "金额要落地：" + shout);
+  assert(shout.includes("占持仓成本 40%"), "基数口径是持仓成本：" + shout);
+  assert(shout.includes("占当前市值 68.3%"), "持仓口径：" + shout);
+  assert(shout.includes("投后成本价约 2.5385"), "要兑现「拉低成本价」这个目的：" + shout);
+  assertEquals(shout.includes("建议加仓/多投"), false, "一次性指令已在句内，不得再追一条加仓指令重复喊");
+
+  const paused = pageBuyBanner([{ kind: "lump", loss: 41.5, add: 40, shout: false, plan }]);
+  assert(paused.includes("持仓亏损 41.5%"), "暂停也要报事实：" + paused);
+  assertEquals(/建议|一次性投入|投后成本价/.test(paused), false, "暂停时不得出现任何指令文案：" + paused);
+
+  const noPlan = pageBuyBanner([{ kind: "lump", loss: 41.5, add: 40, shout: true, plan: null }]);
+  assert(noPlan.includes("持仓数量/成本单价不全"), "缺数据要显式说，不编金额：" + noPlan);
+  assertEquals(/NaN|undefined/.test(noPlan), false);
+
+  // 三腿并列：成本腿、一次性腿、阶梯腿各说各的，谁也不吞谁
+  const all = pageBuyBanner([
+    { kind: "cost", ret: -41.5, target: -40, shout: true },
+    { kind: "lump", loss: 41.5, add: 40, shout: true, plan },
+    { kind: "ladder", dd: 54.8, add: 60, shout: true },
+  ]);
+  assert(all.includes("成本口径"), "cost 腿要保留：" + all);
+  assert(all.includes("一次性投入"));
+  assert(all.includes("较52周高点回撤 54.8%"), "阶梯腿不再被一次性腿吞掉：" + all);
+  assert(all.includes("建议加仓/多投"), "非一次性腿 shouting 时尾巴照旧：" + all);
+});
+
+Deno.test("接线守卫：历史峰从全历史算并只作事实行，卡片三腿走 fundDipList", async () => {
+  const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
+  // 全历史已在手（Data_netWorthTrend），事实行零新增请求；判据只许有 fundHistPeak 一处实现体
+  assert(/const hp = fundHistPeak\(navs\);/.test(html), "computeNavMetrics 必须复用 fundHistPeak，不许就地再算一遍峰");
+  assert(/histHigh: hp \? hp\.histHigh : null, fromPeakHist: hp \? hp\.fromPeak : null/.test(html),
+    "取不到历史峰要给 null，不拿 0 冒充「没回撤」");
+  assert(/f\.histHigh = Math\.round\(m\.histHigh\*10000\)\/10000;/.test(html), "自动刷新要把历史最高净值落到基金上（四位小数）");
+  assert(/f\.fromPeakHist = Math\.round\(m\.fromPeakHist\*10000\)\/10000;/.test(html), "距峰比例同样落盘，否则事实行永远读不到");
+  // 手动「获取净值」也走同一个峰函数：否则新加的基金要等下次开页自动刷新才看得到这一行
+  assertEquals((html.match(/const hp = fundHistPeak\(navs\);/g) || []).length, 2,
+    "自动刷新与手动获取两条取数路都要算历史峰，且都只调 fundHistPeak");
+  assert(/fundObj\.histHigh = hp\.histHigh;/.test(html) && /fundObj\.fromPeakHist = hp\.fromPeak;/.test(html),
+    "手动获取后要把峰落到该基金上（与 high52w 同一处）");
+  // 三腿必须是装配层的一次调用：模板里各拼一遍就会出现互相吞掉或重复喊
+  assert(/const dips = fundDipList\(dCost, f, sig, coef\);/.test(html), "卡片三腿必须走 fundDipList（含大盘系数）");
+  assertEquals(/\[dCost, dLadder\]\.filter\(Boolean\)/.test(html), false, "旧的两腿并列表达式必须删掉");
+  assertEquals(/const dLadder = dipAlertFundLadder\(f, sig\);/.test(html), false,
+    "阶梯腿改由 fundDipList 内部统一组装，调用点不得再单独算一次");
+  assert(/\$\{fundHistPeakLine\(f\)\}/.test(html), "「距历史最高净值」事实行要常驻买入参考栏（与灯位无关）");
+  assert(/\$\{dips\.length\?'<span class="trade-badge buy">🟢 抄底<\/span>':''\}/.test(html),
+    "🟢 抄底角标必须与横幅同判据（同一个 dips）");
+  // 一次性腿的判据量必须是持仓亏损率：读 fromPeakHist 就是回到被作废的口径
+  const lumpFn = html.slice(html.indexOf("function dipAlertFundLump("), html.indexOf("function fundHistPeakLine("));
+  assert(/const ret = computeReturn\(f\);/.test(lumpFn), "一次性腿必须用持仓收益率（computeReturn）作判据");
+  assert(/const loss = -ret;/.test(lumpFn) && /loss > 40 \+ 1e-9/.test(lumpFn), "门槛量是持仓亏损率，且保留 1e-9 容差");
+  assertEquals(/fromPeakHist/.test(lumpFn), false, "一次性腿不得再读 fromPeakHist——那是事实行的量");
+  // 金额基数必须是「份额 × 成本单价」，退回每期定投基数就是把口径改回去了
+  const planFn = html.slice(html.indexOf("function fundLumpPlan("), html.indexOf("function dipAlertFundLump("));
+  assert(/const cost = effectiveCost\(f\);/.test(planFn) && /shares \* cost/.test(planFn),
+    "一次性金额基数 = 持仓份额 × 成本单价");
+  assertEquals(/baseAmount/.test(planFn), false, "每期定投基数不得再参与一次性金额");
+  // 五个新函数必须在 LADDER_PURE 块内，否则门面抽不到（块外的 dipAlertFund 正是靠参数传入绕开这条限制）
+  const ladder = html.slice(html.indexOf("// ==== LADDER_PURE_BEGIN ===="), html.indexOf("// ==== LADDER_PURE_END ===="));
+  for (const fn of ["fundHistPeak", "fundLumpPlan", "dipAlertFundLump", "fundHistPeakLine", "fundDipList"]) {
+    assert(ladder.includes("function " + fn + "("), fn + " 必须在 LADDER_PURE 块内才能被双端矩阵钉住");
+  }
+});
+
+// ==== 邮件端镜像（2026-11-02）：历史峰口径 / 一次性门槛 / 金额 / 文案四处逐格比对 ====
+
+Deno.test("历史峰双端矩阵：页面 fundHistPeak 与邮件 fundHistPeak 对同一串净值给同一个峰与距峰比例", () => {
+  const series: unknown[] = [
+    [], [1.5], [1, 2, 1.2], [1, 1.5, 2], [1, 2, 0.5, 1.9], [1, 2.0001, 1.20006],
+    [0, -1, NaN], [1, NaN, 2, null, 1.1], ["1.0", "2.0", "1.2"], [3, 2, 1, 0.5],
+  ];
+  for (const navs of series) {
+    const p = pageFundHistPeak(navs);
+    const s = D.fundHistPeak(navs);
+    assertEquals(p === null, s === null, "亮灯口径 navs=" + JSON.stringify(navs));
+    assertEquals(p?.histHigh ?? null, s?.histHigh ?? null, "历史最高 navs=" + JSON.stringify(navs));
+    assertEquals(p ? Number(p.fromPeak.toFixed(9)) : null, s ? Number(s.fromPeak.toFixed(9)) : null,
+      "距峰比例 navs=" + JSON.stringify(navs));
+  }
+});
+
+Deno.test("一次性门槛双端矩阵：持仓亏损率严格 >40%（含 1e-9 容差）与 DD_STEPS 档位逐格一致", () => {
+  const costs = [2.0001, 10, 100];
+  const navs: unknown[] = [undefined, null, NaN, "", 0, -1, 1.20006, 1.9, 2, 6, 5.9, 5.9999998, 5, 4.9, 3];
+  for (const cost of costs) {
+    for (const nav of navs) {
+      const f = { currentNav: nav, costBasis: cost, shares: 1000 };
+      const ret = pageComputeReturn(f as Any);
+      const p = pageDipFundLump(f as Any, { level: "watch" });
+      const s = D.fundLumpAlert(ret);
+      const key = JSON.stringify({ cost, nav });
+      assertEquals(p === null, s === null, "亮灯判定 " + key);
+      assertEquals(p?.add ?? null, s?.add ?? null, "档位 " + key);
+      assertEquals(p ? Number(p.loss.toFixed(9)) : null, s ? Number(s.loss.toFixed(9)) : null, "亏损率读数 " + key);
+    }
+  }
+});
+
+Deno.test("一次性金额双端矩阵：份额×成本单价为基数，两个比例与投后成本价逐格一致", () => {
+  for (const shares of [0, 500, 1000]) {
+    for (const costBasis of [0, 2.5, 10]) {
+      for (const costTotal of [0, 10000]) {
+        for (const mv of [0, 7000]) {
+          for (const add of [40, 60]) {
+            for (const coef of [null, 0.5, 1.5]) {
+              const f = { shares, costBasis, costTotal, currentNav: 7, marketValue: mv };
+              const p = pageFundLumpPlan(f, add, coef);
+              const s = D.fundLumpPlan(f, add, coef);
+              const key = JSON.stringify(f) + " add=" + add + " coef=" + coef;
+              assertEquals(p === null, s === null, "金额判空 " + key);
+              assertEquals(p ? Number(p.amount.toFixed(6)) : null, s ? Number(s.amount.toFixed(6)) : null, "金额 " + key);
+              assertEquals(p ? Number(p.basePct.toFixed(6)) : null, s ? Number(s.basePct.toFixed(6)) : null, "占成本 " + key);
+              assertEquals(p?.posPct ?? null, s?.posPct ?? null, "占市值（缺失须同为 null）" + key);
+              const pa = p && p.afterCost !== null ? Number(p.afterCost.toFixed(9)) : null;
+              const sa = s && s.afterCost !== null ? Number(s.afterCost.toFixed(9)) : null;
+              assertEquals(pa, sa, "投后成本价（缺失须同为 null）" + key);
+            }
+          }
+        }
+      }
+    }
+  }
+  // 第 4 参数（今夜收盘价）也必须两端同解
+  const f = { shares: 1000, costBasis: 10, currentNav: 7, marketValue: 7000 };
+  assertEquals(Number((pageFundLumpPlan(f, 40, 1, 5)?.afterCost as number).toFixed(9)),
+    Number((D.fundLumpPlan(f, 40, 1, 5)?.afterCost as number).toFixed(9)), "换现价后两端投后成本必须一致");
+});
+
+Deno.test("历史峰事实行双端同句：邮件 📈 行与页面买入参考栏说的是同一句话", () => {
+  const cases = [
+    { fromPeakHist: -0.401, histHigh: 2.3456, navDate: "2026-11-01" },
+    { fromPeakHist: -0.05, histHigh: 1.8, navDate: "2026-11-01" },
+    { fromPeakHist: 0, histHigh: 1.8, navDate: "2026-11-01" },
+    {},
+    { fromPeakHist: -0.45, histHigh: 2.0, navDate: '<img src=x onerror=alert(1)>' },
+  ];
+  for (const f of cases) {
+    const pageText = pageFundHistLine(f).replace(/<[^>]*>/g, "");
+    assertEquals(D.fundHistPeakText(f), pageText, "事实行文案漂移 " + JSON.stringify(f));
+  }
+});
+
+Deno.test("一次性横幅双端同句：喊买/暂停/缺数据三态，邮件与页面去掉固定前缀后逐字相同", () => {
+  const plan = { amount: 2919.95, basePct: 40, baseCost: 7299.89, posPct: 68.3 as number | null, afterCost: 2.5385 as number | null };
+  const cases: Array<[{ loss: number; add: number }, typeof plan | null, boolean]> = [
+    [{ loss: 41.5, add: 40 }, plan, true],
+    [{ loss: 41.5, add: 40 }, plan, false],
+    [{ loss: 41.5, add: 40 }, null, true],
+    [{ loss: 52.5, add: 60 }, { amount: 7299.89, basePct: 60, baseCost: 7299.89, posPct: null, afterCost: null }, true],
+  ];
+  for (const [l, p, shout] of cases) {
+    const pageText = pageBuyBanner([{ kind: "lump", loss: l.loss, add: l.add, shout, plan: p }])
+      .replace(/<[^>]*>/g, "").replace("🟢 抄底信号 · ", "");
+    const srvText = D.fundLumpMarkHtml(l, p, shout).replace(/<[^>]*>/g, "");
+    assertEquals(srvText, pageText, "一次性横幅文案漂移 " + JSON.stringify({ l, p, shout }));
+  }
+});
+
+Deno.test("接线守卫：邮件基金腿用今夜收益率判一次性腿，三腿并列，📈 行带历史峰事实", async () => {
+  const server = await Deno.readTextFile(new URL("../supabase/functions/daily-update/index.ts", import.meta.url));
+  assert(/const hp = fundHistPeak\(navs\);/.test(server), "邮件必须用手上已有的全历史 navs 现算峰（零新增请求）");
+  assert(/const lump = fundLumpAlert\(ret\);/.test(server),
+    "一次性腿吃的是持仓收益率（与成本安全垫同一读数），不是历史峰");
+  assert(/const lumpPlan = lump \? fundLumpPlan\(f, lump\.add, coef, close\) : null;/.test(server),
+    "金额基数取自持仓（份额×成本单价），投后成本价用今夜收盘价");
+  assert(/sell, ladder, lump, lumpPlan, histHigh: hp \? hp\.histHigh : null, fromPeakHist: hp \? hp\.fromPeak : null/.test(server),
+    "报告行要把峰与一次性腿一起带下去");
+  // 三腿并列：阶梯标记照旧发，不再被一次性腿吞掉
+  assert(/buyMarkHtml\(r\.multiplier > 0 \? r\.ladder : null\)/.test(server),
+    "阶梯标记必须照旧发（一次性腿不再接管）");
+  assert(/fundLumpMarkHtml\(r\.lump, r\.lumpPlan, r\.multiplier > 0\)/.test(server),
+    "一次性标记与页面同一仲裁门（暂停只报事实）");
+  assert(/\+ '｜' \+ fundHistPeakText\(r\)/.test(server), "📈 行要常驻历史峰事实（与灯位无关）");
+  assert(/if \(lump\) reasons\.push\('持仓亏损 '/.test(server), "恢复旗标里一次性腿报持仓亏损率");
+  assert(/if \(ladder\) reasons\.push\('较52周高点回撤 '/.test(server), "阶梯句照旧");
+  assertEquals(/else if \(ladder\) reasons\.push\('较52周高点回撤 '/.test(server), false,
+    "else-if 会让一次性命中时丢掉阶梯事实——三腿并列必须是两条独立 if");
+  // 反向钉住：用户可见文案里不得出现 mdd 口径的说法（注释里解释口径不算，所以查输出不查源码）
+  for (const f of [{ fromPeakHist: -0.45, histHigh: 2, navDate: "2026-11-01" }, {}]) {
+    assertEquals(/历史最大回撤/.test(D.fundHistPeakText(f)), false, "口径是 fromPeak，写「历史最大回撤」就是假话");
+  }
+  const lumpOut = D.fundLumpMarkHtml({ loss: 41.5, add: 40 }, { amount: 2920, basePct: 40, posPct: 68.3, afterCost: 2.5385 }, true);
+  assertEquals(/历史最大回撤/.test(lumpOut), false);
+  assertEquals(/距历史最高净值/.test(lumpOut), false, "一次性腿报的是持仓亏损率，混进距峰口径就是两件事串台");
 });

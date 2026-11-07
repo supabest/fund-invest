@@ -49,6 +49,7 @@ const EXPORT_NAMES = [
   'computeDeviation', 'effectiveCost', 'computeReturn', 'themeMarketValue', 'themeCapAmount', 'fundBenchKey',
   'baseSignal', 'evalFundSignal', 'fmtWan', 'fmtSigned', 'fmtMoney', 'fmtPct',
   'dipAlertStock', 'dipAlertFundLadder', 'dipAlertStockCost', 'stockPadSet', 'stockPadInfo', 'stockDipGate', 'stockBuyRef', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml', 'stockLotSizeOf', 'lotFromTxQuote', 'dipPadHintHtml',
+  'fundHistPeak', 'dipAlertFundLump', 'fundLumpPlan', 'fundHistPeakLine', 'fundDipList',
   'sellBannerHtml', 'stockSellPlan', 'stockSellBannerHtml',
   'profitNextTier', 'profitAlertFromRet',
   'supabaseBaseUrl',
@@ -86,6 +87,7 @@ export type FundLike = {
   isQDII?: unknown; qdiiPremium?: unknown;
   ma60?: number | null; ma120?: number | null; currentNav?: number;
   costBasis?: number | null; costTotal?: number | null; marketValue?: number | null;
+  shares?: number | null; baseAmount?: unknown;
 };
 
 export const BENCHMARKS = F.BENCHMARKS as Record<string, Bench>;
@@ -121,6 +123,35 @@ export const dipAlertStock = F.dipAlertStock as (
 export const dipAlertFundLadder = F.dipAlertFundLadder as (
   f: { high52w?: unknown; currentNav?: unknown; valuationPercentile?: unknown }, sig?: { level?: string } | null,
 ) => { kind: string; dd: number; add: number; shout: boolean } | null;
+/** 历史峰口径（2026-11-02 裁定）：当前净值距成立以来最高净值。fromPeak ≤ 0，与「曾经最深」的 mdd 不是一回事。 */
+export type FundHistPeak = { histHigh: number; fromPeak: number };
+export const fundHistPeak = F.fundHistPeak as (navs: unknown) => FundHistPeak | null;
+/**
+ * 一次性买入金额：基数 = 持仓份额 × 成本单价（= 当前持仓总成本）× 档位% × 大盘系数。
+ * posPct/afterCost 缺数据时为 null，绝不编数；price 缺省取 f.currentNav（邮件传今夜收盘）。
+ */
+export type FundLumpPlan = {
+  amount: number; basePct: number; baseCost: number; posPct: number | null; afterCost: number | null;
+};
+export const fundLumpPlan = F.fundLumpPlan as (
+  f: { shares?: unknown; costBasis?: unknown; costTotal?: unknown; currentNav?: unknown; marketValue?: unknown },
+  add: number, coef?: number | null, price?: number | null,
+) => FundLumpPlan | null;
+/** 一次性买入腿：判据是持仓亏损率（loss），不是距历史最高净值的回撤。 */
+export type FundLumpDip = {
+  kind: string; loss: number; ret: number; add: number; shout: boolean; plan: FundLumpPlan | null;
+};
+export const dipAlertFundLump = F.dipAlertFundLump as (
+  f: FundLike & Record<string, unknown>,
+  sig?: { level?: string } | null, coef?: number | null,
+) => FundLumpDip | null;
+export const fundHistPeakLine = F.fundHistPeakLine as (
+  f: { fromPeakHist?: unknown; histHigh?: unknown; navDate?: unknown },
+) => string;
+/** 三腿组装（2026-11-07）：成本安全垫 / 持仓亏损一次性 / 52 周阶梯各自独立，互不接管。 */
+export const fundDipList = F.fundDipList as (
+  cost: unknown, f: Record<string, unknown>, sig?: { level?: string } | null, coef?: number | null,
+) => Array<Record<string, unknown>>;
 /** 股票抄底·成本口径（安全垫）：dev 为均线偏离，≥+10%（邮件口径「明显高位」）时 shout=false。 */
 export type StockCostDip = { kind: string; ret: number; target: number; shout: boolean };
 export const dipAlertStockCost = F.dipAlertStockCost as (
@@ -153,7 +184,10 @@ export const stockBuyRef = F.stockBuyRef as (
   pad?: StockPadInfo | null,
 ) => StockBuyRef;
 export const buyBannerHtml = F.buyBannerHtml as (
-  list: Array<{ kind: string; dd?: number; add?: number; ret?: number; target?: number; shout: boolean }>,
+  list: Array<{
+    kind: string; dd?: number; add?: number; loss?: number; ret?: number; target?: number; shout: boolean;
+    plan?: FundLumpPlan | null;
+  }>,
 ) => string;
 export type AddPlan = { want: number; lots: number; amount: number; lotSize: number; ratio: number };
 export const stockAddPlan = F.stockAddPlan as (mv: number, price: number, add: number, lotSize?: number) => AddPlan | null;
