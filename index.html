@@ -44,6 +44,8 @@
   .masthead-top{display:flex; justify-content:space-between; align-items:baseline;}
   .masthead h1{font-family:var(--serif); font-weight:600; font-size:22px; margin:0; letter-spacing:0.5px;}
   .masthead .date{font-size:12px; color:var(--muted);}
+  .goal-groups{display:block;}
+  .stat-group{min-width:0;}
   .goal-row{display:flex; gap:22px; margin-top:18px; flex-wrap:wrap;}
   .goal-stat{flex:1; min-width:110px;}
   .goal-stat .num{font-size:26px; font-weight:600; line-height:1.1;}
@@ -395,30 +397,68 @@
   .rp-note{font-size:11px;color:var(--muted);margin-top:10px;border-top:1px dashed var(--line);padding-top:6px;}
   .add-row{display:flex;gap:8px;}
   .add-row .add-stock-btn{flex:1;}
+
+  /* 窄屏（手机/平板）：保留页签切换，顶部只显示当前页签那一组统计 */
+  @media (max-width: 1099.98px){
+    #tab-funds, #tab-stocks{display:none;}
+    body[data-tab="funds"] #tab-funds{display:block;}
+    body[data-tab="stocks"] #tab-stocks{display:block;}
+    body[data-tab="funds"] .stat-group[data-group="stocks"]{display:none;}
+    body[data-tab="stocks"] .stat-group[data-group="funds"]{display:none;}
+  }
+  /* 宽屏（电脑）：基金与股票并排同屏，页签退场，顶部统计左右分组对齐两列 */
+  @media (min-width: 1100px){
+    .masthead{max-width:1560px; margin:0 auto; padding:36px 24px 22px;}
+    .tabs-row{display:none;}
+    .goal-groups{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:28px;}
+    .panes{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:28px; align-items:start; max-width:1560px; margin:0 auto; padding:0 24px 40px;}
+    .panes > #tab-funds > .section, .panes > #tab-stocks > .section{max-width:none; margin:0; padding-left:0; padding-right:0;}
+  }
 </style>
 </head>
-<body>
+<body data-tab="funds">
 
 <div class="masthead">
   <div class="masthead-top">
     <h1>定投信号台</h1>
     <div class="date" id="todayDate"></div>
   </div>
-  <div class="goal-row">
-    <div class="goal-stat">
-      <div class="num" id="totalValue">¥0</div>
-      <div class="lbl" id="valueLbl">基金总市值</div>
+  <div class="goal-groups">
+    <div class="stat-group" data-group="funds">
+      <div class="goal-row">
+        <div class="goal-stat">
+          <div class="num" id="fundValue">¥0</div>
+          <div class="lbl">基金总市值</div>
+        </div>
+        <div class="goal-stat">
+          <div class="num" id="fundReturn">0%</div>
+          <div class="lbl">基金收益率</div>
+        </div>
+        <div class="goal-stat">
+          <div class="num" id="fundGoalPct">0%</div>
+          <div class="lbl" id="fundGoalLbl">20万目标进度</div>
+        </div>
+      </div>
+      <div class="progress-track"><div class="progress-fill" id="fundBar" style="width:0%"></div></div>
     </div>
-    <div class="goal-stat">
-      <div class="num" id="totalReturn">0%</div>
-      <div class="lbl" id="returnLbl">基金收益率</div>
-    </div>
-    <div class="goal-stat">
-      <div class="num" id="goalPct">0%</div>
-      <div class="lbl" id="goalLbl">20万目标进度</div>
+    <div class="stat-group" data-group="stocks">
+      <div class="goal-row">
+        <div class="goal-stat">
+          <div class="num" id="stockValue">¥0</div>
+          <div class="lbl">股票总市值</div>
+        </div>
+        <div class="goal-stat">
+          <div class="num" id="stockReturn">0%</div>
+          <div class="lbl">股票收益率</div>
+        </div>
+        <div class="goal-stat">
+          <div class="num" id="stockGoalPct">0%</div>
+          <div class="lbl" id="stockGoalLbl">仓位上限未设置</div>
+        </div>
+      </div>
+      <div class="progress-track"><div class="progress-fill" id="stockBar" style="width:0%"></div></div>
     </div>
   </div>
-  <div class="progress-track"><div class="progress-fill" id="goalBar" style="width:0%"></div></div>
   <div class="mkt-strip" id="mktStrip">
     <span class="mkt-label">大盘参考</span>
     <span class="mkt-items" id="mktItems"></span>
@@ -436,6 +476,7 @@
   <button class="tab-btn" data-tab="stocks">股票</button>
 </div>
 
+<div class="panes">
 <div id="tab-funds">
 <div class="section">
   <div class="settings-row">
@@ -461,7 +502,7 @@
 </div>
 </div>
 
-<div id="tab-stocks" style="display:none">
+<div id="tab-stocks">
 <div class="section">
   <div class="section-title">股票仓位 <span class="hint" id="stockCapText">未设置总额上限</span></div>
   <div class="progress-track"><div class="progress-fill" id="stockCapTrack" style="width:0%"></div></div>
@@ -502,6 +543,7 @@
     <div class="small-note" id="researchMsg" style="color:var(--brick);"></div>
   </div>
   <div id="researchResultSlot"></div>
+</div>
 </div>
 </div>
 
@@ -577,7 +619,6 @@ let mktFetching = {};
 
 // 股票持仓与设置
 let stocks = [];
-let activeTab = 'funds'; // 当前页签：顶部统计按基金/股票分别口径展示
 let goal = GOAL;      // 基金目标总额（可在页面调整，主题上限随之缩放）
 let stockCap = 0;     // 股票总仓位上限（0=不限）
 
@@ -3590,42 +3631,34 @@ function render(){
   }, 0);
   const stockCost = stocks.reduce((s,x)=> s + (parseFloat(x.shares)||0)*(parseFloat(x.cost)||0), 0);
 
-  // 顶部三项统计跟随当前页签：基金页只算基金，股票页只算股票
-  let mv, cost, barPct=null, barColor='';
-  if(activeTab==='stocks'){
-    mv = stockMv; cost = stockCost;
-    document.getElementById('valueLbl').textContent = '股票总市值';
-    document.getElementById('returnLbl').textContent = '股票收益率';
-    if(stockCap>0){
-      barPct = stockMv/stockCap*100;
-      barColor = barPct>=100 ? 'var(--brick)' : '';
-      document.getElementById('goalLbl').textContent = '股票仓位上限进度';
-    } else {
-      document.getElementById('goalLbl').textContent = '仓位上限未设置';
-    }
-  } else {
-    mv = fundMv; cost = fundCost;
-    document.getElementById('valueLbl').textContent = '基金总市值';
-    document.getElementById('returnLbl').textContent = '基金收益率';
-    barPct = fundMv/goal*100;
-    barColor = barPct>=100 ? 'var(--jade)' : '';
-    document.getElementById('goalLbl').textContent = (goal>=10000 ? (Math.round(goal/1000)/10)+'万目标进度' : goal+'元目标进度');
-  }
-  const ret = cost>0 ? (mv-cost)/cost*100 : 0;
-
-  document.getElementById('totalValue').textContent = fmtMoney(mv);
-  const trEl = document.getElementById('totalReturn');
-  trEl.textContent = fmtPct(ret);
-  trEl.style.color = ret>=0 ? 'var(--jade)' : 'var(--brick)';
-  const goalEl = document.getElementById('goalPct');
-  goalEl.textContent = barPct===null ? '--' : barPct.toFixed(1)+'%';
-  goalEl.style.color = barColor;
-  document.getElementById('goalBar').style.width = barPct===null ? '0%' : Math.min(100, barPct)+'%';
+  // 顶部分左右两组统计，与宽屏两列对齐；窄屏由 CSS 按 body[data-tab] 隐藏另一组
+  const fundRet = fundCost>0 ? (fundMv-fundCost)/fundCost*100 : 0;
+  const stockRet = stockCost>0 ? (stockMv-stockCost)/stockCost*100 : 0;
+  const fundBarPct = fundMv/goal*100;
+  const stockBarPct = stockCap>0 ? stockMv/stockCap*100 : null;
+  setStatGroup('fund', fundMv, fundRet, fundBarPct,
+    (goal>=10000 ? (Math.round(goal/1000)/10)+'万目标进度' : goal+'元目标进度'),
+    fundBarPct>=100 ? 'var(--jade)' : '');
+  setStatGroup('stock', stockMv, stockRet, stockBarPct,
+    stockBarPct===null ? '仓位上限未设置' : '股票仓位上限进度',
+    (stockBarPct!==null && stockBarPct>=100) ? 'var(--brick)' : '');
 
   renderThemeTable();
   renderStockSection();
   renderFundList();
   renderMktStrip();
+}
+
+function setStatGroup(key, mv, ret, barPct, goalLbl, barColor){
+  document.getElementById(key+'Value').textContent = fmtMoney(mv);
+  const retEl = document.getElementById(key+'Return');
+  retEl.textContent = fmtPct(ret);
+  retEl.style.color = ret>=0 ? 'var(--jade)' : 'var(--brick)';
+  const pctEl = document.getElementById(key+'GoalPct');
+  pctEl.textContent = barPct===null ? '--' : barPct.toFixed(1)+'%';
+  pctEl.style.color = barColor;
+  document.getElementById(key+'GoalLbl').textContent = goalLbl;
+  document.getElementById(key+'Bar').style.width = barPct===null ? '0%' : Math.min(100, barPct)+'%';
 }
 
 function renderThemeTable(){
@@ -4629,9 +4662,7 @@ document.getElementById('loginModalBackdrop').addEventListener('click', e=>{
 
 document.querySelectorAll('.tab-btn').forEach(b=>b.addEventListener('click', ()=>{
   document.querySelectorAll('.tab-btn').forEach(x=>x.classList.toggle('active', x===b));
-  document.getElementById('tab-funds').style.display = b.dataset.tab==='funds' ? '' : 'none';
-  document.getElementById('tab-stocks').style.display = b.dataset.tab==='stocks' ? '' : 'none';
-  activeTab = b.dataset.tab;
+  document.body.dataset.tab = b.dataset.tab;
   try{ localStorage.setItem('dinvest_tab', b.dataset.tab); }catch(e){}
   render();
 }));
