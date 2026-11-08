@@ -20,7 +20,7 @@ import {
   dipAlertStock as pageDipAlertStock, dipAlertFundLadder as pageDipFundLadder,
   fundHistPeak as pageFundHistPeak, dipAlertFundLump as pageDipFundLump,
   fundLumpPlan as pageFundLumpPlan, fundHistPeakLine as pageFundHistLine, fundDipList as pageFundDipList,
-  dipAlertFundDeep as pageDipFundDeep, fundDeepLine as pageFundDeepLine,
+  dipAlertFundDeep as pageDipFundDeep, fundDeepLine as pageFundDeepLine, fundPadLine as pageFundPadLine,
   dipAlertStockCost as pageDipStockCost,
   stockPadSet as pageStockPadSet, stockPadInfo as pageStockPadInfo, stockDipGate as pageStockDipGate,
   stockBuyRef as pageStockBuyRef,
@@ -1598,4 +1598,62 @@ Deno.test("接线守卫：深水腿是第四条腿，页面与邮件同源接线
   assert(/\+ '｜' \+ fundDeepText\(r\)/.test(server), "📈 行常驻深水事实");
   assert(/fundDeepMarkHtml\(r\.deep, r\.multiplier > 0\)/.test(server), "深水标记与页面同一仲裁门");
   assert(/if \(deep\) reasons\.push\('历史回撤完成度 '/.test(server), "暂停旗标里深水腿也只报事实");
+});
+
+// ==== 基金「目标跌幅安全垫」常驻事实行（2026-11-08 用户裁决 A）====
+// 现状：安全垫只在「跌穿横幅」或「暂停且未满足恢复条件」时偶然露一次，未踩线就等于看不见。
+// 裁决：设了安全垫的基金常驻一行事实；没设的保持沉默。页面与邮件逐字同句。
+
+Deno.test("安全垫事实行双端同句：未设沉默，未触发/触发线/已跌穿三态逐字一致", () => {
+  const cases: Array<[unknown, number | null, string]> = [
+    ["30", 0, "目标跌幅安全垫 30%｜当前 0.0%，还需再跌 30.0 个百分点才触发"],
+    ["30", -12.4, "目标跌幅安全垫 30%｜当前 −12.4%，还需再跌 17.6 个百分点才触发"],
+    ["30", -30, "目标跌幅安全垫 30%｜当前 −30.0%，已到触发线"],
+    ["30", -32.4, "目标跌幅安全垫 30%｜当前 −32.4%，已跌穿 2.4 个百分点"],
+    ["30", -29.96, "目标跌幅安全垫 30%｜当前 −29.96%，还需再跌 0.04 个百分点才触发"],
+    ["-30", 0, "目标跌幅安全垫 30%｜当前 0.0%，还需再跌 30.0 个百分点才触发"],
+    ["12.5", -20, "目标跌幅安全垫 12.5%｜当前 −20.0%，已跌穿 7.5 个百分点"],
+    [30, NaN, "目标跌幅安全垫 30%｜当前收益未取到"],
+    ["30", null, "目标跌幅安全垫 30%｜当前收益未取到"],
+  ];
+  for (const [pad, ret, want] of cases) {
+    const pageText = pageFundPadLine({ resumeRule: { targetDrawdown: pad } }, ret).replace(/<[^>]*>/g, "");
+    assertEquals(pageText, want, "页面文案 " + JSON.stringify([pad, ret]));
+    assertEquals(D.fundPadText(pad, ret), want, "邮件文案 " + JSON.stringify([pad, ret]));
+  }
+  // 没设 / 空白 / 脏值 / 0：一律沉默，不拿 0 当「-0% 门槛」渲染出一行永远贴线的假事实
+  for (const pad of [null, undefined, "", "   ", "0", 0, "abc", NaN]) {
+    assertEquals(pageFundPadLine({ resumeRule: { targetDrawdown: pad } }, 0), "", "未设要沉默：" + String(pad));
+    assertEquals(D.fundPadText(pad, 0), "", "邮件未设要沉默：" + String(pad));
+    assertEquals(pageFundPadLine({ resumeRule: { targetDrawdown: pad } }, -50), "", "未设遇跌穿也沉默：" + String(pad));
+  }
+  // 无 resumeRule / resumeRule 为 null：同样沉默，不抛
+  assertEquals(pageFundPadLine({}, 0), "");
+  assertEquals(pageFundPadLine({ resumeRule: null }, 0), "");
+});
+
+Deno.test("安全垫事实行默认口径：页面对外调用不传 ret 时自己算持仓收益率", () => {
+  const hit = pageFundPadLine({ resumeRule: { targetDrawdown: "30" }, costBasis: 1, currentNav: 0.676 }).replace(/<[^>]*>/g, "");
+  assertEquals(hit, "目标跌幅安全垫 30%｜当前 −32.4%，已跌穿 2.4 个百分点");
+  const live = pageFundPadLine({ resumeRule: { targetDrawdown: "30" }, costBasis: 1, currentNav: 0.873 }).replace(/<[^>]*>/g, "");
+  assertEquals(live, "目标跌幅安全垫 30%｜当前 −12.7%，还需再跌 17.3 个百分点才触发");
+  // 缺成本：只报「收益未取到」，不默认 0% 也不当作跌穿
+  const blind = pageFundPadLine({ resumeRule: { targetDrawdown: "30" } }).replace(/<[^>]*>/g, "");
+  assertEquals(blind, "目标跌幅安全垫 30%｜当前收益未取到");
+});
+
+Deno.test("接线守卫：安全垫事实行常驻买入参考栏，页面与邮件同源接线", async () => {
+  const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
+  const ladder = html.slice(html.indexOf("// ==== LADDER_PURE_BEGIN ===="), html.indexOf("// ==== LADDER_PURE_END ===="));
+  assert(ladder.includes("function fundPadLine("), "fundPadLine 必须在 LADDER_PURE 块内才能被双端矩阵钉住");
+  // 卡片：常驻行紧跟在历史最深回撤之后，与灯位无关
+  const card = html.slice(html.indexOf("const fundBuyRef ="), html.indexOf("card.innerHTML = `"));
+  assert(/\$\{fundPadLine\(f\)\}/.test(card), "安全垫事实行要常驻买入参考栏");
+  assert(card.indexOf("${fundPadLine(f)}") > card.indexOf("${fundDeepLine(f)}"), "安全垫行排在历史最深回撤之后");
+
+  const server = await Deno.readTextFile(new URL("../supabase/functions/daily-update/index.ts", import.meta.url));
+  assert(/export function fundPadText\(/.test(server), "邮件端要有同句的事实行");
+  assert(/pad: f\.resumeRule \? f\.resumeRule\.targetDrawdown : null/.test(server), "报告行要带上目标跌幅原文");
+  assert(/const padStr = fundPadText\(r\.pad, r\.ret\);/.test(server), "邮件用同口径收益率拼安全垫事实");
+  assert(/\+ \(padStr \? '｜' \+ padStr : ''\)/.test(server), "📈 行常驻安全垫事实，未设时不拖一个空尾巴");
 });

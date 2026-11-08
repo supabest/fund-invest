@@ -49,7 +49,7 @@ const EXPORT_NAMES = [
   'computeDeviation', 'effectiveCost', 'computeReturn', 'themeMarketValue', 'themeCapAmount', 'fundBenchKey',
   'baseSignal', 'evalFundSignal', 'fmtWan', 'fmtSigned', 'fmtMoney', 'fmtPct',
   'dipAlertStock', 'dipAlertFundLadder', 'dipAlertStockCost', 'stockPadSet', 'stockPadInfo', 'stockDipGate', 'stockBuyRef', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml', 'stockLotSizeOf', 'lotFromTxQuote', 'dipPadHintHtml',
-  'fundHistPeak', 'dipAlertFundLump', 'fundLumpPlan', 'fundHistPeakLine', 'fundDipList',
+  'fundHistPeak', 'dipAlertFundLump', 'fundLumpPlan', 'fundHistPeakLine', 'fundPadLine', 'fundDipList',
   'dipAlertFundDeep', 'fundDeepLine',
   'sellBannerHtml', 'stockSellPlan', 'stockSellBannerHtml',
   'profitNextTier', 'profitAlertFromRet',
@@ -148,6 +148,17 @@ export const dipAlertFundLump = F.dipAlertFundLump as (
 ) => FundLumpDip | null;
 export const fundHistPeakLine = F.fundHistPeakLine as (
   f: { fromPeakHist?: unknown; histHigh?: unknown; navDate?: unknown },
+) => string;
+/**
+ * 安全垫事实行（2026-11-08 用户裁决 A）：设了目标跌幅的基金常驻一行；
+ * 未设返回空串。ret 省略时按持仓成本自算，传 null 表示收益未知。
+ */
+export const fundPadLine = F.fundPadLine as (
+  f: {
+    resumeRule?: { targetDrawdown?: unknown } | null;
+    costBasis?: unknown; costTotal?: unknown; marketValue?: unknown; shares?: unknown; currentNav?: unknown;
+  },
+  ret?: number | null,
 ) => string;
 /** 三腿组装（2026-11-07）：成本安全垫 / 持仓亏损一次性 / 52 周阶梯各自独立，互不接管。 */
 export const fundDipList = F.fundDipList as (

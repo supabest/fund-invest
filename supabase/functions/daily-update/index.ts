@@ -516,6 +516,24 @@ export function fundDeepText(f: { mddHist?: unknown; fromPeakHist?: unknown }): 
   const comp = (isFinite(fp) && fp <= 0) ? (Math.round(fp / mdd * 100) + '%') : '--';
   return '历史最深回撤 −' + (-mdd * 100).toFixed(1) + '%（当前完成 ' + comp + '）';
 }
+// 安全垫事实行：与页面 fundPadLine 去掉外层 div 后逐字相同（2026-11-08 用户裁决 A）。
+// 设了目标跌幅的基金常驻一行；没设/空白/脏值/0 一律沉默，未设不拖一个空尾巴。
+// 距触发不足 0.1 个百分点时两端多留一位小数，避免「−30.0% 还需再跌 0.04」的自相矛盾读法。
+export function fundPadText(pad: unknown, ret: number | null): string {
+  if (pad === null || pad === undefined || String(pad).trim() === '') return '';
+  const tdd = parseFloat(String(pad));
+  if (!Number.isFinite(tdd) || tdd === 0) return '';
+  const target = -Math.abs(tdd);
+  const head = '目标跌幅安全垫 ' + (-target) + '%｜';
+  if (ret === null || ret === undefined || !Number.isFinite(ret)) return head + '当前收益未取到';
+  const gap = ret - target;
+  const near = Math.abs(gap) < 0.1;
+  const fmt1 = (n: number) => n.toFixed(1).replace('-', '−');
+  const fmt = (n: number) => (near ? n.toFixed(2) : n.toFixed(1)).replace('-', '−');
+  if (Math.abs(gap) <= 1e-9) return head + '当前 ' + fmt1(ret) + '%，已到触发线';
+  if (gap > 0) return head + '当前 ' + fmt(ret) + '%，还需再跌 ' + fmt(gap) + ' 个百分点才触发';
+  return head + '当前 ' + fmt(ret) + '%，已跌穿 ' + fmt(-gap) + ' 个百分点';
+}
 // 深水标记：与页面 buyBannerHtml 的 deep 分支同句（去掉「🟢 抄底信号 · 」前缀后逐字相同）。
 // shout=false（主信号暂停）只陈述事实，不给任何指令。
 export function fundDeepMarkHtml(
@@ -1389,7 +1407,8 @@ export async function handle(
             dev, ma60, ma120, streak, label: sig.label, multiplier: sig.multiplier,
             amount: Math.round(amount), benchmarkName: bl ? BENCH[bkey].name : '', benchmarkLevel: bl ? bl.label : '',
             ret, nextTier, resumeReady: !!sig.resumeReady, theme: f.theme || '',
-            sell, ladder, lump, lumpPlan, histHigh: hp ? hp.histHigh : null, fromPeakHist: hp ? hp.fromPeak : null, mddHist: hp ? hp.mddHist : null, deep
+            sell, ladder, lump, lumpPlan, histHigh: hp ? hp.histHigh : null, fromPeakHist: hp ? hp.fromPeak : null, mddHist: hp ? hp.mddHist : null, deep,
+            pad: f.resumeRule ? f.resumeRule.targetDrawdown : null
           });
 
           await post('fund_nav_history', 'user_id,code,nav_date', [{ user_id: userId, code, nav_date: navDate, nav: close, ma60, ma120, dev_pct: dev, above_ma60: above }]);
@@ -1636,8 +1655,9 @@ export async function handle(
           else if (r.dev < 3) buyNextStr = '｜均线腿下一档：净值跌至 ' + (maAvg * 0.95).toFixed(4) + '（-5% 档）';
           else buyNextStr = '｜均线腿回归中性：净值回落至 ' + (maAvg * 1.03).toFixed(4) + '（+3% 内）';
         }
+        const padStr = fundPadText(r.pad, r.ret);
         const statusStr = '净值 ' + r.nav + '（' + r.navDate + '）｜较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (r.streak !== null ? '｜连续 ' + r.streak + ' 日站上60日线' : '') + benchmarkStr + buyNextStr
-          + '｜' + fundHistPeakText(r) + '｜' + fundDeepText(r);
+          + '｜' + fundHistPeakText(r) + '｜' + fundDeepText(r) + (padStr ? '｜' + padStr : '');
         // 动作文案按档位标签走：基金档位由均线偏离单腿决定（2026-10-28 起估值分位已下线）
         let actionStr: string;
         if (r.label.includes('QDII溢价')) actionStr = '溢价率过高，暂停买入，等待溢价回落';

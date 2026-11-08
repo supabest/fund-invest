@@ -3248,6 +3248,28 @@ function fundDeepLine(f){
   const comp = (isFinite(fp) && fp <= 0) ? (Math.round(fp/mdd*100)+'%') : '--';
   return '<div class="ref-row">历史最深回撤 −'+(-mdd*100).toFixed(1)+'%（当前完成 '+comp+'）</div>';
 }
+// 安全垫事实行（2026-11-08 用户裁决 A）：设了「目标跌幅安全垫」的基金常驻一行读数，
+// 不能只在跌穿或暂停未满足恢复条件时才露一次——那样同一条腿时有时无，看着像没设。
+// 没设/空白/脏值/0 一律不渲染：0 会被当成 -0% 门槛，比不设更危险。1e-9 容差与 dipAlertFund 同。
+// ret 不传时自己按持仓成本算（卡片走这条）；传 null 表示「收益未知」，绝不默认 0%。
+function fundPadLine(f, ret){
+  const raw = f && f.resumeRule ? f.resumeRule.targetDrawdown : undefined;
+  if(raw===null || raw===undefined || String(raw).trim()==='') return '';
+  const tdd = parseFloat(String(raw));
+  if(!isFinite(tdd) || tdd===0) return '';
+  const target = -Math.abs(tdd);
+  const r = (ret===undefined) ? computeReturn(f) : ret;
+  const head = '目标跌幅安全垫 '+(-target)+'%｜';
+  if(r===null || r===undefined || !isFinite(r)) return '<div class="ref-row">'+head+'当前收益未取到</div>';
+  const gap = r - target;
+  // 距触发不足 0.1 个百分点时两端都多留一位小数，避免「当前 −30.0%，还需再跌 0.04」这种自相矛盾的读法
+  const near = Math.abs(gap) < 0.1;
+  const fmt1 = (n)=> n.toFixed(1).replace('-', '−');
+  const fmt = (n)=> (near ? n.toFixed(2) : n.toFixed(1)).replace('-', '−');
+  if(Math.abs(gap) <= 1e-9) return '<div class="ref-row">'+head+'当前 '+fmt1(r)+'%，已到触发线</div>';
+  if(gap > 0) return '<div class="ref-row">'+head+'当前 '+fmt(r)+'%，还需再跌 '+fmt(gap)+' 个百分点才触发</div>';
+  return '<div class="ref-row">'+head+'当前 '+fmt(r)+'%，已跌穿 '+fmt(-gap)+' 个百分点</div>';
+}
 // 深水腿（2026-11-08 用户裁决）：当前回撤已达到历史最深回撤的 90%。
 // 只给定性建议、不给金额（用户裁决）；mdd=0/缺失、净值高于历史峰一律不亮。
 // 1e-9 容差同上：完成度恰好 90.0% 时浮点尾巴不能让它漏亮。
@@ -3756,6 +3778,7 @@ function renderFundList(){
       <div class="ref-row" style="margin-top:8px;">${escapeHtml(sig.reasons.join('；'))}</div>
       ${fundHistPeakLine(f)}
       ${fundDeepLine(f)}
+      ${fundPadLine(f)}
       ${dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0, false) ? '<div style="margin-top:10px;">' + dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0, false) + '</div>' : ''}
       ${dips.length ? '<div style="margin-top:10px;">' + buyBannerHtml(dips) + '</div>' : ''}
     </div>`;
