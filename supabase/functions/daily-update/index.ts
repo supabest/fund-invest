@@ -407,20 +407,22 @@ export function dipLadder(
   return { dd, add: ddAddPct(dd) };
 }
 // ==== 基金「距历史最高净值」事实行 + 持仓亏损率 >40% 一次性买入腿（2026-11-07 修正口径）====
-// index.html LADDER_PURE 的镜像。事实行口径是 fromPeak（现在还在坑里多深），不是 mdd；
+// index.html LADDER_PURE 的镜像。fundHistPeakText 的口径是 fromPeak（现在还在坑里多深）；mdd 另走 fundDeepText。
 // 一次性腿的判据是**持仓亏损率**（现净值相对每份成本的跌幅），由 computeReturn 给出，与历史峰无关。
-// 一致性由 scripts/signal_parity_test.ts 的四组矩阵钉住：只改一侧必红。
-export function fundHistPeak(navs: unknown): { histHigh: number; fromPeak: number } | null {
+// 一致性由 scripts/signal_parity_test.ts 的矩阵钉住：只改一侧必红。
+export function fundHistPeak(navs: unknown): { histHigh: number; fromPeak: number; mddHist: number } | null {
   if (!Array.isArray(navs)) return null;
-  let high: number | null = null, cur: number | null = null;
+  let high: number | null = null, cur: number | null = null, mdd = 0;
   for (const raw of navs) {
     const v = parseFloat(String(raw));
     if (!isFinite(v) || v <= 0) continue;
     if (high === null || v > high) high = v;
     cur = v;
+    const dd = v / high - 1;
+    if (dd < mdd) mdd = dd;
   }
   if (high === null || cur === null) return null;
-  return { histHigh: high, fromPeak: cur / high - 1 };
+  return { histHigh: high, fromPeak: cur / high - 1, mddHist: mdd };
 }
 // 持仓亏损率严格超过 40% 才亮（40.0% 整不算）；1e-9 容差挡浮点尾巴。档位取 DD_STEPS 同表。
 // ret ≤ −100 只可能是净值为 0/负这类取数缺失（基金净值不归零），不许当成「亏光」去喊巨额买入。
@@ -487,6 +489,43 @@ export function fundLumpMarkHtml(
     const after = (plan.afterCost === null || plan.afterCost === undefined) ? '' : '；投后成本价约 ' + plan.afterCost.toFixed(4);
     text = fact + ' → 建议一次性投入 ' + money(plan.amount) + '（占持仓成本 ' + Number(plan.basePct.toFixed(1)) + '%' + pos + after + '）';
   }
+  return '<div style="margin:6px 0;padding:8px 10px;background:#EAF3EE;border-left:3px solid ' + C_UP
+    + ';border-radius:6px;color:' + C_UP + ';font-weight:700;">' + text + '</div>';
+}
+// 深水腿（2026-11-08 用户裁决）：当前回撤 ÷ 历史最深回撤 ≥ 90% 触发；只给定性建议，无金额。
+// mdd=0/缺失、净值高于历史峰一律不亮；1e-9 容差挡浮点尾巴。与页面 dipAlertFundDeep 同判据。
+export function fundDeepAlert(
+  hp: { fromPeak: number; mddHist: number } | null,
+  shout = true,
+): { kind: 'deep'; completion: number; mddHist: number; fromPeak: number; shout: boolean } | null {
+  if (!hp) return null;
+  const mdd = hp.mddHist, fp = hp.fromPeak;
+  if (!Number.isFinite(mdd) || !(mdd < 0)) return null;
+  if (!Number.isFinite(fp) || fp > 0) return null;
+  const completion = fp / mdd * 100;
+  if (!(completion >= 90 - 1e-9)) return null;
+  return { kind: 'deep', completion, mddHist: mdd, fromPeak: fp, shout };
+}
+// 深水事实行：与页面 fundDeepLine 去掉外层 div 后逐字相同。
+// 取不到 mdd 与「从来没有回撤」分开说，不拿 0 冒充缺失。
+export function fundDeepText(f: { mddHist?: unknown; fromPeakHist?: unknown }): string {
+  const mdd = parseFloat(String(f && f.mddHist));
+  const fp = parseFloat(String(f && f.fromPeakHist));
+  if (!isFinite(mdd) || mdd > 0) return '历史最深回撤：历史净值未取到';
+  if (mdd === 0) return '历史最深回撤 0.0%（无回撤记录）';
+  const comp = (isFinite(fp) && fp <= 0) ? (Math.round(fp / mdd * 100) + '%') : '--';
+  return '历史最深回撤 −' + (-mdd * 100).toFixed(1) + '%（当前完成 ' + comp + '）';
+}
+// 深水标记：与页面 buyBannerHtml 的 deep 分支同句（去掉「🟢 抄底信号 · 」前缀后逐字相同）。
+// shout=false（主信号暂停）只陈述事实，不给任何指令。
+export function fundDeepMarkHtml(
+  d: { completion: number; mddHist: number; fromPeak: number } | null,
+  shout: boolean,
+): string {
+  if (!d) return '';
+  const fact = '历史回撤完成度 ' + Math.round(d.completion) + '%：历史最深 −' + (-d.mddHist * 100).toFixed(1)
+    + '%，当前 −' + (-d.fromPeak * 100).toFixed(1) + '%';
+  const text = shout ? fact + ' → 已进入历史深水区，可分批加仓' : fact;
   return '<div style="margin:6px 0;padding:8px 10px;background:#EAF3EE;border-left:3px solid ' + C_UP
     + ';border-radius:6px;color:' + C_UP + ';font-weight:700;">' + text + '</div>';
 }
@@ -1318,11 +1357,14 @@ export async function handle(
           const ladder = dipLadder(f, close, null);
           // 一次性腿（2026-11-07 修正口径）：持仓亏损率严格 >40% 才亮，与安全垫腿、阶梯腿三腿并列
           const lump = fundLumpAlert(ret);
+          // 深水腿（2026-11-08）：用今夜全历史现算的峰与 mdd，不依赖页面是否落过盘
+          const deep = fundDeepAlert(hp);
           if (f.manualPause && sig.label === '暂停中') {
             const reasons: string[] = [];
             if (dip) reasons.push('收益 ' + dip.ret.toFixed(1) + '% 已跌破 ' + String(dip.target) + '% 成本安全垫');
             if (lump) reasons.push('持仓亏损 ' + lump.loss.toFixed(1) + '%（已达 +' + lump.add + '% 一次性档）');
             if (ladder) reasons.push('较52周高点回撤 ' + ladder.dd.toFixed(1) + '%（已达 +' + ladder.add + '% 加仓档）');
+            if (deep) reasons.push('历史回撤完成度 ' + Math.round(deep.completion) + '%（历史最深 −' + (-deep.mddHist * 100).toFixed(1) + '%，当前 −' + (-deep.fromPeak * 100).toFixed(1) + '%）');
             if (reasons.length) (fundResume[userId] = fundResume[userId] || []).push({ code, name: fname, reasons });
           }
           const tiers = (f.profitTiers && f.profitTiers.length) ? f.profitTiers : DEFAULT_TIERS;
@@ -1347,7 +1389,7 @@ export async function handle(
             dev, ma60, ma120, streak, label: sig.label, multiplier: sig.multiplier,
             amount: Math.round(amount), benchmarkName: bl ? BENCH[bkey].name : '', benchmarkLevel: bl ? bl.label : '',
             ret, nextTier, resumeReady: !!sig.resumeReady, theme: f.theme || '',
-            sell, ladder, lump, lumpPlan, histHigh: hp ? hp.histHigh : null, fromPeakHist: hp ? hp.fromPeak : null
+            sell, ladder, lump, lumpPlan, histHigh: hp ? hp.histHigh : null, fromPeakHist: hp ? hp.fromPeak : null, mddHist: hp ? hp.mddHist : null, deep
           });
 
           await post('fund_nav_history', 'user_id,code,nav_date', [{ user_id: userId, code, nav_date: navDate, nav: close, ma60, ma120, dev_pct: dev, above_ma60: above }]);
@@ -1595,7 +1637,7 @@ export async function handle(
           else buyNextStr = '｜均线腿回归中性：净值回落至 ' + (maAvg * 1.03).toFixed(4) + '（+3% 内）';
         }
         const statusStr = '净值 ' + r.nav + '（' + r.navDate + '）｜较均线 ' + (r.dev === null ? '--' : fmtSigned(r.dev)) + '（' + zone + '）' + (r.streak !== null ? '｜连续 ' + r.streak + ' 日站上60日线' : '') + benchmarkStr + buyNextStr
-          + '｜' + fundHistPeakText(r);
+          + '｜' + fundHistPeakText(r) + '｜' + fundDeepText(r);
         // 动作文案按档位标签走：基金档位由均线偏离单腿决定（2026-10-28 起估值分位已下线）
         let actionStr: string;
         if (r.label.includes('QDII溢价')) actionStr = '溢价率过高，暂停买入，等待溢价回落';
@@ -1616,6 +1658,7 @@ export async function handle(
           + sellMarkHtml(r.sell)
           + buyMarkHtml(r.multiplier > 0 ? r.ladder : null)
           + fundLumpMarkHtml(r.lump, r.lumpPlan, r.multiplier > 0)
+          + fundDeepMarkHtml(r.deep, r.multiplier > 0)
           + '<div style="margin:4px 0;">📊 信号：<b style="color:#A87C2E;">' + r.label + '</b>' + (r.multiplier > 0 && r.amount > 0 ? ' · 本期建议买入 <b>¥' + r.amount + '</b>/期' : ' · 暂停买入') + '</div>'
           + '<div style="color:#707C8C;font-size:13px;">📈 ' + statusStr + '</div>'
           + '<div style="color:#707C8C;font-size:13px;">💰 ' + profitStr + '</div>'

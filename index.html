@@ -3172,18 +3172,21 @@ function dipAlertFundLadder(f, sig){
 }
 // 历史峰口径（2026-11-02 用户裁定）：现值距成立以来最高净值，不是「曾经最深」。
 // mdd 只增不减，深跌后已修复的老基金会永久亮灯喊买——所以这里只报「现在还在坑里多深」。
-// 非正/脏值全滤掉；滤空了返回 null，不拿 0 冒充「没回撤」。
+// 2026-11-08 增 mddHist：同一遍扫描顺带取全历史峰谷最深跌幅，供「历史回撤完成度」使用。
+// 非正/脏值全滤掉；滤空了返回 null，不拿 0 冒充「没回撤」。单调上涨的序列 mddHist=0（没有回撤记录）。
 function fundHistPeak(navs){
   if(!Array.isArray(navs)) return null;
-  let high = null, cur = null;
+  let high = null, cur = null, mdd = 0;
   for(const raw of navs){
     const v = parseFloat(raw);
     if(!isFinite(v) || v<=0) continue;
     if(high===null || v>high) high = v;
     cur = v;
+    const dd = v/high - 1;
+    if(dd < mdd) mdd = dd;
   }
   if(high===null || cur===null) return null;
-  return {histHigh: high, fromPeak: cur/high - 1};
+  return {histHigh: high, fromPeak: cur/high - 1, mddHist: mdd};
 }
 // 一次性买入金额（2026-11-07 修正口径）：基数是「相同持仓数量 × 成本单价」= 当前持仓总成本，
 // 语义是投入与原持仓同一量级的本金去把成本价拉低，不是每期定投基数的倍数。
@@ -3234,9 +3237,30 @@ function fundHistPeakLine(f){
   const asOf = /^\d{4}-\d{2}-\d{2}$/.test(d) ? '，截至 '+d : '';
   return '<div class="ref-row">距历史最高净值 −'+(-fp*100).toFixed(1)+'%（历史最高 '+high.toFixed(4)+asOf+'）</div>';
 }
-// 三腿组装（2026-11-07 修正口径）：三条腿各管一件事，互不接管——
-// 成本安全垫腿＝恢复定投的边界，一次性腿＝拉低成本的投入，52 周阶梯腿＝市场口径加仓档。
-// 旧「一次性腿接管阶梯腿」的裁定随口径改成持仓亏损率而失效：两者量的已不是同一件事。
+// 历史最深回撤事实行（2026-11-08）：mdd 只增不减，单独当买点会让已修复的老基金永久亮灯，
+// 所以配「当前回撤 ÷ 历史最深回撤 = 完成度」，只在接近历史底部时给建议。
+// 取不到 mdd 与「从来没有回撤」是两件事，文案必须分开说，不拿 0 冒充缺失。
+function fundDeepLine(f){
+  const mdd = parseFloat(f && f.mddHist);
+  const fp = parseFloat(f && f.fromPeakHist);
+  if(!isFinite(mdd) || mdd > 0) return '<div class="ref-row">历史最深回撤：历史净值未取到</div>';
+  if(mdd === 0) return '<div class="ref-row">历史最深回撤 0.0%（无回撤记录）</div>';
+  const comp = (isFinite(fp) && fp <= 0) ? (Math.round(fp/mdd*100)+'%') : '--';
+  return '<div class="ref-row">历史最深回撤 −'+(-mdd*100).toFixed(1)+'%（当前完成 '+comp+'）</div>';
+}
+// 深水腿（2026-11-08 用户裁决）：当前回撤已达到历史最深回撤的 90%。
+// 只给定性建议、不给金额（用户裁决）；mdd=0/缺失、净值高于历史峰一律不亮。
+// 1e-9 容差同上：完成度恰好 90.0% 时浮点尾巴不能让它漏亮。
+function dipAlertFundDeep(f, sig){
+  const mdd = parseFloat(f && f.mddHist);
+  const fp = parseFloat(f && f.fromPeakHist);
+  if(!isFinite(mdd) || !(mdd < 0)) return null;
+  if(!isFinite(fp) || fp > 0) return null;
+  const completion = fp / mdd * 100;
+  if(!(completion >= 90 - 1e-9)) return null;
+  return {kind:'deep', completion, mddHist: mdd, fromPeak: fp, shout: !(sig && sig.level==='pause')};
+}
+// 四腿组装（2026-11-08）：成本安全垫 / 持仓亏损一次性 / 52 周阶梯 / 历史深水，各管一件事。
 // cost 腿由调用方传入——dipAlertFund 在纯块之外，块内不可调用它（门面逐字抽取只认标记块）。
 function fundDipList(cost, f, sig, coef){
   const list = [];
@@ -3245,6 +3269,8 @@ function fundDipList(cost, f, sig, coef){
   if(lump) list.push(lump);
   const ladder = dipAlertFundLadder(f, sig);
   if(ladder) list.push(ladder);
+  const deep = dipAlertFundDeep(f, sig);
+  if(deep) list.push(deep);
   return list;
 }
 // 股票抄底：同一套回撤阶梯——52 周回撤 ≥30% 且未被高估仲裁否决才亮；阈值与阶梯表联动
@@ -3413,10 +3439,14 @@ function buyBannerHtml(list){
         parts.push(`${fact} → 建议一次性投入 ${fmtMoney(d.plan.amount)}（占持仓成本 ${Number(d.plan.basePct.toFixed(1))}%${pos}${after}）`);
       }
     }
+    else if(d.kind==='deep'){
+      const fact = `历史回撤完成度 ${Math.round(d.completion)}%：历史最深 −${(-d.mddHist*100).toFixed(1)}%，当前 −${(-d.fromPeak*100).toFixed(1)}%`;
+      parts.push(d.shout ? `${fact} → 已进入历史深水区，可分批加仓` : fact);
+    }
     else parts.push(`市场口径：较52周高点回撤 ${d.dd.toFixed(1)}% 已达 +${d.add}% 加仓档`);
   }
-  // 一次性腿的指令已写在句内，不再追一条「加仓/多投」重复喊；其余腿的尾巴照旧
-  const anyShout = list.some(d=>d.kind!=='lump' && d.shout);
+  // 一次性腿与深水腿的指令已写在句内，不再追一条「加仓/多投」重复喊；其余腿的尾巴照旧
+  const anyShout = list.some(d=>d.kind!=='lump' && d.kind!=='deep' && d.shout);
   return `<div class="trade-banner buy">🟢 抄底信号 · ${parts.join('；')}${anyShout ? ' → 主信号非暂停，建议加仓/多投' : ''}</div>`;
 }
 // 基金止盈横幅：份额可小数赎回，保持百分比口径
@@ -3725,6 +3755,7 @@ function renderFundList(){
       ${sig.multiplier!==undefined ? '<span class="signal-amount" style="margin-left:8px;">建议金额 '+fmtMoney((f.baseAmount||0)*sig.multiplier*coef)+'/期</span>' : ''}
       <div class="ref-row" style="margin-top:8px;">${escapeHtml(sig.reasons.join('；'))}</div>
       ${fundHistPeakLine(f)}
+      ${fundDeepLine(f)}
       ${dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0, false) ? '<div style="margin-top:10px;">' + dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0, false) + '</div>' : ''}
       ${dips.length ? '<div style="margin-top:10px;">' + buyBannerHtml(dips) + '</div>' : ''}
     </div>`;
@@ -4339,6 +4370,7 @@ function autoFetchFundData(id){
       if(hp && fundObj){
         fundObj.histHigh = hp.histHigh;
         fundObj.fromPeakHist = hp.fromPeak;
+        fundObj.mddHist = hp.mddHist;
       }
 
       // 按完整历史逐日回算「连续站上60日线」天数，保存时自动同步
@@ -4388,7 +4420,7 @@ function computeNavMetrics(navs){
   const high52w = recent.length ? recent.reduce((a,b)=>Math.max(a,b)) : null;
   const hp = fundHistPeak(navs);
   return { current: navs[len-1], ma60, ma120, above, below, high52w,
-    histHigh: hp ? hp.histHigh : null, fromPeakHist: hp ? hp.fromPeak : null };
+    histHigh: hp ? hp.histHigh : null, fromPeakHist: hp ? hp.fromPeak : null, mddHist: hp ? hp.mddHist : null };
 }
 function fmtDateCN(d){
   return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
@@ -4438,6 +4470,7 @@ async function autoRefreshFunds(){
       f.histHigh = Math.round(m.histHigh*10000)/10000;
       f.fromPeakHist = Math.round(m.fromPeakHist*10000)/10000;
     }
+    if(m.mddHist!==null) f.mddHist = Math.round(m.mddHist*10000)/10000;
     if(f.shares>0) f.marketValue = Math.round(f.shares * f.currentNav * 100)/100;
     updated++;
   }

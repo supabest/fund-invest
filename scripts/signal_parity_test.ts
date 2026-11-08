@@ -20,6 +20,7 @@ import {
   dipAlertStock as pageDipAlertStock, dipAlertFundLadder as pageDipFundLadder,
   fundHistPeak as pageFundHistPeak, dipAlertFundLump as pageDipFundLump,
   fundLumpPlan as pageFundLumpPlan, fundHistPeakLine as pageFundHistLine, fundDipList as pageFundDipList,
+  dipAlertFundDeep as pageDipFundDeep, fundDeepLine as pageFundDeepLine,
   dipAlertStockCost as pageDipStockCost,
   stockPadSet as pageStockPadSet, stockPadInfo as pageStockPadInfo, stockDipGate as pageStockDipGate,
   stockBuyRef as pageStockBuyRef,
@@ -1326,8 +1327,8 @@ Deno.test("接线守卫：历史峰从全历史算并只作事实行，卡片三
   const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
   // 全历史已在手（Data_netWorthTrend），事实行零新增请求；判据只许有 fundHistPeak 一处实现体
   assert(/const hp = fundHistPeak\(navs\);/.test(html), "computeNavMetrics 必须复用 fundHistPeak，不许就地再算一遍峰");
-  assert(/histHigh: hp \? hp\.histHigh : null, fromPeakHist: hp \? hp\.fromPeak : null/.test(html),
-    "取不到历史峰要给 null，不拿 0 冒充「没回撤」");
+  assert(/histHigh: hp \? hp\.histHigh : null, fromPeakHist: hp \? hp\.fromPeak : null, mddHist: hp \? hp\.mddHist : null/.test(html),
+    "取不到历史峰要给 null，不拿 0 冒充「没回撤」；mdd 与峰同源带出");
   assert(/f\.histHigh = Math\.round\(m\.histHigh\*10000\)\/10000;/.test(html), "自动刷新要把历史最高净值落到基金上（四位小数）");
   assert(/f\.fromPeakHist = Math\.round\(m\.fromPeakHist\*10000\)\/10000;/.test(html), "距峰比例同样落盘，否则事实行永远读不到");
   // 手动「获取净值」也走同一个峰函数：否则新加的基金要等下次开页自动刷新才看得到这一行
@@ -1461,8 +1462,8 @@ Deno.test("接线守卫：邮件基金腿用今夜收益率判一次性腿，三
     "一次性腿吃的是持仓收益率（与成本安全垫同一读数），不是历史峰");
   assert(/const lumpPlan = lump \? fundLumpPlan\(f, lump\.add, coef, close\) : null;/.test(server),
     "金额基数取自持仓（份额×成本单价），投后成本价用今夜收盘价");
-  assert(/sell, ladder, lump, lumpPlan, histHigh: hp \? hp\.histHigh : null, fromPeakHist: hp \? hp\.fromPeak : null/.test(server),
-    "报告行要把峰与一次性腿一起带下去");
+  assert(/sell, ladder, lump, lumpPlan, histHigh: hp \? hp\.histHigh : null, fromPeakHist: hp \? hp\.fromPeak : null, mddHist: hp \? hp\.mddHist : null, deep/.test(server),
+    "报告行要把峰、mdd 与各腿一起带下去");
   // 三腿并列：阶梯标记照旧发，不再被一次性腿吞掉
   assert(/buyMarkHtml\(r\.multiplier > 0 \? r\.ladder : null\)/.test(server),
     "阶梯标记必须照旧发（一次性腿不再接管）");
@@ -1480,4 +1481,121 @@ Deno.test("接线守卫：邮件基金腿用今夜收益率判一次性腿，三
   const lumpOut = D.fundLumpMarkHtml({ loss: 41.5, add: 40 }, { amount: 2920, basePct: 40, posPct: 68.3, afterCost: 2.5385 }, true);
   assertEquals(/历史最大回撤/.test(lumpOut), false);
   assertEquals(/距历史最高净值/.test(lumpOut), false, "一次性腿报的是持仓亏损率，混进距峰口径就是两件事串台");
+});
+
+// ==== 基金「历史最深回撤」深水腿（2026-11-08 用户裁决）：完成度 ≥90% 触发的第四条腿 ====
+
+Deno.test("历史最深回撤双端矩阵：fundHistPeak 同一串净值给出同一个 mdd", () => {
+  const series: unknown[] = [
+    [], [1.5], [1, 1.2, 1.1], [1, 2, 1.2], [1, 2, 0.5, 1.9], [0, -1, NaN],
+    [1, NaN, 2, null, 1.1], ["1.0", "2.0", "1.2"], [3, 2, 1, 0.5], [1, 2, 2.0001, 1.2],
+  ];
+  for (const navs of series) {
+    const p = pageFundHistPeak(navs);
+    const s = D.fundHistPeak(navs);
+    assertEquals(p === null, s === null, "空值口径 navs=" + JSON.stringify(navs));
+    const pm = p ? Number(p.mddHist.toFixed(12)) : null;
+    const sm = s ? Number(s.mddHist.toFixed(12)) : null;
+    assertEquals(pm, sm, "历史最深回撤 navs=" + JSON.stringify(navs));
+  }
+});
+
+Deno.test("深水腿双端矩阵：完成度 ≥90% 触发、边界与暂停逐格一致", () => {
+  const mdds = [-0.5, -0.2, -0.05];
+  const fps = [0, -0.01, -0.0449, -0.045, -0.09, -0.1, -0.18, -0.4495, -0.45, -0.55];
+  for (const mdd of mdds) {
+    for (const fp of fps) {
+      for (const paused of [false, true]) {
+        const p = pageDipFundDeep({ mddHist: mdd, fromPeakHist: fp }, { level: paused ? "pause" : "watch" });
+        const s = D.fundDeepAlert({ mddHist: mdd, fromPeak: fp }, !paused);
+        const key = "mdd=" + mdd + " fp=" + fp + " paused=" + paused;
+        assertEquals(p === null, s === null, "亮灯判定 " + key);
+        assertEquals(p?.shout ?? null, s?.shout ?? null, "暂停仲裁 " + key);
+        assertEquals(p ? Number(p.completion.toFixed(9)) : null, s ? Number(s.completion.toFixed(9)) : null,
+          "完成度 " + key);
+      }
+    }
+  }
+  // 90.0% 整必须亮（1e-9 容差挡浮点尾巴）；89.9% 不亮；净值跌破历史最深（>100%）仍亮
+  assert(pageDipFundDeep({ mddHist: -0.5, fromPeakHist: -0.45 }, null) !== null, "90.0% 要亮");
+  assertEquals(pageDipFundDeep({ mddHist: -0.5, fromPeakHist: -0.4495 }, null), null, "89.9% 不亮");
+  assert(pageDipFundDeep({ mddHist: -0.5, fromPeakHist: -0.55 }, null) !== null, "跌破历史最深仍亮");
+  // 缺数据 / 零回撤 / 正值 / 净值高于历史峰：都不亮，也不拿 0 冒充「完成 0%」参与判定
+  for (const f of [{}, { mddHist: 0, fromPeakHist: 0 }, { mddHist: 0.3, fromPeakHist: -0.1 }, { mddHist: -0.5 }, { mddHist: -0.5, fromPeakHist: 0.02 }]) {
+    assertEquals(pageDipFundDeep(f as Any, null), null, "脏数据不得亮：" + JSON.stringify(f));
+  }
+  // 用户裁决：只给定性建议，这条腿不带任何金额字段
+  const hit = pageDipFundDeep({ mddHist: -0.5, fromPeakHist: -0.48 }, null) as Any;
+  assertEquals(hit.amount, undefined);
+  assertEquals(hit.plan, undefined);
+  assertEquals(hit.add, undefined);
+});
+
+Deno.test("深水事实行双端同句：历史最深回撤与当前完成度", () => {
+  const cases = [
+    { mddHist: -0.548, fromPeakHist: -0.504, navDate: "2026-11-07" },
+    { mddHist: -0.185, fromPeakHist: -0.154 },
+    { mddHist: 0, fromPeakHist: 0 },
+    { mddHist: -0.548 },
+    {},
+    { mddHist: -0.548, fromPeakHist: 0.01 },
+  ];
+  for (const f of cases) {
+    const pageText = pageFundDeepLine(f).replace(/<[^>]*>/g, "");
+    assertEquals(D.fundDeepText(f), pageText, "深水事实行漂移 " + JSON.stringify(f));
+  }
+  const normal = pageFundDeepLine({ mddHist: -0.548, fromPeakHist: -0.504 }).replace(/<[^>]*>/g, "");
+  assert(normal.includes("历史最深回撤 −54.8%"), normal);
+  assert(normal.includes("当前完成 92%"), normal);
+});
+
+Deno.test("深水横幅双端同句：喊买/暂停两态，且不追加重复的加仓指令", () => {
+  const d = { kind: "deep", completion: 92.4, mddHist: -0.548, fromPeak: -0.5067, shout: true };
+  const pageShout = pageBuyBanner([d]).replace(/<[^>]*>/g, "").replace("🟢 抄底信号 · ", "");
+  const srvShout = D.fundDeepMarkHtml({ completion: 92.4, mddHist: -0.548, fromPeak: -0.5067 }, true).replace(/<[^>]*>/g, "");
+  assertEquals(srvShout, pageShout, "深水横幅文案漂移");
+  assert(pageShout.includes("历史回撤完成度 92%"), pageShout);
+  assert(pageShout.includes("历史最深 −54.8%"), pageShout);
+  assert(pageShout.includes("当前 −50.7%"), pageShout);
+  assert(pageShout.includes("可分批加仓"), pageShout);
+  assertEquals(pageShout.includes("建议加仓/多投"), false, "指令已在句内，不得重复喊");
+
+  const paused = { ...d, shout: false };
+  const pagePaused = pageBuyBanner([paused]).replace(/<[^>]*>/g, "").replace("🟢 抄底信号 · ", "");
+  const srvPaused = D.fundDeepMarkHtml({ completion: 92.4, mddHist: -0.548, fromPeak: -0.5067 }, false).replace(/<[^>]*>/g, "");
+  assertEquals(srvPaused, pagePaused, "暂停态文案漂移");
+  assertEquals(/可分批|建议|加仓/.test(pagePaused), false, "暂停时只报事实：" + pagePaused);
+});
+
+Deno.test("接线守卫：深水腿是第四条腿，页面与邮件同源接线", async () => {
+  const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
+  const ladder = html.slice(html.indexOf("// ==== LADDER_PURE_BEGIN ===="), html.indexOf("// ==== LADDER_PURE_END ===="));
+  for (const fn of ["fundDeepLine", "dipAlertFundDeep"]) {
+    assert(ladder.includes("function " + fn + "("), fn + " 必须在 LADDER_PURE 块内才能被双端矩阵钉住");
+  }
+  // 装配层：四腿并列，deep 是第四条；顺序 cost → lump → ladder → deep
+  const dipListFn = ladder.slice(ladder.indexOf("function fundDipList("), ladder.indexOf("function dipAlertStock("));
+  assert(/const deep = dipAlertFundDeep\(f, sig\);/.test(dipListFn), "fundDipList 要装配深水腿");
+  const order = ["dipAlertFundLump", "dipAlertFundLadder", "dipAlertFundDeep"].map(n => dipListFn.indexOf(n));
+  assertEquals(order.every((v, i) => i === 0 || v > order[i - 1]), true, "腿的顺序必须是 cost → lump → ladder → deep");
+  // 卡片：事实行常驻、与灯位无关
+  assert(/\$\{fundDeepLine\(f\)\}/.test(html), "「历史最深回撤」事实行要常驻买入参考栏");
+  // 全历史一处实现：两条取数路都要把 mdd 落到基金上
+  assert(/mddHist: hp \? hp\.mddHist : null/.test(html), "computeNavMetrics 要把 mdd 带出来");
+  assert(/f\.mddHist = Math\.round\(m\.mddHist\*10000\)\/10000;/.test(html), "自动刷新要把 mdd 落盘（四位小数）");
+  assert(/fundObj\.mddHist = hp\.mddHist;/.test(html), "手动获取后也要落到该基金上");
+  // 横幅：deep 自己有分支，且排除出 anyShout（指令已在句内）
+  const bannerFn = ladder.slice(ladder.indexOf("function buyBannerHtml("), ladder.indexOf("function sellBannerHtml("));
+  assert(/d\.kind==='deep'/.test(bannerFn), "横幅要处理深水腿");
+  assert(/list\.some\(d=>d\.kind!=='lump' && d\.kind!=='deep' && d\.shout\)/.test(bannerFn),
+    "深水腿与一次性腿一样不再追尾巴");
+
+  const server = await Deno.readTextFile(new URL("../supabase/functions/daily-update/index.ts", import.meta.url));
+  assert(/export function fundDeepAlert\(/.test(server), "邮件端要有同判据的深水腿");
+  assert(/export function fundDeepText\(/.test(server), "邮件端要有同句的事实行");
+  assert(/export function fundDeepMarkHtml\(/.test(server), "邮件端要有同句的标记");
+  assert(/const deep = fundDeepAlert\(hp\);/.test(server), "邮件用今夜全历史现算的峰与 mdd 判深水腿");
+  assert(/\+ '｜' \+ fundDeepText\(r\)/.test(server), "📈 行常驻深水事实");
+  assert(/fundDeepMarkHtml\(r\.deep, r\.multiplier > 0\)/.test(server), "深水标记与页面同一仲裁门");
+  assert(/if \(deep\) reasons\.push\('历史回撤完成度 '/.test(server), "暂停旗标里深水腿也只报事实");
 });

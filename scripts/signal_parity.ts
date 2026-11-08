@@ -50,6 +50,7 @@ const EXPORT_NAMES = [
   'baseSignal', 'evalFundSignal', 'fmtWan', 'fmtSigned', 'fmtMoney', 'fmtPct',
   'dipAlertStock', 'dipAlertFundLadder', 'dipAlertStockCost', 'stockPadSet', 'stockPadInfo', 'stockDipGate', 'stockBuyRef', 'buyBannerHtml', 'stockAddPlan', 'stockBuyBannerHtml', 'stockLotSizeOf', 'lotFromTxQuote', 'dipPadHintHtml',
   'fundHistPeak', 'dipAlertFundLump', 'fundLumpPlan', 'fundHistPeakLine', 'fundDipList',
+  'dipAlertFundDeep', 'fundDeepLine',
   'sellBannerHtml', 'stockSellPlan', 'stockSellBannerHtml',
   'profitNextTier', 'profitAlertFromRet',
   'supabaseBaseUrl',
@@ -123,8 +124,8 @@ export const dipAlertStock = F.dipAlertStock as (
 export const dipAlertFundLadder = F.dipAlertFundLadder as (
   f: { high52w?: unknown; currentNav?: unknown; valuationPercentile?: unknown }, sig?: { level?: string } | null,
 ) => { kind: string; dd: number; add: number; shout: boolean } | null;
-/** 历史峰口径（2026-11-02 裁定）：当前净值距成立以来最高净值。fromPeak ≤ 0，与「曾经最深」的 mdd 不是一回事。 */
-export type FundHistPeak = { histHigh: number; fromPeak: number };
+/** 历史峰口径（2026-11-02 裁定）：当前净值距成立以来最高净值。fromPeak ≤ 0；mddHist 是全历史峰谷最深跌幅（≤0）。 */
+export type FundHistPeak = { histHigh: number; fromPeak: number; mddHist: number };
 export const fundHistPeak = F.fundHistPeak as (navs: unknown) => FundHistPeak | null;
 /**
  * 一次性买入金额：基数 = 持仓份额 × 成本单价（= 当前持仓总成本）× 档位% × 大盘系数。
@@ -152,6 +153,16 @@ export const fundHistPeakLine = F.fundHistPeakLine as (
 export const fundDipList = F.fundDipList as (
   cost: unknown, f: Record<string, unknown>, sig?: { level?: string } | null, coef?: number | null,
 ) => Array<Record<string, unknown>>;
+/** 深水腿（2026-11-08 用户裁决）：当前回撤 ÷ 历史最深回撤 ≥ 90% 触发；只给定性建议，无金额。 */
+export type FundDeepDip = {
+  kind: string; completion: number; mddHist: number; fromPeak: number; shout: boolean;
+};
+export const dipAlertFundDeep = F.dipAlertFundDeep as (
+  f: { mddHist?: unknown; fromPeakHist?: unknown }, sig?: { level?: string } | null,
+) => FundDeepDip | null;
+export const fundDeepLine = F.fundDeepLine as (
+  f: { mddHist?: unknown; fromPeakHist?: unknown },
+) => string;
 /** 股票抄底·成本口径（安全垫）：dev 为均线偏离，≥+10%（邮件口径「明显高位」）时 shout=false。 */
 export type StockCostDip = { kind: string; ret: number; target: number; shout: boolean };
 export const dipAlertStockCost = F.dipAlertStockCost as (
