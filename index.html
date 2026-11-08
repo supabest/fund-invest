@@ -3128,10 +3128,9 @@ function evalFundSignal(f){
         resumeReady:true, resumeSignal:base
       };
     } else {
-      const ddText = (targetDD!==null && targetDD!==undefined && targetDD!=='') ? `，目标跌幅 ${-Math.abs(parseFloat(targetDD))}%（当前 ${ret!==null?ret.toFixed(1):'--'}%）` : '';
       return {
         level:'pause', label:'暂停中', multiplier:0,
-        reasons:['已连续 '+streak+'/'+need+' 个交易日站上60日均线，尚未满足恢复条件'+ddText],
+        reasons:['已连续 '+streak+'/'+need+' 个交易日站上60日均线，尚未满足恢复条件'],
         paused:true
       };
     }

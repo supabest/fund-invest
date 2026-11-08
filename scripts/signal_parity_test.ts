@@ -1657,3 +1657,19 @@ Deno.test("接线守卫：安全垫事实行常驻买入参考栏，页面与邮
   assert(/const padStr = fundPadText\(r\.pad, r\.ret\);/.test(server), "邮件用同口径收益率拼安全垫事实");
   assert(/\+ \(padStr \? '｜' \+ padStr : ''\)/.test(server), "📈 行常驻安全垫事实，未设时不拖一个空尾巴");
 });
+
+Deno.test("暂停理由不再重复目标跌幅：数字只留在常驻安全垫行", () => {
+  const f = {
+    theme: '测试主题', manualPause: true, aboveMaStreak: 3,
+    resumeRule: { requireDays: 5, mode: 'ma_and_drawdown', targetDrawdown: '20' },
+    costBasis: 1, currentNav: 0.904, shares: 100, marketValue: 90.4, baseAmount: 500,
+  };
+  const sig = evalFundSignal(f as Any);
+  assertEquals(sig.level, 'pause', "3/5 日且未达跌幅 → 仍在暂停中");
+  const joined = (sig.reasons || []).join('；');
+  assert(joined.includes('已连续 3/5 个交易日站上60日均线，尚未满足恢复条件'), joined);
+  assertEquals(joined.includes('目标跌幅'), false, "安全垫数字由常驻行统一报，暂停理由不再重复：" + joined);
+  // 删的是重复，不是信息：常驻行仍要把两个数报全
+  const line = pageFundPadLine(f).replace(/<[^>]*>/g, "");
+  assertEquals(line, "目标跌幅安全垫 20%｜当前 −9.6%，还需再跌 10.4 个百分点才触发");
+});
