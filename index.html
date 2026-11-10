@@ -3741,8 +3741,81 @@ function renderThemeTable(){
   });
 }
 
+// ==== FORM_PURE_BEGIN ====
+// 编辑区现场保全（2026-11-08 用户裁决 A）：列表重绘是 list.innerHTML='' 全量重建，
+// 展开态与未保存输入只活在 DOM 里；大盘取数/autoRefreshAll/趋势角标/云同步/focus 一回来
+// 就把打字现场冲掉（手机端表现为面板自己折叠）。这里只放纯判据，DOM 读写在块外。
+function formDirty(current, baseline){
+  const out = {};
+  const cur = current || {}, base = baseline || {};
+  Object.keys(cur).forEach(k=>{ if(!(k in base) || base[k] !== cur[k]) out[k] = cur[k]; });
+  return out;
+}
+function formStillOpen(open, ids){
+  const have = new Set((ids||[]).map(String));
+  return (open||[]).filter(x=>have.has(String(x.id)));
+}
+// ==== FORM_PURE_END ====
+
+// 基线 = 建表那一刻各字段的值；dirty = 现在与基线的差。回放只写 dirty：未改的字段重绘后仍吃
+// 最新行情；回放后不重记基线，用户打了一半的字在保存前一直算 dirty，不会被下一次重绘冲掉。
+const formBaseline = {};
+// 基金表单字段挂 data-k、股票表单挂 data-sk，两种都要读/写，否则股票侧只保展开不保输入
+const FORM_FIELD_SEL = '[data-k],[data-sk]';
+const formKeyOf = el => el.getAttribute('data-k') || el.getAttribute('data-sk');
+function formValuesIn(body){
+  const out = {};
+  body.querySelectorAll(FORM_FIELD_SEL).forEach(el=>{
+    out[formKeyOf(el)] = el.type==='checkbox' ? (el.checked?'1':'0') : el.value;
+  });
+  return out;
+}
+function rememberFormBaseline(kind, id, body){ formBaseline[kind+':'+id] = formValuesIn(body); }
+function captureForms(list, kind){
+  const prefix = kind==='fund' ? 'body-' : 'sbody-';
+  const open = [];
+  const ae = document.activeElement;
+  list.querySelectorAll('.fund-body.open').forEach(body=>{
+    const id = body.id.slice(prefix.length);
+    const dirty = formDirty(formValuesIn(body), formBaseline[kind+':'+id]);
+    let focus = null;
+    if(ae && body.contains(ae) && ae.getAttribute && formKeyOf(ae)){
+      focus = { key: formKeyOf(ae), start: null, end: null };
+      try{ focus.start = ae.selectionStart; focus.end = ae.selectionEnd; }catch(e){}
+    }
+    open.push({ id, dirty, focus });
+  });
+  return { open, scrollY: window.scrollY };
+}
+function restoreForms(snap, kind, items, openFn){
+  if(!snap.open.length) return;
+  const prefix = kind==='fund' ? 'body-' : 'sbody-';
+  formStillOpen(snap.open, items.map(x=>x.id)).forEach(o=>{
+    openFn(o.id);
+    const body = document.getElementById(prefix+o.id);
+    if(!body) return;
+    Object.keys(o.dirty).forEach(k=>{
+      const el = body.querySelector('[data-k="'+k+'"],[data-sk="'+k+'"]');
+      if(!el) return;
+      if(el.type==='checkbox') el.checked = o.dirty[k]==='1';
+      else el.value = o.dirty[k];
+    });
+    if(o.focus){
+      const el = body.querySelector('[data-k="'+o.focus.key+'"],[data-sk="'+o.focus.key+'"]');
+      if(el){
+        try{ el.focus({preventScroll:true}); }catch(e){ el.focus(); }
+        if(o.focus.start!==null && typeof el.setSelectionRange==='function'){
+          try{ el.setSelectionRange(o.focus.start, o.focus.end); }catch(e){}
+        }
+      }
+    }
+  });
+  try{ window.scrollTo(0, snap.scrollY); }catch(e){}
+}
+
 function renderFundList(){
   const list = document.getElementById('fundList');
+  const snap = captureForms(list, 'fund');
   document.getElementById('fundCountHint').textContent = funds.length ? `共 ${funds.length} 只` : '';
   if(funds.length===0){
     list.innerHTML = '<div class="empty">还没有添加基金<br>点击下方「添加基金」开始记录你的定投信号</div>';
@@ -3803,6 +3876,7 @@ function renderFundList(){
     const tierBtn = card.querySelector('.tier-done-btn');
     if(tierBtn) tierBtn.addEventListener('click', async (ev)=>{ ev.stopPropagation(); await markProfitTaken(tierBtn.dataset.kind, tierBtn.dataset.id, Number(tierBtn.dataset.ret)); });
   });
+  restoreForms(snap, 'fund', funds, toggleFundBody);
 }
 
 // 股票页「板块轮动概览」条（2026-10-07）：直接复用基金页 loadSectorRotation 已加载的 sectorState（零新增网络请求）。
@@ -3829,6 +3903,7 @@ function sectorStockStripHtml(){
 
 function renderStockSection(){
   const list = document.getElementById('stockList');
+  const snap = captureForms(list, 'stock');
   document.getElementById('stockCountHint').textContent = (stocks.length ? '共 ' + stocks.length + ' 只 · ' : '') + '数据每日自动更新';
   const stockMv = stocks.reduce((s,x)=> s + stockMvOf(x), 0);
   const capTrack = document.getElementById('stockCapTrack');
@@ -3925,6 +4000,7 @@ function renderStockSection(){
       setTimeout(()=>{ const t = card.querySelector('.rp-report'); if(t) t.scrollIntoView({behavior:'smooth', block:'start'}); }, 60);
     });
   });
+  restoreForms(snap, 'stock', stocks, toggleStockBody);
 }
 
 function toggleStockBody(id){
@@ -3932,8 +4008,8 @@ function toggleStockBody(id){
   const chev = document.getElementById('schev-'+id);
   if(!body || !chev) return;
   const isOpen = body.classList.contains('open');
-  if(isOpen){ body.classList.remove('open'); chev.classList.remove('open'); body.innerHTML=''; }
-  else { body.classList.add('open'); chev.classList.add('open'); body.innerHTML = stockFormHtml(stocks.find(x=>x.id===id)); bindStockBody(id); }
+  if(isOpen){ body.classList.remove('open'); chev.classList.remove('open'); body.innerHTML=''; delete formBaseline['stock:'+id]; }
+  else { body.classList.add('open'); chev.classList.add('open'); body.innerHTML = stockFormHtml(stocks.find(x=>x.id===id)); bindStockBody(id); rememberFormBaseline('stock', id, body); }
 }
 
 function stockFormHtml(s){
@@ -4138,11 +4214,13 @@ function toggleFundBody(id){
     body.classList.remove('open');
     chev.classList.remove('open');
     body.innerHTML = '';
+    delete formBaseline['fund:'+id];
   } else {
     body.classList.add('open');
     chev.classList.add('open');
     body.innerHTML = fundBodyHtml(funds.find(x=>x.id===id));
     bindFundBody(id);
+    rememberFormBaseline('fund', id, body);
   }
 }
 
