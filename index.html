@@ -78,6 +78,37 @@
   .ret-neg{color:var(--brick);}
   .chevron{margin-left:10px; color:var(--muted); font-size:12px; transition:transform .2s ease;}
   .chevron.open{transform:rotate(90deg);}
+  /* 概览行（2026-11-12 用户裁决 A）：一行 = 名称(+代码)/持仓市值/涨跌幅/行尾信号点，整行进整页详情。
+     名称列 minmax(0,1fr) 可收缩 + 省略号：390px 下市值/涨跌幅/点优先占位，名称绝不撑破视口 */
+  .ov-list{background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; margin-bottom:12px;}
+  .ov-legend{display:flex; gap:14px; align-items:center; font-size:11px; color:var(--muted); margin:0 0 8px 2px;}
+  .ov-legend .ov-dot{width:8px; height:8px;}
+  .ov-row{display:grid; grid-template-columns:minmax(0,1fr) auto auto 12px; gap:12px; align-items:center; padding:12px 14px; border-bottom:1px solid var(--line); cursor:pointer; transition:background .15s ease;}
+  .ov-row:last-child{border-bottom:none;}
+  .ov-row:hover{background:var(--panel-2);}
+  .ov-row:focus-visible{outline:2px solid var(--gold); outline-offset:-2px;}
+  .ov-name{font-size:14px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0;}
+  .ov-code{font-size:11px; color:var(--muted); font-weight:400; margin-left:6px;}
+  .ov-mv{font-size:13px; white-space:nowrap; font-variant-numeric:tabular-nums;}
+  .ov-ret{font-size:13px; font-weight:600; white-space:nowrap; font-variant-numeric:tabular-nums; text-align:right; min-width:56px;}
+  .ov-dot{width:9px; height:9px; border-radius:50%; justify-self:center;}
+  .ov-dot.sell{background:var(--brick); box-shadow:0 0 7px rgba(191,68,60,.75);}
+  .ov-dot.buy{background:var(--jade); box-shadow:0 0 7px rgba(63,150,113,.75);}
+  .ov-dot.hold{background:var(--line-strong);}
+
+  /* 整页详情：概览退场、事实区在上 / 编辑表单在下。表单容器沿用 body-/sbody- 旧 id 与 .fund-body.open，
+     保存/删除/一键获取/autoRefresh「打开即跳过」守卫全部不改；列表重绘只刷事实区，打字现场结构性保全 */
+  body.detail-open .tabs-row{display:none;}
+  body.detail-open .panes{display:none;}
+  .detail-section{max-width:780px; margin:0 auto;}
+  .detail-back{display:inline-flex; align-items:center; gap:6px; background:transparent; border:1px solid var(--line-strong); color:var(--gold); font-size:13px; padding:7px 14px; border-radius:16px; cursor:pointer; font-family:var(--sans); margin-bottom:14px;}
+  .detail-back:hover{border-color:var(--gold); background:var(--gold-dim);}
+  .detail-head{cursor:default; padding:4px 0 14px 0; border-bottom:1px solid var(--line); margin-bottom:14px; flex-wrap:wrap; gap:8px;}
+  .detail-facts .ref-section{margin-left:0; margin-right:0;}
+  .detail-facts .trade-banner{margin-left:0; margin-right:0;}
+  .detail-facts .tier-done-btn{margin-left:0; margin-right:0;}
+  .detail-facts .signal-strip{padding-left:0; padding-right:0;}
+  .detail-form .fund-body{padding:16px 0 0 0;}
 
   /* 2026-11-01：.fund-card 是 overflow:hidden，这条胶囊条不换行时手机端右侧整颗胶囊被剪在视口外
      （390px 实测四颗需 456px、可用 388px，「价值 硬否决 ⛔」完全看不见）——照 .dual-strip 同款收口 */
@@ -326,6 +357,15 @@
     .fund-name{font-size:18px;}
     .fund-meta{font-size:13.5px;}
     .fund-return{font-size:18px;}
+    .ov-row{padding:14px 18px; gap:16px;}
+    .ov-name{font-size:16px;}
+    .ov-code{font-size:12px;}
+    .ov-mv{font-size:14px;}
+    .ov-ret{font-size:15px; min-width:64px;}
+    .ov-dot{width:10px; height:10px;}
+    .detail-back{font-size:14px;}
+    .detail-head{padding:4px 0 16px 0;}
+    .detail-form .fund-body{padding:20px 0 0 0;}
     .signal-strip{padding:0 20px 16px 20px;}
     .signal-pill{font-size:14px;}
     .signal-amount{font-size:14px;}
@@ -413,6 +453,7 @@
     .goal-groups{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:28px;}
     .panes{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:28px; align-items:start; max-width:1560px; margin:0 auto; padding:0 24px 40px;}
     .panes > #tab-funds > .section, .panes > #tab-stocks > .section{max-width:none; margin:0; padding-left:0; padding-right:0;}
+    .detail-section{max-width:860px;}
   }
 </style>
 </head>
@@ -545,6 +586,15 @@
   <div id="researchResultSlot"></div>
 </div>
 </div>
+</div>
+
+<div id="detailView" style="display:none;">
+  <div class="section detail-section">
+    <button type="button" class="detail-back" id="detailBackBtn">← 返回概览</button>
+    <div id="detailHead"></div>
+    <div class="detail-facts" id="detailFacts"></div>
+    <div class="detail-form" id="detailFormWrap"></div>
+  </div>
 </div>
 
 <div class="modal-backdrop" id="loginModalBackdrop">
@@ -721,6 +771,7 @@ async function loadAll(){
     const t = localStorage.getItem('dinvest_tab');
     if(t==='stocks'){ const b = document.querySelector('.tab-btn[data-tab="stocks"]'); if(b) b.click(); }
   }catch(e){}
+  applyHashRoute();   // 直开/刷新 #/fund/<id> 或 #/stock/<id> 时落在详情页
 }
 
 async function saveFunds(){
@@ -3741,92 +3792,137 @@ function renderThemeTable(){
   });
 }
 
-// ==== FORM_PURE_BEGIN ====
-// 编辑区现场保全（2026-11-08 用户裁决 A）：列表重绘是 list.innerHTML='' 全量重建，
-// 展开态与未保存输入只活在 DOM 里；大盘取数/autoRefreshAll/趋势角标/云同步/focus 一回来
-// 就把打字现场冲掉（手机端表现为面板自己折叠）。这里只放纯判据，DOM 读写在块外。
-function formDirty(current, baseline){
-  const out = {};
-  const cur = current || {}, base = baseline || {};
-  Object.keys(cur).forEach(k=>{ if(!(k in base) || base[k] !== cur[k]) out[k] = cur[k]; });
-  return out;
+// ==== DETAIL_PURE_BEGIN ====
+// 概览 + 整页详情（2026-11-12 用户裁决 A）：卡片展开篇幅过长 → 概览只留一行
+// （名称+代码 / 持仓市值 / 持仓涨跌幅 / 行尾信号点），整行进详情，左上角返回。
+// 信号点复用既有止盈/抄底判据（sell>buy>hold），不新增任何阈值；hash 路由让手机系统返回键
+// 与刷新都停在详情。详情表单是独立 DOM 区域，列表重绘永不触碰（结构性取代旧的回放保全）。
+// 本块只放可单测的判据，DOM 读写在块外。
+function signalDotState(hasSell, hasBuy){
+  if(hasSell) return 'sell';
+  if(hasBuy) return 'buy';
+  return 'hold';
 }
-function formStillOpen(open, ids){
-  const have = new Set((ids||[]).map(String));
-  return (open||[]).filter(x=>have.has(String(x.id)));
+function parseDetailHash(hash){
+  const m = /^#\/(fund|stock)\/([^/]+)$/.exec(String(hash==null ? '' : hash));
+  if(!m) return null;
+  try{ return { kind: m[1], id: decodeURIComponent(m[2]) }; }catch(e){ return null; } // 手改 URL 的坏百分号序列不炸
 }
-// ==== FORM_PURE_END ====
+function detailHash(kind, id){
+  if(kind!=='fund' && kind!=='stock') return '';
+  const s = String(id==null ? '' : id);
+  if(!s || s.includes('/')) return '';
+  return '#/'+kind+'/'+encodeURIComponent(s);
+}
+// ==== DETAIL_PURE_END ====
 
-// 基线 = 建表那一刻各字段的值；dirty = 现在与基线的差。回放只写 dirty：未改的字段重绘后仍吃
-// 最新行情；回放后不重记基线，用户打了一半的字在保存前一直算 dirty，不会被下一次重绘冲掉。
-const formBaseline = {};
-// 基金表单字段挂 data-k、股票表单挂 data-sk，两种都要读/写，否则股票侧只保展开不保输入
-const FORM_FIELD_SEL = '[data-k],[data-sk]';
-const formKeyOf = el => el.getAttribute('data-k') || el.getAttribute('data-sk');
-function formValuesIn(body){
-  const out = {};
-  body.querySelectorAll(FORM_FIELD_SEL).forEach(el=>{
-    out[formKeyOf(el)] = el.type==='checkbox' ? (el.checked?'1':'0') : el.value;
-  });
-  return out;
-}
-function rememberFormBaseline(kind, id, body){ formBaseline[kind+':'+id] = formValuesIn(body); }
-function captureForms(list, kind){
-  const prefix = kind==='fund' ? 'body-' : 'sbody-';
-  const open = [];
-  const ae = document.activeElement;
-  list.querySelectorAll('.fund-body.open').forEach(body=>{
-    const id = body.id.slice(prefix.length);
-    const dirty = formDirty(formValuesIn(body), formBaseline[kind+':'+id]);
-    let focus = null;
-    if(ae && body.contains(ae) && ae.getAttribute && formKeyOf(ae)){
-      focus = { key: formKeyOf(ae), start: null, end: null };
-      try{ focus.start = ae.selectionStart; focus.end = ae.selectionEnd; }catch(e){}
-    }
-    open.push({ id, dirty, focus });
-  });
-  return { open, scrollY: window.scrollY };
-}
-function restoreForms(snap, kind, items, openFn){
-  if(!snap.open.length) return;
-  const prefix = kind==='fund' ? 'body-' : 'sbody-';
-  formStillOpen(snap.open, items.map(x=>x.id)).forEach(o=>{
-    openFn(o.id);
-    const body = document.getElementById(prefix+o.id);
-    if(!body) return;
-    Object.keys(o.dirty).forEach(k=>{
-      const el = body.querySelector('[data-k="'+k+'"],[data-sk="'+k+'"]');
-      if(!el) return;
-      if(el.type==='checkbox') el.checked = o.dirty[k]==='1';
-      else el.value = o.dirty[k];
-    });
-    if(o.focus){
-      const el = body.querySelector('[data-k="'+o.focus.key+'"],[data-sk="'+o.focus.key+'"]');
-      if(el){
-        try{ el.focus({preventScroll:true}); }catch(e){ el.focus(); }
-        if(o.focus.start!==null && typeof el.setSelectionRange==='function'){
-          try{ el.setSelectionRange(o.focus.start, o.focus.end); }catch(e){}
-        }
-      }
-    }
-  });
-  try{ window.scrollTo(0, snap.scrollY); }catch(e){}
+let detailState = null;      // {kind:'fund'|'stock', id:string} | null
+let detailViaPush = false;   // 本次详情是否由页内点击推入（返回键 history.back；直刷进来则清 hash，不跳出站外）
+
+function overviewRowHtml(kind, item, mv, ret, dot){
+  const name = escapeHtml(item.name || (kind==='fund' ? '未命名基金' : '未命名股票'));
+  const code = String((kind==='fund' ? item.fundCode : item.code)||'').trim();
+  const retCls = (ret!==null && ret>=0) ? 'ret-pos' : 'ret-neg';
+  const dotTitle = dot==='sell' ? '止盈提醒' : dot==='buy' ? '抄底提醒' : '暂无买卖提醒';
+  return `<div class="ov-row" data-kind="${kind}" data-id="${escapeHtml(String(item.id))}" role="button" tabindex="0" title="查看详情">
+    <div class="ov-name">${name}${code?'<span class="ov-code">'+escapeHtml(code)+'</span>':''}</div>
+    <div class="ov-mv">${fmtMoney(mv)}</div>
+    <div class="ov-ret ${retCls}">${fmtPct(ret,1)}</div>
+    <span class="ov-dot ${dot}" title="${dotTitle}" aria-label="${dotTitle}"></span>
+  </div>`;
 }
 
-function renderFundList(){
-  const list = document.getElementById('fundList');
-  const snap = captureForms(list, 'fund');
-  document.getElementById('fundCountHint').textContent = funds.length ? `共 ${funds.length} 只` : '';
-  if(funds.length===0){
-    list.innerHTML = '<div class="empty">还没有添加基金<br>点击下方「添加基金」开始记录你的定投信号</div>';
-    return;
-  }
-  list.innerHTML = '';
-  funds.forEach(f=>{
+function fundDetailHeadHtml(f, ret, alert, dips){
+  return `<div class="fund-head detail-head">
+    <div class="fund-head-left">
+      <div class="fund-name">${escapeHtml(f.name || '未命名基金')}</div>
+      <div class="fund-meta">${escapeHtml(f.theme||'未分类')}${f.isQDII?' · QDII':''} · 市值 ${fmtMoney(f.marketValue||0)}</div>
+    </div>
+    <div class="fund-return ${ret>=0?'ret-pos':'ret-neg'}">${fmtPct(ret,1)}</div>
+    ${alert?'<span class="trade-badge sell">🔴 止盈</span>':''}${dips.length?'<span class="trade-badge buy">🟢 抄底</span>':''}
+  </div>`;
+}
+
+function stockDetailHeadHtml(s, ret, sAlert, sDipGate){
+  return `<div class="fund-head detail-head">
+    <div class="fund-head-left">
+      <div class="fund-name">${escapeHtml(s.name || '未命名股票')}</div>
+      <div class="fund-meta">${exchangeLabel(s.code)} · ${s.shares||0} 股 · 市值 ${fmtMoney(stockMvOf(s))}${s.priceDate?' · '+s.priceDate:''}</div>
+    </div>
+    <div class="fund-return ${ret!==null&&ret>=0?'ret-pos':'ret-neg'}">${fmtPct(ret,1)}</div>
+    ${sAlert?'<span class="trade-badge sell">🔴 止盈</span>':''}${sDipGate.light?'<span class="trade-badge buy">🟢 抄底</span>':''}
+  </div>`;
+}
+
+function fundDetailFactsHtml(f, ctx){
+  const {sig, ret, alert, nextTier, coef, dips} = ctx;
+  const fundProfitRef = profitRefHtml(alert, nextTier, ret, null, f);
+  const fundBuyRef = `<div class="ref-section"><div class="ref-title">买入参考</div>
+    <span class="signal-pill ${pillClass(sig.level)}">${sig.label}</span>
+    ${sig.multiplier!==undefined ? '<span class="signal-amount" style="margin-left:8px;">建议金额 '+fmtMoney((f.baseAmount||0)*sig.multiplier*coef)+'/期</span>' : ''}
+    <div class="ref-row" style="margin-top:8px;">${escapeHtml(sig.reasons.join('；'))}</div>
+    ${fundHistPeakLine(f)}
+    ${fundDeepLine(f)}
+    ${fundPadLine(f)}
+    ${dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0, false) ? '<div style="margin-top:10px;">' + dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0, false) + '</div>' : ''}
+    ${dips.length ? '<div style="margin-top:10px;">' + buyBannerHtml(dips) + '</div>' : ''}
+  </div>`;
+  return fundProfitRef + fundBuyRef + (alert ? sellBannerHtml(alert) + tierDoneBtnHtml('fund', f.id, alert.tier.ret) : '');
+}
+
+function stockDetailFactsHtml(s, ctx){
+  const {sAlert, nextTier, ret, sSellPlan, sRef, pillCls, dev, sDipGate, sPlan, dCostStock, sDip, vRow} = ctx;
+  const dualHtml = dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0);
+  const dipPadHtml = sDipGate.needPad ? dipPadHintHtml() : '';
+  const buyBanner = sDipGate.light ? stockBuyBannerHtml(sDip, sPlan, dCostStock) : '';
+  const sellBanner = sAlert ? stockSellBannerHtml(sAlert, sSellPlan) + tierDoneBtnHtml('stock', s.id, sAlert.tier.ret) : '';
+  const profitRef = profitRefHtml(sAlert, nextTier, ret, sSellPlan, s);
+  const buyRef = buyRefHtml(sRef, pillCls, s, dev, sDipGate, sPlan, dCostStock, dualHtml, sDip, dipPadHtml, buyBanner);
+  const valueRef = valueAssessmentHtml(vRow, valueIndRef ? valueIndRef.byL2 : null, !!valueState);
+  // 评分明细 / 价值门禁 / 换仓参考 / 研究报告：只读事实，与三栏参考同区刷新；编辑表单区只留可编辑字段
+  const valueRows = valueState ? [...valueState.rows.values()] : [];
+  const vRowForSwap = valueState ? valueState.rows.get(String(s.code||'').trim()) : null;
+  const heldCodes = stocks.map(x => String(x.code || '').trim()).filter(c => /^\d{5,6}$/.test(c));
+  const swap = swapSuggest(vRowForSwap, valueRows, heldCodes);
+  const swapLineHtml = swap
+    ? `<div class="trade-banner">🔄 换仓参考：${escapeHtml(swap.target.name || swap.target.code)} 的安全边际高 ${swap.gap.toFixed(1)}pp（≥${SWAP_GAP}pp）——需覆盖换手成本与税负，否则维持持有；仅展示，不构成指令</div>`
+    : '';
+  return `<div class="signal-strip">
+      ${scorePillHtml(s)}
+      ${researchPillHtml(fundamentals.get(String(s.code)) || null)}
+      ${disclosurePillHtml(calDisclosures[String(s.code || '').trim()] || null, calStatus)}
+    </div>
+    ${profitRef}
+    ${buyRef}
+    ${valueRef}
+    ${sellBanner}
+    ${scoreDetailHtml(s)}
+    ${valueGateHtml(vRowForSwap, valueIndRef ? valueIndRef.byL2 : null)}
+    ${swapLineHtml}
+    ${researchReportHtml(fundamentals.get(String(s.code)) || null)}`;
+}
+
+function bindDetailFacts(){
+  const facts = document.getElementById('detailFacts');
+  const tierBtn = facts.querySelector('.tier-done-btn');
+  if(tierBtn) tierBtn.addEventListener('click', async ()=>{ await markProfitTaken(tierBtn.dataset.kind, tierBtn.dataset.id, Number(tierBtn.dataset.ret)); });
+  const rp = facts.querySelector('.research-pill');
+  if(rp) rp.addEventListener('click', ()=>{ const t = facts.querySelector('.rp-report'); if(t) t.scrollIntoView({behavior:'smooth', block:'start'}); });
+}
+
+// 列表重绘 / 取数回调一律只刷头部与事实区，绝不重建表单区——用户打了一半的字结构性保全，
+// 不再需要旧的「抓现场-回放」机制。标的被删除（本地删或云同步覆盖）则收回概览，不留空详情。
+function refreshDetail(){
+  if(!detailState) return;
+  const kind = detailState.kind, id = detailState.id;
+  const item = (kind==='fund' ? funds : stocks).find(x=>String(x.id)===String(id));
+  if(!item){ closeDetail(); return; }
+  const headEl = document.getElementById('detailHead');
+  const factsEl = document.getElementById('detailFacts');
+  if(kind==='fund'){
+    const f = item;
     const sig = evalFundSignal(f);
     const ret = computeReturn(f);
-
-    // 大盘档位系数：按各基金自选的参考指数计算；选「不参考」（空值）则豁免
     const bkey = fundBenchKey(f);
     const bm = (bkey && BENCHMARKS[bkey]) ? mktMap[bkey] : null;
     const mktOn = !!(bm && bm.ready);
@@ -3836,47 +3932,121 @@ function renderFundList(){
     }
     const alert = profitTakingAlert(f);
     const nextTier = nextProfitTier(f, ret);
-    const card = document.createElement('div');
-    card.className = 'fund-card';
-
     const dCost = dipAlertFund(f, sig);
     const dips = fundDipList(dCost, f, sig, coef);
+    headEl.innerHTML = fundDetailHeadHtml(f, ret, alert, dips);
+    factsEl.innerHTML = fundDetailFactsHtml(f, {sig, ret, alert, nextTier, coef, dips});
+  } else {
+    const s = item;
+    const dev = (s.ma60 && s.ma120) ? ((s.currentPrice-s.ma60)/s.ma60 + (s.currentPrice-s.ma120)/s.ma120)/2*100 : (s.ma60 ? (s.currentPrice-s.ma60)/s.ma60*100 : null);
+    const ret = (parseFloat(s.cost)>0 && s.currentPrice>0) ? (s.currentPrice-parseFloat(s.cost))/parseFloat(s.cost)*100 : null;
+    const nextTier = nextProfitTier(s, ret);
+    const sAlert = profitAlertFromRet(ret, s);
+    const sDip = dipAlertStock(s);
+    const dCostStock = dipAlertStockCost(s, dev);
+    const sRef = stockBuyRef(dev, sDip, dCostStock, stockPadSet(s), stockPadInfo(s, ret));
+    const pillCls = dualPillClass(sRef.label);
+    const sDipGate = stockDipGate(sDip, dCostStock, stockPadSet(s));
+    const sPlan = sDipGate.light ? stockAddPlan(stockMvOf(s), parseFloat(s.currentPrice)||0, sDip.add, stockLotSizeOf(s)) : null;
+    const vRow = valueState ? valueState.rows.get(String(s.code||'').trim()) || null : null;
+    const sSellPlan = sAlert ? stockSellPlan(parseFloat(s.shares)||0, parseFloat(s.currentPrice)||0, sAlert.tier.sell, stockLotSizeOf(s)) : null;
+    headEl.innerHTML = stockDetailHeadHtml(s, ret, sAlert, sDipGate);
+    factsEl.innerHTML = stockDetailFactsHtml(s, {sAlert, nextTier, ret, sSellPlan, sRef, pillCls, dev, sDipGate, sPlan, dCostStock, sDip, vRow});
+  }
+  bindDetailFacts();
+}
 
-    // 2026-11-01 基金两栏收口：止盈参考 / 买入参考（无价值评估）
-    const fundProfitRef = profitRefHtml(alert, nextTier, ret, null, f);
-    const fundBuyRef = `<div class="ref-section"><div class="ref-title">买入参考</div>
-      <span class="signal-pill ${pillClass(sig.level)}">${sig.label}</span>
-      ${sig.multiplier!==undefined ? '<span class="signal-amount" style="margin-left:8px;">建议金额 '+fmtMoney((f.baseAmount||0)*sig.multiplier*coef)+'/期</span>' : ''}
-      <div class="ref-row" style="margin-top:8px;">${escapeHtml(sig.reasons.join('；'))}</div>
-      ${fundHistPeakLine(f)}
-      ${fundDeepLine(f)}
-      ${fundPadLine(f)}
-      ${dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0, false) ? '<div style="margin-top:10px;">' + dualSignalHtml(f, parseFloat(f.currentNav)||0, parseFloat(f.baseAmount)||0, false) + '</div>' : ''}
-      ${dips.length ? '<div style="margin-top:10px;">' + buyBannerHtml(dips) + '</div>' : ''}
-    </div>`;
+// 表单容器沿用 body-/sbody- 旧 id 与 .fund-body.open：保存/删除/一键获取/bind* 与
+// autoRefresh「表单打开就跳过」守卫全部不改。只在打开详情与两处保存后调用，别处一律不许重建。
+function renderDetailForm(){
+  if(!detailState) return;
+  const kind = detailState.kind, id = detailState.id;
+  const item = (kind==='fund' ? funds : stocks).find(x=>String(x.id)===String(id));
+  if(!item) return;
+  const bodyId = (kind==='fund' ? 'body-' : 'sbody-') + id;
+  document.getElementById('detailFormWrap').innerHTML = '<div class="fund-body open" id="'+bodyId+'"></div>';
+  const body = document.getElementById(bodyId);
+  if(kind==='fund'){ body.innerHTML = fundBodyHtml(item); bindFundBody(id); }
+  else { body.innerHTML = stockFormHtml(item); bindStockBody(id); }
+}
 
-    card.innerHTML = `
-      <div class="fund-head" data-id="${f.id}">
-        <div class="fund-head-left">
-          <div class="fund-name">${escapeHtml(f.name || '未命名基金')}</div>
-          <div class="fund-meta">${escapeHtml(f.theme||'未分类')}${f.isQDII?' · QDII':''} · 市值 ${fmtMoney(f.marketValue||0)}</div>
-        </div>
-        <div class="fund-return ${ret>=0?'ret-pos':'ret-neg'}">${fmtPct(ret,1)}</div>
-        ${alert?'<span class="trade-badge sell">🔴 止盈</span>':''}${dips.length?'<span class="trade-badge buy">🟢 抄底</span>':''}
-        <div class="chevron" id="chev-${f.id}">▸</div>
-      </div>
-      ${fundProfitRef}
-      ${fundBuyRef}
-      ${alert ? sellBannerHtml(alert) + tierDoneBtnHtml('fund', f.id, alert.tier.ret) : ''}
-      <div class="fund-body" id="body-${f.id}"></div>
-    `;
-    list.appendChild(card);
+function openDetail(kind, id){
+  const item = (kind==='fund' ? funds : stocks).find(x=>String(x.id)===String(id));
+  if(!item) return false;
+  detailState = { kind, id: String(id) };
+  // 窄屏顶部统计只显示当前页签那一组：详情属于哪个页签就亮哪组（与页签切换同口径）
+  const tab = kind==='fund' ? 'funds' : 'stocks';
+  if(document.body.dataset.tab !== tab){
+    document.body.dataset.tab = tab;
+    document.querySelectorAll('.tab-btn').forEach(x=>x.classList.toggle('active', x.dataset.tab===tab));
+    try{ localStorage.setItem('dinvest_tab', tab); }catch(e){}
+  }
+  document.body.classList.add('detail-open');
+  document.getElementById('detailView').style.display = '';
+  refreshDetail();
+  renderDetailForm();
+  window.scrollTo(0, 0);
+  return true;
+}
 
-    card.querySelector('.fund-head').addEventListener('click', ()=> toggleFundBody(f.id));
-    const tierBtn = card.querySelector('.tier-done-btn');
-    if(tierBtn) tierBtn.addEventListener('click', async (ev)=>{ ev.stopPropagation(); await markProfitTaken(tierBtn.dataset.kind, tierBtn.dataset.id, Number(tierBtn.dataset.ret)); });
+function closeDetail(){
+  detailState = null;
+  document.body.classList.remove('detail-open');
+  document.getElementById('detailView').style.display = 'none';
+  document.getElementById('detailHead').innerHTML = '';
+  document.getElementById('detailFacts').innerHTML = '';
+  document.getElementById('detailFormWrap').innerHTML = '';
+  if(parseDetailHash(location.hash)){
+    try{ history.replaceState(null, '', location.pathname + location.search); }catch(e){ location.hash = ''; }
+  }
+}
+
+function gotoDetail(kind, id){
+  const h = detailHash(kind, id);
+  if(!h) return;
+  if(location.hash === h) applyHashRoute();   // 同 hash 不触发 hashchange，直接开
+  else location.hash = h;                     // 推入一条历史，系统返回键可回概览
+}
+
+function applyHashRoute(){
+  const r = parseDetailHash(location.hash);
+  if(r && openDetail(r.kind, r.id)) return;
+  if(detailState) closeDetail();   // 非详情 hash 或标的已不存在（死链）→ 回概览
+}
+
+window.addEventListener('hashchange', ()=>{
+  const r = parseDetailHash(location.hash);
+  if(r){ if(!detailState) detailViaPush = true; applyHashRoute(); }
+  else { detailViaPush = false; if(detailState) closeDetail(); }
+});
+
+function renderFundList(){
+  const list = document.getElementById('fundList');
+  document.getElementById('fundCountHint').textContent = funds.length ? `共 ${funds.length} 只` : '';
+  if(funds.length===0){
+    list.innerHTML = '<div class="empty">还没有添加基金<br>点击下方「添加基金」开始记录你的定投信号</div>';
+    refreshDetail();
+    return;
+  }
+  const rows = funds.map(f=>{
+    const sig = evalFundSignal(f);
+    const ret = computeReturn(f);
+    const bkey = fundBenchKey(f);
+    const bm = (bkey && BENCHMARKS[bkey]) ? mktMap[bkey] : null;
+    const coef = (bm && bm.ready) ? bm.coef : 1;
+    const alert = profitTakingAlert(f);
+    const dCost = dipAlertFund(f, sig);
+    const dips = fundDipList(dCost, f, sig, coef);
+    const dot = signalDotState(!!alert, dips.length>0);
+    return overviewRowHtml('fund', f, parseFloat(f.marketValue)||0, ret, dot);
+  }).join('');
+  list.innerHTML = '<div class="ov-legend"><span class="ov-dot sell"></span>止盈 <span class="ov-dot buy"></span>抄底 <span class="ov-dot hold"></span>暂无提醒 · 点行进详情</div><div class="ov-list">'+rows+'</div>';
+  list.querySelectorAll('.ov-row').forEach(row=>{
+    const go = ()=> gotoDetail(row.dataset.kind, row.dataset.id);
+    row.addEventListener('click', go);
+    row.addEventListener('keydown', (ev)=>{ if(ev.key==='Enter' || ev.key===' '){ ev.preventDefault(); go(); } });
   });
-  restoreForms(snap, 'fund', funds, toggleFundBody);
+  refreshDetail();
 }
 
 // 股票页「板块轮动概览」条（2026-10-07）：直接复用基金页 loadSectorRotation 已加载的 sectorState（零新增网络请求）。
@@ -3903,7 +4073,6 @@ function sectorStockStripHtml(){
 
 function renderStockSection(){
   const list = document.getElementById('stockList');
-  const snap = captureForms(list, 'stock');
   document.getElementById('stockCountHint').textContent = (stocks.length ? '共 ' + stocks.length + ' 只 · ' : '') + '数据每日自动更新';
   const stockMv = stocks.reduce((s,x)=> s + stockMvOf(x), 0);
   const capTrack = document.getElementById('stockCapTrack');
@@ -3939,93 +4108,30 @@ function renderStockSection(){
   if(sectorOvJump) sectorOvJump.addEventListener('click', ()=>{ const b = document.querySelector('.tab-btn[data-tab="funds"]'); if(b) b.click(); });
   if(stocks.length===0){
     list.insertAdjacentHTML('beforeend', '<div class="empty">还没有添加股票<br>A股填6位代码，港股填5位代码，行情每日自动更新</div>');
+    refreshDetail();
     return;
   }
-  stocks.forEach(s=>{
+  const rows = stocks.map(s=>{
     const dev = (s.ma60 && s.ma120) ? ((s.currentPrice-s.ma60)/s.ma60 + (s.currentPrice-s.ma120)/s.ma120)/2*100 : (s.ma60 ? (s.currentPrice-s.ma60)/s.ma60*100 : null);
     const ret = (parseFloat(s.cost)>0 && s.currentPrice>0) ? (s.currentPrice-parseFloat(s.cost))/parseFloat(s.cost)*100 : null;
-    const nextTier = nextProfitTier(s, ret);
     const sAlert = profitAlertFromRet(ret, s);
     const sDip = dipAlertStock(s);
     const dCostStock = dipAlertStockCost(s, dev);
-    // 买入参考 = 均线 + 回撤达档 + 安全垫三腿合成（2026-11-01），配色沿用现成的 dualPillClass
-    const sRef = stockBuyRef(dev, sDip, dCostStock, stockPadSet(s), stockPadInfo(s, ret));
-    const pillCls = dualPillClass(sRef.label);
     const sDipGate = stockDipGate(sDip, dCostStock, stockPadSet(s));
-    const sPlan = sDipGate.light ? stockAddPlan(stockMvOf(s), parseFloat(s.currentPrice)||0, sDip.add, stockLotSizeOf(s)) : null;
-    // 价值评估（2026-11-01）：取不到本批次行 = null = 未判定，不等于合格
-    const vRow = valueState ? valueState.rows.get(String(s.code||'').trim()) || null : null;
-    // 止盈：档位比例 → 股数 → 整手；缺股数/现价/港股手数时不给手数，只报比例
-    const sSellPlan = sAlert ? stockSellPlan(parseFloat(s.shares)||0, parseFloat(s.currentPrice)||0, sAlert.tier.sell, stockLotSizeOf(s)) : null;
-    const card = document.createElement('div');
-    card.className = 'fund-card';
-    // 2026-11-01 三栏收口：止盈参考 / 买入参考 / 价值评估
-    const dualHtml = dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0);
-    const dipPadHtml = sDipGate.needPad ? dipPadHintHtml() : '';
-    const buyBanner = sDipGate.light ? stockBuyBannerHtml(sDip, sPlan, dCostStock) : '';
-    const sellBanner = sAlert ? stockSellBannerHtml(sAlert, sSellPlan) + tierDoneBtnHtml('stock', s.id, sAlert.tier.ret) : '';
-    const profitRef = profitRefHtml(sAlert, nextTier, ret, sSellPlan, s);
-    const buyRef = buyRefHtml(sRef, pillCls, s, dev, sDipGate, sPlan, dCostStock, dualHtml, sDip, dipPadHtml, buyBanner);
-    const valueRef = valueAssessmentHtml(vRow, valueIndRef ? valueIndRef.byL2 : null, !!valueState);
-    card.innerHTML = `
-      <div class="fund-head" data-sid="${s.id}">
-        <div class="fund-head-left">
-          <div class="fund-name">${escapeHtml(s.name || '未命名股票')}</div>
-          <div class="fund-meta">${exchangeLabel(s.code)} · ${s.shares||0} 股 · 市值 ${fmtMoney(stockMvOf(s))}${s.priceDate?' · '+s.priceDate:''}</div>
-        </div>
-        <div class="fund-return ${ret!==null&&ret>=0?'ret-pos':'ret-neg'}">${fmtPct(ret,1)}</div>
-        ${sAlert?'<span class="trade-badge sell">🔴 止盈</span>':''}${sDipGate.light?'<span class="trade-badge buy">🟢 抄底</span>':''}
-        <div class="chevron" id="schev-${s.id}">▸</div>
-      </div>
-      <div class="signal-strip">
-        ${scorePillHtml(s)}
-        ${researchPillHtml(fundamentals.get(String(s.code)) || null)}
-        ${disclosurePillHtml(calDisclosures[String(s.code || '').trim()] || null, calStatus)}
-      </div>
-      ${profitRef}
-      ${buyRef}
-      ${valueRef}
-      ${sellBanner}
-      <div class="fund-body" id="sbody-${s.id}"></div>
-    `;
-    list.appendChild(card);
-    card.querySelector('.fund-head').addEventListener('click', ()=> toggleStockBody(s.id));
-    const tierBtn = card.querySelector('.tier-done-btn');
-    if(tierBtn) tierBtn.addEventListener('click', async (ev)=>{ ev.stopPropagation(); await markProfitTaken(tierBtn.dataset.kind, tierBtn.dataset.id, Number(tierBtn.dataset.ret)); });
-    const rp = card.querySelector('.research-pill');
-    if(rp) rp.addEventListener('click', (ev)=>{
-      ev.stopPropagation();
-      const body = document.getElementById('sbody-'+s.id);
-      if(body && !body.classList.contains('open')) toggleStockBody(s.id);
-      setTimeout(()=>{ const t = card.querySelector('.rp-report'); if(t) t.scrollIntoView({behavior:'smooth', block:'start'}); }, 60);
-    });
+    const dot = signalDotState(!!sAlert, sDipGate.light);
+    return overviewRowHtml('stock', s, stockMvOf(s), ret, dot);
+  }).join('');
+  list.insertAdjacentHTML('beforeend', '<div class="ov-legend"><span class="ov-dot sell"></span>止盈 <span class="ov-dot buy"></span>抄底 <span class="ov-dot hold"></span>暂无提醒 · 点行进详情</div><div class="ov-list">'+rows+'</div>');
+  list.querySelectorAll('.ov-row').forEach(row=>{
+    const go = ()=> gotoDetail(row.dataset.kind, row.dataset.id);
+    row.addEventListener('click', go);
+    row.addEventListener('keydown', (ev)=>{ if(ev.key==='Enter' || ev.key===' '){ ev.preventDefault(); go(); } });
   });
-  restoreForms(snap, 'stock', stocks, toggleStockBody);
-}
-
-function toggleStockBody(id){
-  const body = document.getElementById('sbody-'+id);
-  const chev = document.getElementById('schev-'+id);
-  if(!body || !chev) return;
-  const isOpen = body.classList.contains('open');
-  if(isOpen){ body.classList.remove('open'); chev.classList.remove('open'); body.innerHTML=''; delete formBaseline['stock:'+id]; }
-  else { body.classList.add('open'); chev.classList.add('open'); body.innerHTML = stockFormHtml(stocks.find(x=>x.id===id)); bindStockBody(id); rememberFormBaseline('stock', id, body); }
+  refreshDetail();
 }
 
 function stockFormHtml(s){
-  // 换仓参考（spec §7.3）：持仓集合在前端、后端无推，所以这里现算；vRowForSwap 为空就是无建议
-  const valueRows = valueState ? [...valueState.rows.values()] : [];
-  const vRowForSwap = valueState ? valueState.rows.get(String(s.code||'').trim()) : null;
-  const heldCodes = stocks.map(x => String(x.code || '').trim()).filter(c => /^\d{5,6}$/.test(c));
-  const swap = swapSuggest(vRowForSwap, valueRows, heldCodes);
-  const swapLineHtml = swap
-    ? `<div class="trade-banner">🔄 换仓参考：${escapeHtml(swap.target.name || swap.target.code)} 的安全边际高 ${swap.gap.toFixed(1)}pp（≥${SWAP_GAP}pp）——需覆盖换手成本与税负，否则维持持有；仅展示，不构成指令</div>`
-    : '';
   return `
-    ${scoreDetailHtml(s)}
-    ${valueGateHtml(vRowForSwap, valueIndRef ? valueIndRef.byL2 : null)}
-    ${swapLineHtml}
-    ${researchReportHtml(fundamentals.get(String(s.code)) || null)}
     <div class="field-grid">
       <div class="field"><label>名称</label><input type="text" data-sk="name" value="${escapeHtml(s.name||'')}"></div>
       <div class="field"><label>代码（A股6位 / 港股5位）</label><input type="text" data-sk="code" maxlength="6" value="${escapeHtml(s.code||'')}"></div>
@@ -4149,8 +4255,7 @@ function autoFetchStockData(id){
     if(jname && nameInput && (!nameInput.value.trim() || /^\d+$/.test(nameInput.value.trim()))) nameInput.value = jname;
     if(jname && (!target.name || /^\d+$/.test(target.name))) target.name = jname;
       saveStocks();
-      const titleEl = document.querySelector('.fund-head[data-sid="'+id+'"] .fund-name');
-      if(titleEl) titleEl.textContent = target.name || '未命名股票';
+      render();
       const hInput = body ? body.querySelector('[data-sk="high52w"]') : null;
       if(hInput && high52w!==null) hInput.value = high52w.toFixed(3);
       setStatus('行情已获取，正在取估值分位…');
@@ -4190,7 +4295,7 @@ async function saveStockForm(id){
   if(s.shares>0 && s.currentPrice>0) s.marketValue = stockMvOf(s);
   await saveStocks();
   showToast('已保存，行情将于下一轮自动更新');
-  toggleStockBody(id); toggleStockBody(id);
+  renderDetailForm();
   render();
 }
 
@@ -4204,24 +4309,6 @@ async function deleteStock(id){
 
 function escapeHtml(s){
   return String(s).replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-}
-
-function toggleFundBody(id){
-  const body = document.getElementById('body-'+id);
-  const chev = document.getElementById('chev-'+id);
-  const isOpen = body.classList.contains('open');
-  if(isOpen){
-    body.classList.remove('open');
-    chev.classList.remove('open');
-    body.innerHTML = '';
-    delete formBaseline['fund:'+id];
-  } else {
-    body.classList.add('open');
-    chev.classList.add('open');
-    body.innerHTML = fundBodyHtml(funds.find(x=>x.id===id));
-    bindFundBody(id);
-    rememberFormBaseline('fund', id, body);
-  }
 }
 
 function fundBodyHtml(f){
@@ -4714,8 +4801,7 @@ async function saveFundForm(id){
   await saveFunds();
   ensureBenchmarkData();
   showToast('已保存');
-  toggleFundBody(id);
-  toggleFundBody(id);
+  renderDetailForm();
   render();
 }
 
@@ -4819,7 +4905,7 @@ document.getElementById('addStockBtn').addEventListener('click', async ()=>{
   stocks.push(s);
   await saveStocks();
   renderStockSection();
-  setTimeout(()=> toggleStockBody(s.id), 50);
+  gotoDetail('stock', s.id);
 });
 
 document.getElementById('researchBtn').addEventListener('click', ()=>{
@@ -4910,7 +4996,12 @@ document.getElementById('addFundBtn').addEventListener('click', async ()=>{
   funds.push(f);
   await saveFunds();
   render();
-  setTimeout(()=> toggleFundBody(f.id), 50);
+  gotoDetail('fund', f.id);
+});
+
+document.getElementById('detailBackBtn').addEventListener('click', ()=>{
+  if(detailViaPush) history.back();   // 页内点进来的：退回上一条历史（概览）
+  else location.hash = '';            // 直开/刷新落在详情的：清 hash 回概览，不留死历史
 });
 
 loadAll();

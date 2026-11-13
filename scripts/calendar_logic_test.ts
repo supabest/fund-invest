@@ -242,9 +242,10 @@ Deno.test("接线守卫：页面卡片与夜间邮件都必须真的调用这套
     assertEquals(at >= 0, true, "找不到 " + name + "，接线守卫需要重写");
     return src.slice(at, src.indexOf("\n}", at));
   };
-  // 页面：卡片渲染 + 取数（硬超时是东财挂起会拖死整批的既有教训）
-  assertEquals(/disclosurePillHtml\(/.test(bodyOf(html, "renderStockSection")), true,
-    "股票卡片不调用 disclosurePillHtml = 判据写好了但界面上永远看不见");
+  // 页面：详情事实区渲染 + 取数（硬超时是东财挂起会拖死整批的既有教训）
+  // 2026-11-12 概览+详情改造：披露胶囊从列表卡移进 stockDetailFactsHtml（refreshDetail 回灌），锚随布局走
+  assertEquals(/disclosurePillHtml\(/.test(bodyOf(html, "stockDetailFactsHtml")), true,
+    "股票详情不调用 disclosurePillHtml = 判据写好了但界面上永远看不见");
   assertEquals(/AbortSignal\.timeout\(/.test(bodyOf(html, "fetchDisclosureCalendar")), true,
     "没有硬超时：东财挂起会把首屏 renderStockSection 一起拖住");
   assertEquals(/calFilter\(/.test(bodyOf(html, "fetchDisclosureCalendar")), true,
