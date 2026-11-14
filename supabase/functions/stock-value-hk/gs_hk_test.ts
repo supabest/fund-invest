@@ -196,3 +196,12 @@ Deno.test('隔离守卫：适配器不 import A 股模块（spec §5.2）', asyn
   const src = await Deno.readTextFile(new URL('./gs_hk.ts', import.meta.url));
   assertEquals(/from\s*['"]\.\.\/stock-value\//.test(src), false, '适配器不得 import A 股 gs_value.ts');
 });
+
+Deno.test('凭据脱敏沿用 A 股做法：TypeError 折叠 + 错误体洗 apiKey（源码钉住）', async () => {
+  const src = await Deno.readTextFile(new URL('./gs_hk.ts', import.meta.url));
+  assertEquals(src.includes("e instanceof TypeError ? new Error(`GS network error (attempt ${attempt + 1})`) : e"), true,
+    'TypeError.message 含带 apiKey 的完整 URL，必须折叠');
+  assertEquals(/searchtype:\s*'HK_stock'/.test(src), true, '通道必须是 HK_stock');
+  const idx = await Deno.readTextFile(new URL('./index.ts', import.meta.url));
+  assertEquals(idx.includes(".replace(/\\S*apiKey=\\S*/g, 'apiKey=REDACTED')"), true, '错误响应必须洗掉 apiKey');
+});
