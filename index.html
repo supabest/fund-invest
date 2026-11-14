@@ -130,6 +130,8 @@
   .ref-empty{font-size:13px; color:var(--muted); font-style:italic;}
   /* 价值四维雷达：2×2 网格，每格一个维度 */
   .value-radar{display:grid; grid-template-columns:1fr 1fr; gap:8px 12px; margin-bottom:10px;}
+  /* 港股降维口径：三行事实竖排（A 股四维是 2×2 网格，口径不同故另立类，不改 .value-radar） */
+  .value-hk-rows{display:grid; grid-template-columns:1fr; gap:6px; margin-bottom:10px;}
   .value-dim{font-size:13px; line-height:1.5;}
   .value-dim .dim-label{color:var(--muted); font-size:11.5px;}
   .value-dim .dim-val{color:var(--ivory); font-weight:500;}
@@ -375,6 +377,7 @@
     .ref-row{font-size:14px;}
     .ref-empty{font-size:13px;}
     .value-radar{gap:10px 16px;}
+    .value-hk-rows{gap:8px;}
     .value-dim{font-size:13px;}
     .value-dim .dim-label{font-size:11.5px;}
     .value-verdict{font-size:14px;}
@@ -683,6 +686,9 @@ let valueTried = false;
 let incomeState = null;  // { batch, list: row[], total }；null=未生成/读取失败
 let incomeTried = false;
 
+// 港股价值腿（stock_value_hk 最新批次，降维口径）：独立表独立取数，null=未生成/读取失败 → 整区不出
+let valueHkState = null;   // { batch, rows: Map<code,row> }
+
 // 板块轮动（sector_rotation_daily 最新批次）：与 scoreState 同范式——null=尚未生成/读取失败，卡片优雅降级
 let sectorState = null; // { batch, rows, accCounts: Map<pk_etf,n>, poolPools: {l1,l2,batch} }
 
@@ -851,7 +857,7 @@ function initCloud(tries){
     if(sbUser && Date.now()-lastPullAt > 60000) syncOnOpen();
   });
   // 评分表 anon 可读、全局共享，客户端就绪即拉一次；失败仅降级不阻塞页面
-  Promise.all([loadStockScores(), loadStockValue(), loadIncomeWatch(), loadValueIndustryRef()]).then(()=>{ render(); loadTrendBadges(); });
+  Promise.all([loadStockScores(), loadStockValue(), loadIncomeWatch(), loadValueIndustryRef(), loadStockValueHk()]).then(()=>{ render(); loadTrendBadges(); });
   loadFundamentals().then(()=>renderStockSection());
   setSyncUI();
 }
@@ -930,6 +936,25 @@ async function loadIncomeWatch(){
     const ch = incomeChannelOf(data);
     incomeState = { batch, list: ch.list, total: ch.total };
   }catch(e){ console.warn('income watch load failed', e); }
+}
+
+// 港股价值腿（stock_value_hk 只读，降维口径）：范式照 loadIncomeWatch——先取最新批次，再按持仓码取行。
+// 单页足够：`.in('code', codes)` 已把范围限死在持仓港股（个位数），与 A 股腿的全市场读不同，
+// 不存在 db-max-rows=1000 截断风险；仍显式 order 保证确定性（PostgREST 默认行序会漂移）。
+async function loadStockValueHk(){
+  if(!cloudReady || !sb) return;
+  try{
+    const codes = stocks.map(s=>String(s.code||'').trim()).filter(c=>/^\d{5}$/.test(c));
+    if(!codes.length) return;
+    const { data: b, error: be } = await sb.from('stock_value_hk').select('batch_date')
+      .order('batch_date',{ascending:false}).limit(1).maybeSingle();
+    if(be || !b) return;
+    const batch = b.batch_date;
+    const { data, error } = await sb.from('stock_value_hk').select('*')
+      .eq('batch_date', batch).in('code', codes).order('code',{ascending:true});
+    if(error || !data) return;
+    valueHkState = { batch, rows: new Map(data.map(r=>[String(r.code), r])) };
+  }catch(e){ console.warn('hk value load failed', e); }
 }
 
 // 价值门禁的行业参照（2026-10-30 用户要求）：否决理由要能看懂「本股多少、门槛多少、同业多少」，
@@ -1277,6 +1302,47 @@ function valueAssessmentHtml(vRow, indByL2, hasBatch){
   html += '<div class="value-verdict"><span class="' + verdictCls + '">' + verdict + '</span></div>';
   html += '<div class="value-note">价值评估只回答"值不值"，不等于买卖指令</div>';
   html += '<div class="value-note">护城河只看近三年资本回报（ROIC），不含市场份额与行业格局</div>';
+  html += '</div>';
+  return html;
+}
+
+// ---- 港股价值评估（降维口径，2026-11-14）----
+// 独立表 stock_value_hk，只报三行事实：资本回报 / 股息 / 估值。不产 tier、不算安全边际、不比同业。
+// 缺失一律「无数据」：A 股 valueFmtPct 回 'NA'，口径不同 ⇒ 另写格式化器，不复用也不改它。
+function hkFmtPct(v, d){
+  if(v===null || v===undefined || isNaN(Number(v))) return '无数据';
+  return Number(v).toFixed(d===undefined?2:d).replace('-', '\u2212') + '%';
+}
+function hkFmtNum(v, d){
+  if(v===null || v===undefined || isNaN(Number(v))) return '无数据';
+  return Number(v).toFixed(d===undefined?2:d).replace('-', '\u2212');
+}
+function valueAssessmentHkHtml(hkRow, hasBatch){
+  if(!hkRow) return hasBatch ? '<div class="ref-section"><div class="ref-title">价值评估</div><div class="ref-empty">本批次无该股数据（未判定）</div></div>' : '';
+  var med = valueNumOrNull(hkRow.roic_med);
+  var min3 = valueNumOrNull(hkRow.roic_min3);
+  var dy = valueNumOrNull(hkRow.div_yield);
+  var dy5 = valueNumOrNull(hkRow.div_yield_5y);
+  var pe = valueNumOrNull(hkRow.pe);
+  var pb = valueNumOrNull(hkRow.pb);
+  // 达标只看 med（cur 与 med 相互独立）；8% 由 ROIC_GATE_PCT 插值，与引擎同值由测试钉住
+  var retTxt, retCls;
+  if(med === null){ retTxt = '无数据'; retCls = ''; }
+  else {
+    var ok = med >= ROIC_GATE_PCT;
+    retCls = ok ? 'ok' : 'warn';
+    retTxt = (ok ? '达标' : '未达标') + ' · 近三年中位 ' + hkFmtPct(med, 2) + (min3 === null ? '' : '（最差年 ' + hkFmtPct(min3, 2) + '）');
+  }
+  var dyTxt = dy === null ? '无数据' : hkFmtPct(dy, 2) + (dy5 === null ? '' : '（近五年平均 ' + hkFmtPct(dy5, 2) + '）');
+  var valTxt = (pe === null && pb === null) ? '无数据' : 'PE ' + hkFmtNum(pe, 2) + ' · PB ' + hkFmtNum(pb, 2);
+  var html = '<div class="ref-section"><div class="ref-title">价值评估</div>';
+  html += '<div class="value-hk-rows">';
+  html += '<div class="value-dim"><div class="dim-label">资本回报</div><div class="dim-val ' + retCls + '">' + retTxt + '</div></div>';
+  html += '<div class="value-dim"><div class="dim-label">股息</div><div class="dim-val">' + dyTxt + '</div></div>';
+  html += '<div class="value-dim"><div class="dim-label">估值</div><div class="dim-val">' + valTxt + '</div></div>';
+  html += '</div>';
+  html += '<div class="value-note">港股只报资本回报、股息与估值三项；不评估安全边际，也不与同业比较</div>';
+  html += '<div class="value-note">资本回报以 ' + ROIC_GATE_PCT + '% 为参照线，按平台日历年度口径，可能与公司自身财年不完全对齐</div>';
   html += '</div>';
   return html;
 }
@@ -3871,14 +3937,19 @@ function fundDetailFactsHtml(f, ctx){
 }
 
 function stockDetailFactsHtml(s, ctx){
-  const {sAlert, nextTier, ret, sSellPlan, sRef, pillCls, dev, sDipGate, sPlan, dCostStock, sDip, vRow} = ctx;
+  const {sAlert, nextTier, ret, sSellPlan, sRef, pillCls, dev, sDipGate, sPlan, dCostStock, sDip, vRow, hkRow} = ctx;
   const dualHtml = dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0);
   const dipPadHtml = sDipGate.needPad ? dipPadHintHtml() : '';
   const buyBanner = sDipGate.light ? stockBuyBannerHtml(sDip, sPlan, dCostStock) : '';
   const sellBanner = sAlert ? stockSellBannerHtml(sAlert, sSellPlan) + tierDoneBtnHtml('stock', s.id, sAlert.tier.ret) : '';
   const profitRef = profitRefHtml(sAlert, nextTier, ret, sSellPlan, s);
   const buyRef = buyRefHtml(sRef, pillCls, s, dev, sDipGate, sPlan, dCostStock, dualHtml, sDip, dipPadHtml, buyBanner);
-  const valueRef = valueAssessmentHtml(vRow, valueIndRef ? valueIndRef.byL2 : null, !!valueState);
+  // 港股（5 位码）走降维口径栏，A 股分支一字不动。valueGateHtml / swapSuggest 都以 stock_value 行为输入，
+  // 港股码在那张表里取不到 ⇒ 天然返回空，无需额外屏蔽（spec §7）。
+  const isHk = /^\d{5}$/.test(String(s.code||'').trim());
+  const valueRef = isHk
+    ? valueAssessmentHkHtml(hkRow, !!valueHkState)
+    : valueAssessmentHtml(vRow, valueIndRef ? valueIndRef.byL2 : null, !!valueState);
   // 评分明细 / 价值门禁 / 换仓参考 / 研究报告：只读事实，与三栏参考同区刷新；编辑表单区只留可编辑字段
   const valueRows = valueState ? [...valueState.rows.values()] : [];
   const vRowForSwap = valueState ? valueState.rows.get(String(s.code||'').trim()) : null;
@@ -3949,9 +4020,10 @@ function refreshDetail(){
     const sDipGate = stockDipGate(sDip, dCostStock, stockPadSet(s));
     const sPlan = sDipGate.light ? stockAddPlan(stockMvOf(s), parseFloat(s.currentPrice)||0, sDip.add, stockLotSizeOf(s)) : null;
     const vRow = valueState ? valueState.rows.get(String(s.code||'').trim()) || null : null;
+    const hkRow = valueHkState ? valueHkState.rows.get(String(s.code||'').trim()) || null : null;
     const sSellPlan = sAlert ? stockSellPlan(parseFloat(s.shares)||0, parseFloat(s.currentPrice)||0, sAlert.tier.sell, stockLotSizeOf(s)) : null;
     headEl.innerHTML = stockDetailHeadHtml(s, ret, sAlert, sDipGate);
-    factsEl.innerHTML = stockDetailFactsHtml(s, {sAlert, nextTier, ret, sSellPlan, sRef, pillCls, dev, sDipGate, sPlan, dCostStock, sDip, vRow});
+    factsEl.innerHTML = stockDetailFactsHtml(s, {sAlert, nextTier, ret, sSellPlan, sRef, pillCls, dev, sDipGate, sPlan, dCostStock, sDip, vRow, hkRow});
   }
   bindDetailFacts();
 }

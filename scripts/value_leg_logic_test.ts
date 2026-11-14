@@ -12,7 +12,8 @@ import { valueFmtPct, valueTierLabel, valueGateHtml, renderValueTop10,
   incomeChannelOf, renderIncomeList, foldCardHtml,
   valueMedian, valueIndStatsOf, ROIC_GATE_PCT, valueAssessmentHtml,
   valueTrendExempt, ROIC_TREND_FLOOR_PCT,
-  profitRefHtml, buyRefHtml } from "./value_leg_logic.ts";
+  profitRefHtml, buyRefHtml,
+  hkFmtPct, hkFmtNum, valueAssessmentHkHtml } from "./value_leg_logic.ts";
 
 const row = { code:'600031', name:'潍柴', vq:78.4, tier:'qualified', confidence:'A', vetoed:false,
   owner_yield:6.2, margin_of_safety:4.35, cn10y:1.85, roic_med:18.0, v_moat:80, v_cash:70, v_safety:75, v_health:66,
@@ -1049,8 +1050,14 @@ Deno.test('接线守卫：价值评估栏每卡常驻，行业参照与批次状
     '价值栏一旦跟灯位绑定就又变回「抄底才提醒风险」的附属标注了');
   assertEquals(/const vRow = valueState \? valueState\.rows\.get\(/.test(html), true,
     '必须按 code 取本批次价值行（取不到就是未判定）');
-  assertEquals(/const valueRef = valueAssessmentHtml\(vRow, valueIndRef \? valueIndRef\.byL2 : null, !!valueState\);/.test(html), true,
-    '行业参照与「批次是否已生成」必须由调用点传入，纯函数不读全局');
+  // 2026-11-14 港股分流：原断言只钉 A 股单分支，分流后必然红。**改写而非删除**——
+  // 两条分支都要钉住，否则「港股接上了但 A 股被顺手改坏」或「A 股没动但港股根本没接」都能溜过。
+  assertEquals(/const valueRef = isHk\s*\?\s*valueAssessmentHkHtml\(hkRow, !!valueHkState\)\s*:\s*valueAssessmentHtml\(vRow, valueIndRef \? valueIndRef\.byL2 : null, !!valueState\);/.test(html), true,
+    '分流必须两条分支都在：港股走降维栏、A 股原调用一字不动，且行业参照与批次状态仍由调用点传入');
+  assertEquals(html.includes("const isHk = /^\\d{5}$/.test(String(s.code||'').trim());"), true,
+    '分流判据必须是 5 位码形态（港股），不得按名字或行业猜');
+  assertEquals(/const hkRow = valueHkState \? valueHkState\.rows\.get\(/.test(html), true,
+    '港股行必须按 code 取本批次（取不到就是未判定）');
   assertEquals(html.includes('${valueRef}'), true, '评估栏要渲染进卡片');
 });
 
@@ -1516,4 +1523,176 @@ Deno.test('价值评估栏：口径披露——护城河只看资本回报，不
     assertEquals(out.includes(disclosed), true, '本栏四维里「护城河」实际只量资本回报，须当场说清：' + out);
     assertEquals(out.includes('不等于买卖指令'), true, '原有的指令隔离句不得被换掉：' + out);
   }
+});
+
+// ── 2026-11-14：港股降维口径价值评估（spec §7）。三行事实 + 两句常驻口径行，不产 tier/门禁/换仓 ──
+// 夹具值取自 2026-11-14 GS 实调（spec §2.4）；估值两数逐日漂移，这里钉的是**格式**不是生产验收基准。
+const hkTencent = {
+  batch_date: '2026-11-14', code: '00700', name: '腾讯控股',
+  roic_cur: 15.8625, roic_med: 15.8625, roic_min3: 10.5299,
+  div_yield: 0.8848080133555927, div_yield_5y: 0.8381616844832607,
+  pe: 13.078457, pb: 4.189377, roic_ok: true,
+  extras: { stamps: { roic: '20231231,20241231,20251231', div_cur: '20251231', div_5y: '20211231-20251231', pe: '20261113', pb: '20261113' }, years: ['2023', '2024', '2025'], missing: [] },
+};
+const hkAlibaba = { ...hkTencent, code: '09988', name: '阿里巴巴-W',
+  roic_cur: 10.7987, roic_med: 6.909, roic_min3: 6.4716,
+  div_yield: 1.51951171875, div_yield_5y: 1.6028015582280901,
+  pe: 21.12736, pb: 2.185361, roic_ok: false };
+
+const HK_NOTE_1 = '港股只报资本回报、股息与估值三项；不评估安全边际，也不与同业比较';
+const HK_NOTE_2 = '资本回报以 8% 为参照线，按平台日历年度口径，可能与公司自身财年不完全对齐';
+
+Deno.test('港股逐字：腾讯三行事实 + 两句口径行全文比对（spec §7 输出形态）', () => {
+  assertEquals(valueAssessmentHkHtml(hkTencent, true),
+    '<div class="ref-section"><div class="ref-title">价值评估</div>'
+    + '<div class="value-hk-rows">'
+    + '<div class="value-dim"><div class="dim-label">资本回报</div><div class="dim-val ok">达标 · 近三年中位 15.86%（最差年 10.53%）</div></div>'
+    + '<div class="value-dim"><div class="dim-label">股息</div><div class="dim-val">0.88%（近五年平均 0.84%）</div></div>'
+    + '<div class="value-dim"><div class="dim-label">估值</div><div class="dim-val">PE 13.08 · PB 4.19</div></div>'
+    + '</div>'
+    + '<div class="value-note">' + HK_NOTE_1 + '</div>'
+    + '<div class="value-note">' + HK_NOTE_2 + '</div>'
+    + '</div>');
+});
+
+Deno.test('港股逐字：阿里未达标（med 6.91 < 8）而 cur 10.80 达标 ⇒ 判定只看 med', () => {
+  const h = valueAssessmentHkHtml(hkAlibaba, true);
+  assertEquals(h.includes('<div class="dim-val warn">未达标 · 近三年中位 6.91%（最差年 6.47%）</div>'), true);
+  assertEquals(h.includes('1.52%（近五年平均 1.60%）'), true);
+  assertEquals(h.includes('PE 21.13 · PB 2.19'), true);
+  assertEquals(h.includes('10.80'), false, 'cur 不参与判定，也不出现在文案里');
+});
+
+Deno.test('港股缺失：med=null ⇒ 资本回报「无数据」，不是「未达标」也不是 NA', () => {
+  const h = valueAssessmentHkHtml({ ...hkTencent, roic_med: null, roic_min3: null, roic_ok: null }, true);
+  assertEquals(h.includes('<div class="dim-val ">无数据</div>'), true);
+  assertEquals(h.includes('未达标'), false);
+  assertEquals(h.includes('达标 ·'), false);
+  assertEquals(h.includes('NA'), false);
+});
+
+Deno.test('港股缺失：股息/估值逐项「无数据」，不显示 0、不显示 --', () => {
+  const h = valueAssessmentHkHtml({ ...hkTencent, div_yield: null, div_yield_5y: null, pe: null, pb: null }, true);
+  assertEquals(h.includes('<div class="dim-label">股息</div><div class="dim-val">无数据</div>'), true);
+  assertEquals(h.includes('<div class="dim-label">估值</div><div class="dim-val">无数据</div>'), true);
+  assertEquals(h.includes('0.00%'), false);
+  assertEquals(h.includes('--'), false);
+});
+
+Deno.test('港股半缺：只有 PB 有值时逐项披露，不把整行判成无数据', () => {
+  const h = valueAssessmentHkHtml({ ...hkTencent, pe: null }, true);
+  assertEquals(h.includes('PE 无数据 · PB 4.19'), true);
+  const h2 = valueAssessmentHkHtml({ ...hkTencent, div_yield_5y: null }, true);
+  assertEquals(h2.includes('0.88%'), true);
+  assertEquals(h2.includes('近五年平均'), false);
+  const h3 = valueAssessmentHkHtml({ ...hkTencent, roic_min3: null }, true);
+  assertEquals(h3.includes('达标 · 近三年中位 15.86%'), true);
+  assertEquals(h3.includes('最差年'), false);
+});
+
+Deno.test('港股负号统一 U+2212：九龙仓真实形态（最差年 −2.036、PE 为负已归 null）', () => {
+  const h = valueAssessmentHkHtml({ ...hkTencent, code: '00004', name: '九龙仓集团',
+    roic_cur: 0.0313, roic_med: 0.0313, roic_min3: -2.036, roic_ok: false,
+    div_yield: 1.8399264029438824, div_yield_5y: 1.734822560546205, pe: null, pb: 0.39938 }, true);
+  assertEquals(h.includes('未达标 · 近三年中位 0.03%（最差年 −2.04%）'), true);
+  assertEquals(h.includes('-2.04'), false, 'ASCII 负号必须替换成 U+2212');
+  assertEquals(h.includes('PE 无数据 · PB 0.40'), true);
+  assertEquals(hkFmtPct(-2.036, 2), '−2.04%');
+  assertEquals(hkFmtNum(-1.5, 2), '−1.50');
+});
+
+Deno.test('港股格式化器：缺失回「无数据」（A 股 valueFmtPct 回 NA，口径不同故不复用）', () => {
+  assertEquals(hkFmtPct(null), '无数据');
+  assertEquals(hkFmtPct(undefined as unknown as null), '无数据');
+  assertEquals(hkFmtPct(NaN), '无数据');
+  assertEquals(hkFmtNum(null), '无数据');
+  assertEquals(hkFmtPct(15.8625, 2), '15.86%');
+  assertEquals(hkFmtNum(4.189377, 2), '4.19');
+  assertEquals(valueFmtPct(null), 'NA', 'A 股格式化器口径一字未改');
+});
+
+Deno.test('港股批次三态：hasBatch=false 整区不出；true 但无行 ⇒ 沿用 A 股「本批次无该股数据（未判定）」句式', () => {
+  assertEquals(valueAssessmentHkHtml(null, false), '');
+  assertEquals(valueAssessmentHkHtml(undefined, false), '');
+  assertEquals(valueAssessmentHkHtml(null, true),
+    '<div class="ref-section"><div class="ref-title">价值评估</div><div class="ref-empty">本批次无该股数据（未判定）</div></div>');
+  assertEquals(valueAssessmentHkHtml(undefined, true),
+    '<div class="ref-section"><div class="ref-title">价值评估</div><div class="ref-empty">本批次无该股数据（未判定）</div></div>');
+});
+
+Deno.test('港股不产指令：输出里没有 tier/门禁/同业/换仓字样，也没有 verdict 区', () => {
+  const h = valueAssessmentHkHtml(hkTencent, true);
+  // 「安全边际」不在禁用词表里：口径行必须明说「不评估安全边际」，禁它会与 spec §7 的常驻行直接冲突。
+  // 禁的是**把它当一个维度报出来**，故下面另钉 dim-label 只有三个。
+  for (const w of ['合格', '不合格', '硬否决', '同行业', '同业中位', '换仓', 'value-verdict', 'value-radar', '护城河'])
+    assertEquals(h.includes(w), false, `港股栏不该出现「${w}」`);
+  assertEquals(h.includes('不评估安全边际'), true);
+  assertEquals([...h.matchAll(/<div class="dim-label">([^<]*)<\/div>/g)].map(m => m[1]), ['资本回报', '股息', '估值'],
+    '只报三个维度；多出「安全边际」这一维就是越界产结论');
+});
+
+Deno.test('参照线只在口径行露一次；由 ROIC_GATE_PCT 插值，不得硬编码', async () => {
+  const h = valueAssessmentHkHtml(hkTencent, true);
+  // 不能数 '8%' 子串：腾讯股息 0.88% 里就含 '8%'，数子串会恒得 2 而假红。
+  // 改数「为参照线」这个只可能出现在口径行的短语，并单独核事实行区块里不含参照线。
+  assertEquals(h.split('为参照线').length - 1, 1, '参照线只能出现一次');
+  const facts = h.slice(h.indexOf('<div class="value-hk-rows">'), h.indexOf('</div><div class="value-note">'));
+  assertEquals(facts.includes('参照'), false, '三行事实里不得夹带参照线');
+  assertEquals(h.includes(HK_NOTE_2), true);
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  assertEquals(html.includes("'<div class=\"value-note\">资本回报以 ' + ROIC_GATE_PCT + '% 为参照线"), true,
+    '参照线必须由常量插值，硬编码 8 会与引擎漂移');
+});
+
+Deno.test('A 股文案零回归：两句 value-note 与四维标签逐字不变', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  assertEquals(html.includes('价值评估只回答"值不值"，不等于买卖指令'), true);
+  assertEquals(html.includes('护城河只看近三年资本回报（ROIC），不含市场份额与行业格局'), true);
+  for (const w of ['护城河', '资本回报', '安全边际', '财务稳健'])
+    assertEquals(html.includes('<div class="dim-label">' + w + '</div>'), true);
+});
+
+Deno.test('跨层契约：GS 夹具 → 适配器 → 引擎 → 落库行 → 前端 HTML 全链路逐字', async () => {
+  Deno.env.set('STOCK_VALUE_HK_DISABLE_SERVE', '1');
+  const { mergeHkTables } = await import('../supabase/functions/stock-value-hk/gs_hk.ts');
+  const { computeHk } = await import('../supabase/functions/stock-value-hk/hk_engine.ts');
+  const { toHkDbRow } = await import('../supabase/functions/stock-value-hk/index.ts');
+  const fx = (n: string) => JSON.parse(Deno.readTextFileSync(new URL(`../supabase/functions/stock-value-hk/fixtures/${n}`, import.meta.url)));
+  const held = new Set(['00700', '09988']);
+  const { rows, stamps, years } = mergeHkTables(fx('hk_q1_sample.json'), fx('hk_q2_sample.json'), fx('hk_q3_sample.json'), held, new Date('2026-11-14T13:50:00Z'));
+  const db = toHkDbRow(computeHk(rows[0]), '2026-11-14', stamps, years);
+  // 前端读的列名必须与后端写的列名同源：任一端改名，这条就红
+  assertEquals(valueAssessmentHkHtml(db, true), valueAssessmentHkHtml(hkTencent, true));
+  const db2 = toHkDbRow(computeHk(rows[1]), '2026-11-14', stamps, years);
+  assertEquals(valueAssessmentHkHtml(db2, true), valueAssessmentHkHtml(hkAlibaba, true));
+});
+
+Deno.test('接线守卫：港股取数是独立只读 loader，挂进首屏 Promise.all', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  assertEquals(html.includes('async function loadStockValueHk('), true, '缺港股独立取数');
+  assertEquals(/Promise\.all\(\[loadStockScores\(\), loadStockValue\(\), loadIncomeWatch\(\), loadValueIndustryRef\(\), loadStockValueHk\(\)\]\)/.test(html), true,
+    '港股 loader 必须挂进首屏 Promise.all，否则渲染时 valueHkState 恒 null');
+  const s = html.indexOf('async function loadStockValueHk(');
+  const body = html.slice(s, html.indexOf('\n}\n', s));
+  assertEquals(body.includes("sb.from('stock_value_hk')"), true, '必须读新表');
+  assertEquals(body.includes("sb.from('stock_value')"), false, '不得读 A 股表');
+  assertEquals(body.includes('.order('), true, '取最新批次必须显式排序');
+  assertEquals(/filter\(c=>\/\^\\d\{5\}\$\/\.test\(c\)\)/.test(body), true, '只取 5 位港股码');
+  assertEquals(body.includes('valueHkState = { batch, rows: new Map('), true, '必须落成 Map<code,row>');
+});
+
+Deno.test('接线守卫：A 股取数与门禁/换仓调用点一字未改（spec §11）', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  assertEquals(html.includes('${valueGateHtml(vRowForSwap, valueIndRef ? valueIndRef.byL2 : null)}'), true,
+    '价值门禁仍只吃 A 股行；港股行天然取不到 ⇒ 返回空，无需额外屏蔽');
+  assertEquals(html.includes('const swap = swapSuggest(vRowForSwap, valueRows, heldCodes);'), true);
+  assertEquals(html.includes("const orFilter = legFilter(stocks.map(s=>s.code));"), true, 'loadStockValue 的取数范围未改');
+  assertEquals(/function legFilter\(codes\)\{[\s\S]*?\/\^\\d\{5,6\}\$\//.test(html), true,
+    'legFilter 的 5,6 位形态不改：它放行港股码去查 stock_value，而那张表没有港股行 ⇒ 返回空，无害');
+});
+
+Deno.test('港股行天然拿不到 A 股门禁与换仓（无需额外屏蔽，spec §7）', () => {
+  assertEquals(valueGateHtml(null), '');
+  assertEquals(swapSuggest(null, [], []), null);
+  assertEquals(swapSuggest(undefined as unknown as null, [hkTencent as unknown as Record<string, unknown>], ['00700']), null);
 });
