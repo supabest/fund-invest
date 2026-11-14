@@ -9,7 +9,7 @@
 //   ④ 旧「编辑现场保全」回放机制（FORM_PURE/captureForms/restoreForms/toggle*）彻底删除，
 //      而 autoRefresh 的「表单打开就跳过」守卫必须保留（详情表单仍挂 .fund-body.open）。
 import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { signalDotState, parseDetailHash, detailHash } from "./detail_view_logic.ts";
+import { signalDotState, fundDipStrong, parseDetailHash, detailHash } from "./detail_view_logic.ts";
 
 Deno.test("signalDotState：止盈优先于抄底，两者都没有才是「不动」", () => {
   assertEquals(signalDotState(true, true), "sell");
@@ -23,6 +23,21 @@ Deno.test("signalDotState：调用方传的是长度/对象等真值，按真值
   assertEquals(signalDotState(1, 0), "sell");
   assertEquals(signalDotState(null, undefined), "hold");
   assertEquals(signalDotState("", ""), "hold");
+});
+
+Deno.test("fundDipStrong：安全垫 + 历史最深回撤双突破才升强档（2026-11-14 用户裁决）", () => {
+  const cost = { kind: "cost" };
+  const deep = { kind: "deep", completion: 95 };
+  assertEquals(fundDipStrong([cost, deep]), true);
+  assertEquals(fundDipStrong([deep, cost]), true, "腿顺序无关");
+  assertEquals(fundDipStrong([cost, { kind: "lump" }, { kind: "ladder" }, deep]), true, "夹带其它两条腿不影响");
+  assertEquals(fundDipStrong([null, cost, { kind: "deep", shout: false }]), true, "shout 不参与判据，暂停时判据状态仍如实显示");
+});
+
+Deno.test("fundDipStrong：单腿 / 缺腿 / 脏值一律不升强档", () => {
+  for (const dips of [[{ kind: "cost" }], [{ kind: "deep" }], [{ kind: "lump" }, { kind: "ladder" }], [], null, undefined, "cost,deep", {}]) {
+    assertEquals(fundDipStrong(dips), false, "不该闪：" + JSON.stringify(dips));
+  }
 });
 
 Deno.test("parseDetailHash：#/fund/<id> 与 #/stock/<id> 解析出 kind 与字符串 id", () => {
@@ -129,6 +144,16 @@ Deno.test("接线守卫：概览行 CSS 用 minmax(0,1fr) 保住名称省略号�
   assert(/\.ov-dot\.sell\{background:var\(--brick\)/.test(html), "止盈点用砖红（与横幅同 token）");
   assert(/\.ov-dot\.buy\{background:var\(--jade\)/.test(html), "抄底点用翠玉（与横幅同 token）");
   assert(html.includes("ov-legend"), "信号点要有图例说明（买/卖/不动一眼可懂）");
+});
+
+Deno.test("接线守卫：抄底绿灯分级只加动效、不改任何判据（2026-11-14 用户裁决）", () => {
+  assert(html.includes("signalDotState(!!alert, dips.length>0)"), "基金概览点亮灯判据不许改");
+  assert(html.includes("signalDotState(!!sAlert, sDipGate.light)"), "股票侧不参与分级，判据原样");
+  assert(html.includes("fundDipStrong(dips)"), "基金概览要算强档");
+  assert(/return overviewRowHtml\('fund', f, [^\n]*dot, strong\)/.test(html), "强档必须传进概览行渲染");
+  assert(/@keyframes ov-buy-pulse/.test(html), "双突破要有闪烁动效");
+  assert(html.includes("prefers-reduced-motion"), "闪烁必须尊重系统「减少动效」设置");
+  assert(html.includes("强抄底（双突破·闪烁）"), "图例要说清闪烁含义");
 });
 
 Deno.test("接线守卫：研究/评分/价值门禁/换仓四块事实移入详情事实区，编辑表单只剩可编辑字段", () => {

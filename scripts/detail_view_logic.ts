@@ -5,7 +5,7 @@
 // 详情是独立 DOM 区域：列表重绘永远不碰详情表单（结构上取代旧的「编辑现场保全」回放机制）。
 // 实现体只存在于 index.html 的 DETAIL_PURE 块：本文件不抄第二份，抽取失败必须炸（绝不静默降级）。
 const MARKER = /\/\/ ==== DETAIL_PURE_BEGIN ====([\s\S]*?)\/\/ ==== DETAIL_PURE_END ====/;
-const EXPORT_NAMES = ['signalDotState', 'parseDetailHash', 'detailHash'];
+const EXPORT_NAMES = ['signalDotState', 'fundDipStrong', 'parseDetailHash', 'detailHash'];
 
 async function load(): Promise<Record<string, unknown>> {
   const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
@@ -26,6 +26,8 @@ export type DetailRoute = { kind: 'fund' | 'stock'; id: string };
 
 /** 行尾信号点三态：止盈优先于抄底（两者同时命中时只报更紧急的卖出），都没有则中性「不动」。 */
 export const signalDotState = F.signalDotState as (hasSell: unknown, hasBuy: unknown) => 'sell' | 'buy' | 'hold';
+/** 抄底绿灯强档（2026-11-14 用户裁决）：dips 同时含 cost + deep 两腿才闪烁，其余落回普通绿灯。 */
+export const fundDipStrong = F.fundDipStrong as (dips: unknown) => boolean;
 /** 解析 location.hash → 详情路由；非详情格式（含空/残缺/未知 kind/多级路径）一律 null（回概览）。 */
 export const parseDetailHash = F.parseDetailHash as (hash: string | null | undefined) => DetailRoute | null;
 /** 详情路由 → hash；非法 kind / 空 id / 含斜杠 id 给空串（绝不造出解析不回来的死链）。 */

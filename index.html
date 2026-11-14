@@ -95,6 +95,18 @@
   .ov-dot.sell{background:var(--brick); box-shadow:0 0 7px rgba(191,68,60,.75);}
   .ov-dot.buy{background:var(--jade); box-shadow:0 0 7px rgba(63,150,113,.75);}
   .ov-dot.hold{background:var(--line-strong);}
+  /* 抄底绿灯分级（2026-11-14 用户裁决）：安全垫 + 历史最深回撤完成度≥90% 双突破才闪烁，
+     其余抄底信号仍是常亮绿灯。只加动效、不改任何判据与阈值；脉冲走 opacity/光晕/缩放，不动 --jade token。 */
+  @keyframes ov-buy-pulse{
+    0%,100%{opacity:1; transform:scale(1); box-shadow:0 0 7px rgba(63,150,113,.75);}
+    50%{opacity:.45; transform:scale(1.25); box-shadow:0 0 13px 3px rgba(63,150,113,.95);}
+  }
+  .ov-dot.buy.buy-strong{animation:ov-buy-pulse 1.2s ease-in-out infinite;}
+  /* 图例里的示例点静态强调：整行常闪会变成噪音 */
+  .ov-legend .ov-dot.buy.buy-strong{animation:none; opacity:1; transform:none; box-shadow:0 0 10px 2px rgba(63,150,113,.9);}
+  @media (prefers-reduced-motion: reduce){
+    .ov-dot.buy.buy-strong{animation:none; box-shadow:0 0 11px 2px rgba(63,150,113,.9);}
+  }
 
   /* 整页详情：概览退场、事实区在上 / 编辑表单在下。表单容器沿用 body-/sbody- 旧 id 与 .fund-body.open，
      保存/删除/一键获取/autoRefresh「打开即跳过」守卫全部不改；列表重绘只刷事实区，打字现场结构性保全 */
@@ -3869,6 +3881,19 @@ function signalDotState(hasSell, hasBuy){
   if(hasBuy) return 'buy';
   return 'hold';
 }
+// 抄底绿灯分级（2026-11-14 用户裁决）：「安全垫 + 历史最深回撤」双突破才升为强档（闪烁），
+// 其余抄底信号维持常亮。dips 是 fundDipList 的四腿数组，kind 存在即视为该腿突破——
+// 与概览点 dips.length>0 同一口径，不看 shout（主信号暂停时判据状态仍要如实显示），也不新增任何阈值。
+// 股票侧无 deep 腿，调用方不传 strong，自动落回普通绿灯。
+function fundDipStrong(dips){
+  if(!Array.isArray(dips)) return false;
+  let cost = false, deep = false;
+  for(const d of dips){
+    if(d && d.kind==='cost') cost = true;
+    else if(d && d.kind==='deep') deep = true;
+  }
+  return cost && deep;
+}
 function parseDetailHash(hash){
   const m = /^#\/(fund|stock)\/([^/]+)$/.exec(String(hash==null ? '' : hash));
   if(!m) return null;
@@ -3885,16 +3910,19 @@ function detailHash(kind, id){
 let detailState = null;      // {kind:'fund'|'stock', id:string} | null
 let detailViaPush = false;   // 本次详情是否由页内点击推入（返回键 history.back；直刷进来则清 hash，不跳出站外）
 
-function overviewRowHtml(kind, item, mv, ret, dot){
+function overviewRowHtml(kind, item, mv, ret, dot, strong){
   const name = escapeHtml(item.name || (kind==='fund' ? '未命名基金' : '未命名股票'));
   const code = String((kind==='fund' ? item.fundCode : item.code)||'').trim();
   const retCls = (ret!==null && ret>=0) ? 'ret-pos' : 'ret-neg';
-  const dotTitle = dot==='sell' ? '止盈提醒' : dot==='buy' ? '抄底提醒' : '暂无买卖提醒';
+  const strongBuy = dot==='buy' && !!strong;
+  const dotTitle = dot==='sell' ? '止盈提醒'
+    : strongBuy ? '强抄底信号 · 安全垫与历史最深回撤双双突破'
+    : dot==='buy' ? '抄底提醒' : '暂无买卖提醒';
   return `<div class="ov-row" data-kind="${kind}" data-id="${escapeHtml(String(item.id))}" role="button" tabindex="0" title="查看详情">
     <div class="ov-name">${name}${code?'<span class="ov-code">'+escapeHtml(code)+'</span>':''}</div>
     <div class="ov-mv">${fmtMoney(mv)}</div>
     <div class="ov-ret ${retCls}">${fmtPct(ret,1)}</div>
-    <span class="ov-dot ${dot}" title="${dotTitle}" aria-label="${dotTitle}"></span>
+    <span class="ov-dot ${dot}${strongBuy?' buy-strong':''}" title="${dotTitle}" aria-label="${dotTitle}"></span>
   </div>`;
 }
 
@@ -4110,9 +4138,10 @@ function renderFundList(){
     const dCost = dipAlertFund(f, sig);
     const dips = fundDipList(dCost, f, sig, coef);
     const dot = signalDotState(!!alert, dips.length>0);
-    return overviewRowHtml('fund', f, parseFloat(f.marketValue)||0, ret, dot);
+    const strong = fundDipStrong(dips);
+    return overviewRowHtml('fund', f, parseFloat(f.marketValue)||0, ret, dot, strong);
   }).join('');
-  list.innerHTML = '<div class="ov-legend"><span class="ov-dot sell"></span>止盈 <span class="ov-dot buy"></span>抄底 <span class="ov-dot hold"></span>暂无提醒 · 点行进详情</div><div class="ov-list">'+rows+'</div>';
+  list.innerHTML = '<div class="ov-legend"><span class="ov-dot sell"></span>止盈 <span class="ov-dot buy"></span>抄底 <span class="ov-dot buy buy-strong"></span>强抄底（双突破·闪烁） <span class="ov-dot hold"></span>暂无提醒 · 点行进详情</div><div class="ov-list">'+rows+'</div>';
   list.querySelectorAll('.ov-row').forEach(row=>{
     const go = ()=> gotoDetail(row.dataset.kind, row.dataset.id);
     row.addEventListener('click', go);
