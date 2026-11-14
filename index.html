@@ -130,6 +130,8 @@
   .ref-empty{font-size:13px; color:var(--muted); font-style:italic;}
   /* 价值四维雷达：2×2 网格，每格一个维度 */
   .value-radar{display:grid; grid-template-columns:1fr 1fr; gap:8px 12px; margin-bottom:10px;}
+  /* 港股降维口径：三行事实竖排（A 股四维是 2×2 网格，口径不同故另立类，不改 .value-radar） */
+  .value-hk-rows{display:grid; grid-template-columns:1fr; gap:6px; margin-bottom:10px;}
   .value-dim{font-size:13px; line-height:1.5;}
   .value-dim .dim-label{color:var(--muted); font-size:11.5px;}
   .value-dim .dim-val{color:var(--ivory); font-weight:500;}
@@ -375,6 +377,7 @@
     .ref-row{font-size:14px;}
     .ref-empty{font-size:13px;}
     .value-radar{gap:10px 16px;}
+    .value-hk-rows{gap:8px;}
     .value-dim{font-size:13px;}
     .value-dim .dim-label{font-size:11.5px;}
     .value-verdict{font-size:14px;}
@@ -1277,6 +1280,47 @@ function valueAssessmentHtml(vRow, indByL2, hasBatch){
   html += '<div class="value-verdict"><span class="' + verdictCls + '">' + verdict + '</span></div>';
   html += '<div class="value-note">价值评估只回答"值不值"，不等于买卖指令</div>';
   html += '<div class="value-note">护城河只看近三年资本回报（ROIC），不含市场份额与行业格局</div>';
+  html += '</div>';
+  return html;
+}
+
+// ---- 港股价值评估（降维口径，2026-11-14）----
+// 独立表 stock_value_hk，只报三行事实：资本回报 / 股息 / 估值。不产 tier、不算安全边际、不比同业。
+// 缺失一律「无数据」：A 股 valueFmtPct 回 'NA'，口径不同 ⇒ 另写格式化器，不复用也不改它。
+function hkFmtPct(v, d){
+  if(v===null || v===undefined || isNaN(Number(v))) return '无数据';
+  return Number(v).toFixed(d===undefined?2:d).replace('-', '\u2212') + '%';
+}
+function hkFmtNum(v, d){
+  if(v===null || v===undefined || isNaN(Number(v))) return '无数据';
+  return Number(v).toFixed(d===undefined?2:d).replace('-', '\u2212');
+}
+function valueAssessmentHkHtml(hkRow, hasBatch){
+  if(!hkRow) return hasBatch ? '<div class="ref-section"><div class="ref-title">价值评估</div><div class="ref-empty">本批次无该股数据（未判定）</div></div>' : '';
+  var med = valueNumOrNull(hkRow.roic_med);
+  var min3 = valueNumOrNull(hkRow.roic_min3);
+  var dy = valueNumOrNull(hkRow.div_yield);
+  var dy5 = valueNumOrNull(hkRow.div_yield_5y);
+  var pe = valueNumOrNull(hkRow.pe);
+  var pb = valueNumOrNull(hkRow.pb);
+  // 达标只看 med（cur 与 med 相互独立）；8% 由 ROIC_GATE_PCT 插值，与引擎同值由测试钉住
+  var retTxt, retCls;
+  if(med === null){ retTxt = '无数据'; retCls = ''; }
+  else {
+    var ok = med >= ROIC_GATE_PCT;
+    retCls = ok ? 'ok' : 'warn';
+    retTxt = (ok ? '达标' : '未达标') + ' · 近三年中位 ' + hkFmtPct(med, 2) + (min3 === null ? '' : '（最差年 ' + hkFmtPct(min3, 2) + '）');
+  }
+  var dyTxt = dy === null ? '无数据' : hkFmtPct(dy, 2) + (dy5 === null ? '' : '（近五年平均 ' + hkFmtPct(dy5, 2) + '）');
+  var valTxt = (pe === null && pb === null) ? '无数据' : 'PE ' + hkFmtNum(pe, 2) + ' · PB ' + hkFmtNum(pb, 2);
+  var html = '<div class="ref-section"><div class="ref-title">价值评估</div>';
+  html += '<div class="value-hk-rows">';
+  html += '<div class="value-dim"><div class="dim-label">资本回报</div><div class="dim-val ' + retCls + '">' + retTxt + '</div></div>';
+  html += '<div class="value-dim"><div class="dim-label">股息</div><div class="dim-val">' + dyTxt + '</div></div>';
+  html += '<div class="value-dim"><div class="dim-label">估值</div><div class="dim-val">' + valTxt + '</div></div>';
+  html += '</div>';
+  html += '<div class="value-note">港股只报资本回报、股息与估值三项；不评估安全边际，也不与同业比较</div>';
+  html += '<div class="value-note">资本回报以 ' + ROIC_GATE_PCT + '% 为参照线，按平台日历年度口径，可能与公司自身财年不完全对齐</div>';
   html += '</div>';
   return html;
 }

@@ -16,7 +16,8 @@ const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter
   'incomeChannelOf', 'renderIncomeList', 'foldCardHtml',
   'ROIC_GATE_PCT', 'valueMedian', 'valueIndStatsOf', 'valueMoatVetoHtml', 'valueVetoHtml', 'valueAssessmentHtml',
   'ROIC_TREND_FLOOR_PCT', 'valueTrendExempt',
-  'profitRefHtml', 'buyRefHtml'];
+  'profitRefHtml', 'buyRefHtml',
+  'hkFmtPct', 'hkFmtNum', 'valueAssessmentHkHtml'];
 
 async function load(): Promise<Record<string, unknown>> {
   const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
@@ -119,6 +120,12 @@ export const valueTrendExempt = NS.valueTrendExempt as (row: Record<string, unkn
 /** 价值评估栏（2026-11-01 三栏收口）：四维 + 人话 verdict；只回答「值不值」，不发买卖指令。 */
 export const valueAssessmentHtml = NS.valueAssessmentHtml as (
   row: Record<string, unknown> | null | undefined, indByL2: Record<string, IndRefLike> | null, hasBatch: boolean,
+) => string;
+/** 港股降维口径（2026-11-14）：三行事实 + 两句口径行；缺失回「无数据」而非 A 股的 'NA'。 */
+export const hkFmtPct = NS.hkFmtPct as (v: number | null, d?: number) => string;
+export const hkFmtNum = NS.hkFmtNum as (v: number | null, d?: number) => string;
+export const valueAssessmentHkHtml = NS.valueAssessmentHkHtml as (
+  row: Record<string, unknown> | null | undefined, hasBatch: boolean,
 ) => string;
 /** 止盈参考栏：三态（已达档 / 下一档 / 全部执行完）必须与邮件 tierNoteHtml 同句；缺数据不冒充数值。 */
 type ProfitAlertLike = { tier: { ret: number; sell: number }; ret: number } | null;
