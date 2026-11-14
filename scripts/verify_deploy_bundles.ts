@@ -16,6 +16,7 @@ const MODULES = [
   "stock-research",
   "business-mix",
   "stock-value",
+  "stock-value-hk",
 ] as const;
 type Module = (typeof MODULES)[number];
 
