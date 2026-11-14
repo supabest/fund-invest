@@ -1,5 +1,9 @@
 // scripts/hk_sql_artifacts_test.ts — 两份 SQL 产物的静态门禁（不连库、不执行）
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
+import { computeHk, type HkRaw } from '../supabase/functions/stock-value-hk/hk_engine.ts';
+
+Deno.env.set('STOCK_VALUE_HK_DISABLE_SERVE', '1');   // 不设此变量 index.ts 末段 Deno.serve 会在 import 时真绑端口，套件挂死（同 index_test.ts:4-5 范式）
+const { toHkDbRow } = await import('../supabase/functions/stock-value-hk/index.ts');
 
 const read = (n: string) => Deno.readTextFile(new URL(`./${n}`, import.meta.url));
 
@@ -13,11 +17,21 @@ Deno.test('迁移：表名/主键/索引与 spec §4 逐字一致', async () => 
 
 Deno.test('迁移：列集合与 toHkDbRow 逐字对齐（多一列少一列都会让整批 insert 报错或静默丢字段）', async () => {
   const s = await read('migrate_stock_value_hk.sql');
-  const body = s.slice(s.indexOf('create table if not exists stock_value_hk ('), s.indexOf('primary key (batch_date, code)'));
+  // 只在 CREATE TABLE 列定义内捞，且先剥 -- 行内注释：`name text,` 等行的注释含中文说明，
+  // 万一注释里出现 `xxx numeric` 形态就会被误捞成列。
+  const body = s.slice(s.indexOf('create table if not exists stock_value_hk ('), s.indexOf('primary key (batch_date, code)'))
+    .replace(/--[^\n]*/g, '');
   // 不加 ^ 锚：迁移里 `roic_cur numeric, roic_med numeric, roic_min3 numeric` 三个列共用一行（照 spec §4 原样），
   // 行首锚只会捞到每行第一列 ⇒ 12 列被数成 8 列，这条守卫会假红。
   const cols = [...body.matchAll(/([a-z_0-9]+)\s+(?:date|text|numeric|boolean|jsonb)\b/g)].map(m => m[1]);
-  assertEquals(cols, ['batch_date', 'code', 'name', 'roic_cur', 'roic_med', 'roic_min3', 'div_yield', 'div_yield_5y', 'pe', 'pb', 'roic_ok', 'extras']);
+  // 判据不手抄字面清单：键直接取自 toHkDbRow 实际调用的返回值——今后有人加/改键，这条守卫必须撞红。
+  const raw: HkRaw = { code: '00700', name: '腾讯控股', roic3: [10.5299, 15.8648, 15.8625],
+    divYield: 0.8848080133555927, divY5y: 0.8381616844832607, pe: 13.078457, pb: 4.189377 };
+  const keys = Object.keys(toHkDbRow(computeHk(raw), '2026-11-13',
+    { roic: '20231231,20241231,20251231', div_cur: '20251231', div_5y: '20211231-20251231', pe: '20261113', pb: '20261113' },
+    ['2023', '2024', '2025']));
+  // 比数组而非集合 ⇒ 同名同序：PostgREST 的 insert 靠键名，人的排错靠肉眼对齐顺序，中间插列也要红。
+  assertEquals(cols, keys, '迁移 DDL 列必须与 toHkDbRow 输出键同名同序（spec §4 与 Task 3 落库映射的唯一契约）');
 });
 
 Deno.test('迁移：roic_ok 是可空 boolean（三态），且**不得**有 rf_fallback / margin_of_safety / tier', async () => {
