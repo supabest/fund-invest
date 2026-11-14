@@ -1050,8 +1050,14 @@ Deno.test('接线守卫：价值评估栏每卡常驻，行业参照与批次状
     '价值栏一旦跟灯位绑定就又变回「抄底才提醒风险」的附属标注了');
   assertEquals(/const vRow = valueState \? valueState\.rows\.get\(/.test(html), true,
     '必须按 code 取本批次价值行（取不到就是未判定）');
-  assertEquals(/const valueRef = valueAssessmentHtml\(vRow, valueIndRef \? valueIndRef\.byL2 : null, !!valueState\);/.test(html), true,
-    '行业参照与「批次是否已生成」必须由调用点传入，纯函数不读全局');
+  // 2026-11-14 港股分流：原断言只钉 A 股单分支，分流后必然红。**改写而非删除**——
+  // 两条分支都要钉住，否则「港股接上了但 A 股被顺手改坏」或「A 股没动但港股根本没接」都能溜过。
+  assertEquals(/const valueRef = isHk\s*\?\s*valueAssessmentHkHtml\(hkRow, !!valueHkState\)\s*:\s*valueAssessmentHtml\(vRow, valueIndRef \? valueIndRef\.byL2 : null, !!valueState\);/.test(html), true,
+    '分流必须两条分支都在：港股走降维栏、A 股原调用一字不动，且行业参照与批次状态仍由调用点传入');
+  assertEquals(html.includes("const isHk = /^\\d{5}$/.test(String(s.code||'').trim());"), true,
+    '分流判据必须是 5 位码形态（港股），不得按名字或行业猜');
+  assertEquals(/const hkRow = valueHkState \? valueHkState\.rows\.get\(/.test(html), true,
+    '港股行必须按 code 取本批次（取不到就是未判定）');
   assertEquals(html.includes('${valueRef}'), true, '评估栏要渲染进卡片');
 });
 
@@ -1659,4 +1665,34 @@ Deno.test('跨层契约：GS 夹具 → 适配器 → 引擎 → 落库行 → �
   assertEquals(valueAssessmentHkHtml(db, true), valueAssessmentHkHtml(hkTencent, true));
   const db2 = toHkDbRow(computeHk(rows[1]), '2026-11-14', stamps, years);
   assertEquals(valueAssessmentHkHtml(db2, true), valueAssessmentHkHtml(hkAlibaba, true));
+});
+
+Deno.test('接线守卫：港股取数是独立只读 loader，挂进首屏 Promise.all', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  assertEquals(html.includes('async function loadStockValueHk('), true, '缺港股独立取数');
+  assertEquals(/Promise\.all\(\[loadStockScores\(\), loadStockValue\(\), loadIncomeWatch\(\), loadValueIndustryRef\(\), loadStockValueHk\(\)\]\)/.test(html), true,
+    '港股 loader 必须挂进首屏 Promise.all，否则渲染时 valueHkState 恒 null');
+  const s = html.indexOf('async function loadStockValueHk(');
+  const body = html.slice(s, html.indexOf('\n}\n', s));
+  assertEquals(body.includes("sb.from('stock_value_hk')"), true, '必须读新表');
+  assertEquals(body.includes("sb.from('stock_value')"), false, '不得读 A 股表');
+  assertEquals(body.includes('.order('), true, '取最新批次必须显式排序');
+  assertEquals(/filter\(c=>\/\^\\d\{5\}\$\/\.test\(c\)\)/.test(body), true, '只取 5 位港股码');
+  assertEquals(body.includes('valueHkState = { batch, rows: new Map('), true, '必须落成 Map<code,row>');
+});
+
+Deno.test('接线守卫：A 股取数与门禁/换仓调用点一字未改（spec §11）', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  assertEquals(html.includes('${valueGateHtml(vRowForSwap, valueIndRef ? valueIndRef.byL2 : null)}'), true,
+    '价值门禁仍只吃 A 股行；港股行天然取不到 ⇒ 返回空，无需额外屏蔽');
+  assertEquals(html.includes('const swap = swapSuggest(vRowForSwap, valueRows, heldCodes);'), true);
+  assertEquals(html.includes("const orFilter = legFilter(stocks.map(s=>s.code));"), true, 'loadStockValue 的取数范围未改');
+  assertEquals(/function legFilter\(codes\)\{[\s\S]*?\/\^\\d\{5,6\}\$\//.test(html), true,
+    'legFilter 的 5,6 位形态不改：它放行港股码去查 stock_value，而那张表没有港股行 ⇒ 返回空，无害');
+});
+
+Deno.test('港股行天然拿不到 A 股门禁与换仓（无需额外屏蔽，spec §7）', () => {
+  assertEquals(valueGateHtml(null), '');
+  assertEquals(swapSuggest(null, [], []), null);
+  assertEquals(swapSuggest(undefined as unknown as null, [hkTencent as unknown as Record<string, unknown>], ['00700']), null);
 });

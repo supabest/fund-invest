@@ -686,6 +686,9 @@ let valueTried = false;
 let incomeState = null;  // { batch, list: row[], total }；null=未生成/读取失败
 let incomeTried = false;
 
+// 港股价值腿（stock_value_hk 最新批次，降维口径）：独立表独立取数，null=未生成/读取失败 → 整区不出
+let valueHkState = null;   // { batch, rows: Map<code,row> }
+
 // 板块轮动（sector_rotation_daily 最新批次）：与 scoreState 同范式——null=尚未生成/读取失败，卡片优雅降级
 let sectorState = null; // { batch, rows, accCounts: Map<pk_etf,n>, poolPools: {l1,l2,batch} }
 
@@ -854,7 +857,7 @@ function initCloud(tries){
     if(sbUser && Date.now()-lastPullAt > 60000) syncOnOpen();
   });
   // 评分表 anon 可读、全局共享，客户端就绪即拉一次；失败仅降级不阻塞页面
-  Promise.all([loadStockScores(), loadStockValue(), loadIncomeWatch(), loadValueIndustryRef()]).then(()=>{ render(); loadTrendBadges(); });
+  Promise.all([loadStockScores(), loadStockValue(), loadIncomeWatch(), loadValueIndustryRef(), loadStockValueHk()]).then(()=>{ render(); loadTrendBadges(); });
   loadFundamentals().then(()=>renderStockSection());
   setSyncUI();
 }
@@ -933,6 +936,25 @@ async function loadIncomeWatch(){
     const ch = incomeChannelOf(data);
     incomeState = { batch, list: ch.list, total: ch.total };
   }catch(e){ console.warn('income watch load failed', e); }
+}
+
+// 港股价值腿（stock_value_hk 只读，降维口径）：范式照 loadIncomeWatch——先取最新批次，再按持仓码取行。
+// 单页足够：`.in('code', codes)` 已把范围限死在持仓港股（个位数），与 A 股腿的全市场读不同，
+// 不存在 db-max-rows=1000 截断风险；仍显式 order 保证确定性（PostgREST 默认行序会漂移）。
+async function loadStockValueHk(){
+  if(!cloudReady || !sb) return;
+  try{
+    const codes = stocks.map(s=>String(s.code||'').trim()).filter(c=>/^\d{5}$/.test(c));
+    if(!codes.length) return;
+    const { data: b, error: be } = await sb.from('stock_value_hk').select('batch_date')
+      .order('batch_date',{ascending:false}).limit(1).maybeSingle();
+    if(be || !b) return;
+    const batch = b.batch_date;
+    const { data, error } = await sb.from('stock_value_hk').select('*')
+      .eq('batch_date', batch).in('code', codes).order('code',{ascending:true});
+    if(error || !data) return;
+    valueHkState = { batch, rows: new Map(data.map(r=>[String(r.code), r])) };
+  }catch(e){ console.warn('hk value load failed', e); }
 }
 
 // 价值门禁的行业参照（2026-10-30 用户要求）：否决理由要能看懂「本股多少、门槛多少、同业多少」，
@@ -3915,14 +3937,19 @@ function fundDetailFactsHtml(f, ctx){
 }
 
 function stockDetailFactsHtml(s, ctx){
-  const {sAlert, nextTier, ret, sSellPlan, sRef, pillCls, dev, sDipGate, sPlan, dCostStock, sDip, vRow} = ctx;
+  const {sAlert, nextTier, ret, sSellPlan, sRef, pillCls, dev, sDipGate, sPlan, dCostStock, sDip, vRow, hkRow} = ctx;
   const dualHtml = dualSignalHtml(s, parseFloat(s.currentPrice)||0, 0);
   const dipPadHtml = sDipGate.needPad ? dipPadHintHtml() : '';
   const buyBanner = sDipGate.light ? stockBuyBannerHtml(sDip, sPlan, dCostStock) : '';
   const sellBanner = sAlert ? stockSellBannerHtml(sAlert, sSellPlan) + tierDoneBtnHtml('stock', s.id, sAlert.tier.ret) : '';
   const profitRef = profitRefHtml(sAlert, nextTier, ret, sSellPlan, s);
   const buyRef = buyRefHtml(sRef, pillCls, s, dev, sDipGate, sPlan, dCostStock, dualHtml, sDip, dipPadHtml, buyBanner);
-  const valueRef = valueAssessmentHtml(vRow, valueIndRef ? valueIndRef.byL2 : null, !!valueState);
+  // 港股（5 位码）走降维口径栏，A 股分支一字不动。valueGateHtml / swapSuggest 都以 stock_value 行为输入，
+  // 港股码在那张表里取不到 ⇒ 天然返回空，无需额外屏蔽（spec §7）。
+  const isHk = /^\d{5}$/.test(String(s.code||'').trim());
+  const valueRef = isHk
+    ? valueAssessmentHkHtml(hkRow, !!valueHkState)
+    : valueAssessmentHtml(vRow, valueIndRef ? valueIndRef.byL2 : null, !!valueState);
   // 评分明细 / 价值门禁 / 换仓参考 / 研究报告：只读事实，与三栏参考同区刷新；编辑表单区只留可编辑字段
   const valueRows = valueState ? [...valueState.rows.values()] : [];
   const vRowForSwap = valueState ? valueState.rows.get(String(s.code||'').trim()) : null;
@@ -3993,9 +4020,10 @@ function refreshDetail(){
     const sDipGate = stockDipGate(sDip, dCostStock, stockPadSet(s));
     const sPlan = sDipGate.light ? stockAddPlan(stockMvOf(s), parseFloat(s.currentPrice)||0, sDip.add, stockLotSizeOf(s)) : null;
     const vRow = valueState ? valueState.rows.get(String(s.code||'').trim()) || null : null;
+    const hkRow = valueHkState ? valueHkState.rows.get(String(s.code||'').trim()) || null : null;
     const sSellPlan = sAlert ? stockSellPlan(parseFloat(s.shares)||0, parseFloat(s.currentPrice)||0, sAlert.tier.sell, stockLotSizeOf(s)) : null;
     headEl.innerHTML = stockDetailHeadHtml(s, ret, sAlert, sDipGate);
-    factsEl.innerHTML = stockDetailFactsHtml(s, {sAlert, nextTier, ret, sSellPlan, sRef, pillCls, dev, sDipGate, sPlan, dCostStock, sDip, vRow});
+    factsEl.innerHTML = stockDetailFactsHtml(s, {sAlert, nextTier, ret, sSellPlan, sRef, pillCls, dev, sDipGate, sPlan, dCostStock, sDip, vRow, hkRow});
   }
   bindDetailFacts();
 }
