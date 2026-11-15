@@ -711,6 +711,7 @@ let cloudReady = false;   // SDK 加载成功
 let syncState = 'none';   // none | syncing | ok | error
 let syncErrMsg = '';
 let lastPullAt = 0;
+let cloudRecoveryHooked = false; // SDK 迟到自愈钩子只挂一次的闩（2026-11-15）
 
 // 数据存取：artifact 宿主的 window.storage 优先；本地浏览器直接打开时回退到 localStorage
 const store = {
@@ -780,6 +781,14 @@ async function loadAll(){
   render();
   ensureBenchmarkData();
   initCloud();
+  // SDK 迟到自愈（2026-11-15 本机会话实测复现一次）：async 加载的 supabase-js 若没在 initCloud 等待预算内就位，
+  // 云层当会话静默死亡（loader 全体第一行早退、胶囊/榜单全消失）。重新聚焦时若 SDK 已就绪则重启云层；只挂一次防重复。
+  if(!cloudRecoveryHooked){
+    cloudRecoveryHooked = true;
+    window.addEventListener('focus', ()=>{
+      if(!cloudReady && window.supabase && window.supabase.createClient) initCloud();
+    });
+  }
   // 未登录/云端不可用时，打开页面稍后直接本地自动刷新；已登录时由 syncOnOpen 完成后触发
   setTimeout(()=>{ if(!sbUser && !cloudReady) autoRefreshAll(); }, 2000);
   setTimeout(()=>{ if(!sbUser) autoRefreshAll(); }, 4000);
@@ -839,7 +848,9 @@ function initCloud(tries){
   // SDK 为 async 加载：网络慢时轮询等待，不阻塞页面渲染；超时则云同步降级为不可用
   const hasSdk = !!(window.supabase && window.supabase.createClient);
   if(!hasSdk){
-    if((tries||0) < 20){ setTimeout(()=>initCloud((tries||0)+1), 500); return; }
+    // 2026-11-15：等待预算 20×500ms=10s → 120×500ms=60s。弱网（手机/跨境到 pages.dev）拉 218KB 自托管
+    // SDK 首拉常超 10s；超 10s 放弃 = 所有 loader 第一行早退、云层当会话静默死亡（loaders 一次加载只跑一回）。
+    if((tries||0) < 120){ setTimeout(()=>initCloud((tries||0)+1), 500); return; }
     setSyncUI();
     return;
   }
@@ -869,6 +880,8 @@ function initCloud(tries){
     if(sbUser && Date.now()-lastPullAt > 60000) syncOnOpen();
   });
   // 评分表 anon 可读、全局共享，客户端就绪即拉一次；失败仅降级不阻塞页面
+  // boot 这批 loader 眼里的持仓指纹：syncOnOpen 之后据此判断是否补跑（冷启动竞态，2026-11-15 手机端实测）
+  batchStocksKey = stocksKeyOf();
   Promise.all([loadStockScores(), loadStockValue(), loadIncomeWatch(), loadValueIndustryRef(), loadStockValueHk()]).then(()=>{ render(); loadTrendBadges(); });
   loadFundamentals().then(()=>renderStockSection());
   setSyncUI();
@@ -967,6 +980,33 @@ async function loadStockValueHk(){
     if(error || !data) return;
     valueHkState = { batch, rows: new Map(data.map(r=>[String(r.code), r])) };
   }catch(e){ console.warn('hk value load failed', e); }
+}
+
+// 冷启动竞态修复（2026-11-15 手机端实测复现）：登录端首开时 initCloud 的 Promise.all 早于 syncOnOpen 跑，
+// loader 读到的是冷/旧 localStorage 持仓——手机端冷缓存时 loadStockValueHk 见 0 个 5 位码直接早退，
+// valueHkState 恒 null ⇒ 价值评估胶囊整块消失；而 loaders 一次页面加载只跑一回，本会话再无重试。
+// 对策：boot 侧先记持仓指纹；syncOnOpen 应用云端持仓后按指纹比对补跑——指纹变了或 boot 没取到的腿才重查；
+// 指纹未变且三态齐全 ⇒ 零开销跳过（热缓存桌面端不加任何请求）；同一指纹至多补跑一次（空库/持续失败不无限重试）。
+// loadIncomeWatch/loadValueIndustryRef 不吃持仓，不在补跑名单。
+let batchStocksKey = null;   // boot Promise.all 跑的时候 stocks 的码指纹
+let batchReloadKey = null;   // 已补跑过一次的指纹（限频闩）
+function stocksKeyOf(){
+  return stocks.map(s=>String(s.code||'').trim()).filter(Boolean).sort().join(',');
+}
+async function reloadBatchStatesAfterSync(){
+  if(!cloudReady || !sb) return;
+  const key = stocksKeyOf();
+  const keyChanged = key !== batchStocksKey;
+  if(!keyChanged && valueHkState && scoreState && valueState) return;
+  if(!keyChanged && key === batchReloadKey) return;
+  batchStocksKey = key; batchReloadKey = key;
+  const jobs = [];
+  if(keyChanged || !scoreState) jobs.push(loadStockScores());
+  if(keyChanged || !valueState) jobs.push(loadStockValue());
+  if(keyChanged || !valueHkState) jobs.push(loadStockValueHk());
+  if(!jobs.length) return;
+  try{ await Promise.all(jobs); }catch(e){}
+  render();
 }
 
 // 价值门禁的行业参照（2026-10-30 用户要求）：否决理由要能看懂「本股多少、门槛多少、同业多少」，
@@ -2871,6 +2911,7 @@ async function syncOnOpen(){
       applyServerSnapshots();
       applyStockSnapshots();
       autoRefreshAll(true); // 拉取云端后 force 再刷一次：确保最新净值与回算的连续天数不被旧云端快照覆盖丢失
+      reloadBatchStatesAfterSync(); // 冷启动竞态修复：boot 的 Promise.all 若跑在本同步之前（手机端冷缓存），用云端持仓补跑
       return;
     }
     console.log('[定投信号台] 本地数据更新，准备推送到云端');
@@ -2878,6 +2919,7 @@ async function syncOnOpen(){
     applyServerSnapshots();
     applyStockSnapshots();
     autoRefreshAll(true);
+    reloadBatchStatesAfterSync(); // 本地推云路径：boot 取数若失败过，这里按状态缺失补跑（持仓未变时指纹守卫直接跳过）
   }catch(e){
     console.error('[定投信号台] 同步失败:', e);
     syncState = 'error';

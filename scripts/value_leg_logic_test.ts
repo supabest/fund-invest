@@ -1696,3 +1696,62 @@ Deno.test('港股行天然拿不到 A 股门禁与换仓（无需额外屏蔽，
   assertEquals(swapSuggest(null, [], []), null);
   assertEquals(swapSuggest(undefined as unknown as null, [hkTencent as unknown as Record<string, unknown>], ['00700']), null);
 });
+
+// ==== 2026-11-15 手机端胶囊消失修复：冷启动竞态（Promise.all 早于 syncOnOpen）====
+// 实测链路：登录端冷缓存打开 → boot 的 Promise.all 用空/旧 stocks 跑 → loadStockValueHk 见 0 个 5 位码早退
+// → valueHkState 恒 null → 港股价值评估胶囊整块消失（A 股腿同理丢持仓行）；loaders 一次加载只跑一回，再无重试。
+Deno.test('接线守卫：syncOnOpen 两条成功路径都必须补跑批量状态加载（冷启动竞态修复）', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const s = html.indexOf('async function syncOnOpen(');
+  assertEquals(s >= 0, true, 'syncOnOpen 不存在');
+  const body = html.slice(s, html.indexOf('\n}\n', s));
+  assertEquals((body.match(/reloadBatchStatesAfterSync\(\);/g) || []).length, 2,
+    '云端胜出与本地推云两条成功路径都要补跑；catch 失败路径不跑（没有新持仓可依），实得：\n' + body);
+  // boot 侧必须先记指纹再并行取数：否则补跑判定无从对比
+  const is = html.indexOf('function initCloud(');
+  assertEquals(is >= 0, true, 'initCloud 不存在');
+  const init = html.slice(is, html.indexOf('\n}\n', is));
+  assertEquals(/batchStocksKey = stocksKeyOf\(\);\s*\n\s*Promise\.all\(\[loadStockScores/.test(init), true,
+    'initCloud 必须在 Promise.all 之前记录持仓指纹');
+});
+
+Deno.test('接线守卫：补跑器按「指纹变化 + 状态缺失」挑 loader——热缓存零开销、冷启动全量补齐、空库不无限重试', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const s = html.indexOf('async function reloadBatchStatesAfterSync(');
+  assertEquals(s >= 0, true, 'reloadBatchStatesAfterSync 不存在');
+  const body = html.slice(s, html.indexOf('\n}\n', s));
+  // 跳过条件必须同时要求数据来源（指纹）与结果（三态齐全）：指纹没变但 boot 取数失败时也要补
+  assertEquals(/!keyChanged && valueHkState && scoreState && valueState\) return;/.test(body), true,
+    '缺「指纹未变且三态齐全 ⇒ 跳过」——热缓存桌面端会被加无谓请求');
+  // 同指纹限频闩：空库/持续失败时 syncOnOpen 会被 focus 每 60s 触发，没有闩就是无限重查
+  assertEquals(/!keyChanged && key === batchReloadKey\) return;/.test(body), true, '缺同指纹补跑限频闩');
+  // 粒度：三条吃持仓的腿各自带补跑条件
+  assertEquals(/!scoreState\) jobs\.push\(loadStockScores\(\)\)/.test(body), true, '评分腿缺补跑条件');
+  assertEquals(/!valueState\) jobs\.push\(loadStockValue\(\)\)/.test(body), true, 'A股价值腿缺补跑条件');
+  assertEquals(/!valueHkState\) jobs\.push\(loadStockValueHk\(\)\)/.test(body), true, '港股腿缺补跑条件');
+  assertEquals(body.includes('loadIncomeWatch()'), false, '收益型名单不吃持仓，不得混进补跑名单白打请求');
+  assertEquals(body.includes('render();'), true, '补跑完必须重渲染，否则胶囊出来了卡片没刷');
+});
+
+// ==== 2026-11-15 之二：SDK 迟到 = 整会话云层静默死亡（本机实测复现一次）====
+// initCloud 的 SDK 轮询预算原为 20×500ms=10s：弱网首拉 218KB 自托管 supabase-js 超 10s 即放弃，
+// 所有 loader 第一行早退（if(!cloudReady||!sb) return），评分/价值/港股胶囊与云同步全体消失，
+// 且 loaders 一次页面加载只跑一回、永不自愈——这正是「手机端刷新多少次都没用」的头号嫌疑形态。
+Deno.test('接线守卫：SDK 等待预算 60s（10s 预算在弱网下会把整个云层判死刑）', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const s = html.indexOf('function initCloud(');
+  assertEquals(s >= 0, true, 'initCloud 不存在');
+  const body = html.slice(s, html.indexOf('\n}\n', s));
+  assertEquals(/if\(\(tries\|\|0\) < 120\)/.test(body), true,
+    'SDK 等待预算必须是 120×500ms=60s（弱网首拉 218KB 自托管 SDK 常超 10s）');
+});
+
+Deno.test('接线守卫：SDK 迟到自愈钩子——loadAll 只挂一次 focus 监听，SDK 已就绪而云层未起时重启 initCloud', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const s = html.indexOf('async function loadAll(');
+  assertEquals(s >= 0, true, 'loadAll 不存在');
+  const body = html.slice(s, html.indexOf('\n}\n', s));
+  assertEquals(body.includes('cloudRecoveryHooked'), true, '缺只挂一次的闩——重复挂监听会让 initCloud 重复跑、auth 重复订阅');
+  assertEquals(/!cloudReady && window\.supabase && window\.supabase\.createClient\) initCloud\(\)/.test(body), true,
+    '自愈条件必须齐全：云层未起且 SDK 真就绪才重启');
+});
