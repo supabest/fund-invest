@@ -53,6 +53,7 @@ const EXPORT_NAMES = [
   'dipAlertFundDeep', 'fundDeepLine',
   'sellBannerHtml', 'stockSellPlan', 'stockSellBannerHtml',
   'profitNextTier', 'profitAlertFromRet',
+  'parseTiersText', 'tiersFingerprint', 'applyPositionEvent', 'migrateStockPosition', 'positionReturnSummary',
   'supabaseBaseUrl',
   '__setState',
 ];
@@ -243,6 +244,25 @@ export const profitAlertFromRet = F.profitAlertFromRet as (
   ret: number | null,
   item: { profitTiers?: { ret: number; sell: number }[]; profitTaken?: number[] },
 ) => SellAlert | null;
+
+// —— 止盈档口径修复：LADDER_PURE 块内新增的持仓事件工具（页面与单测共用）——
+/** 档位文本解析：'收益率:卖出比例'，严格递增/去重/比例区间校验。 */
+export const parseTiersText = F.parseTiersText as (
+  text: string,
+) => { ok: boolean; error: string; tiers: { ret: number; sell: number }[] | null };
+/** 档表指纹：换表时判定历史 profitTaken 是否失效。 */
+export const tiersFingerprint = F.tiersFingerprint as (
+  tiers: { ret: number; sell: number }[] | null | undefined,
+) => string;
+/** 持仓事件应用：卖出不改 cost，加仓按加权平均重算，落袋走流水。 */
+// deno-lint-ignore no-explicit-any
+export const applyPositionEvent = F.applyPositionEvent as (pos: any, ev: any) => { ok: boolean; error: string; pos: any | null };
+/** 幂等迁移：补齐旧记录缺失的口径字段，不猜历史卖出。 */
+// deno-lint-ignore no-explicit-any
+export const migrateStockPosition = F.migrateStockPosition as (s: any) => any;
+/** 三率：账面浮盈率（档位依据）/ 已落袋 / 综合收益率。 */
+// deno-lint-ignore no-explicit-any
+export const positionReturnSummary = F.positionReturnSummary as (pos: any) => { ret: number | null; realizedPnL: number; cumBuyCost: number; totalReturn: number | null };
 
 /** 注入前端全局态（funds 影响 themeMarketValue；themeCaps/goal 影响 themeCapAmount）。 */
 export const setState = F.__setState as (next: { funds?: { theme?: string; marketValue?: number }[]; themeCaps?: Record<string, number>; goal?: number }) => void;

@@ -739,10 +739,16 @@ function migrateFunds(){
     }
     if(!f.profitTiers) f.profitTiers = DEFAULT_TIERS;
     if(!f.profitTaken) f.profitTaken = [];
+    if(!f.tierVersion) f.tierVersion = tiersFingerprint(f.profitTiers);
     if(!f.resumeRule) f.resumeRule = {requireDays:3, mode:'ma_only', targetDrawdown:''};
     if(f.benchmark===undefined || f.benchmark===null) f.benchmark = 'HS300';
     if(f.name && detectFundTraits(f.name).isQDII) f.isQDII = true;
   });
+}
+// 幂等迁移：补齐股票止盈档口径字段。旧记录没有 events/realizedPnL/tierVersion，
+// 一律按「当前 cost 即加权均价、无历史卖出」初始化，绝不猜测已落袋金额。
+function migrateStocks(){
+  stocks = stocks.map(s => migrateStockPosition(s));
 }
 
 // 一次性迁移：旧六板块占比重置为新配置（机器人10/电力15/全球资源20/日本15/美国30/均衡10）；本地与云端两条路径都过这里
@@ -777,6 +783,7 @@ async function loadAll(){
     if(s.stockCap !== undefined) stockCap = s.stockCap || 0;
   }catch(e){}
   migrateFunds();
+  migrateStocks();
   migrateThemeCaps();
   render();
   ensureBenchmarkData();
@@ -821,6 +828,47 @@ async function markProfitTaken(kind, id, hit){
   if(kind === 'fund') await saveFunds(); else await saveStocks();
   render();
   showToast('已标记 +' + hit + '% 档已执行');
+}
+// 清除已执行档位标记：旧数据被误标后唯一的自救入口（markProfitTaken 的批量写入保持不动）
+async function resetProfitTaken(kind, id){
+  const item = (kind === 'fund' ? funds : stocks).find(x => String(x.id) === String(id));
+  if(!item) return;
+  if(!confirm('确认清除该标的的全部已执行档位标记？此操作不会改动成本与持股数。')) return;
+  item.profitTaken = [];
+  if(kind === 'fund') await saveFunds(); else await saveStocks();
+  render();
+  showToast('已清除已执行档位标记');
+}
+// 局部同步表单字段值，绝不重建表单（接线守卫：表单只在打开与两处保存后重建）
+function syncStockFormFields(s, body){
+  if(!body) return;
+  const set = (k,v)=>{ const el = body.querySelector('[data-sk="'+k+'"]'); if(el) el.value = v; };
+  set('shares', s.shares);
+  set('cost', s.cost);
+}
+// 持仓变动登记：卖出/加仓走事件，成本由事件重算，用户不再靠改小成本价表达卖出
+async function recordPositionEvent(id, type){
+  const s = stocks.find(x=>x.id===id);
+  const body = document.getElementById('sbody-'+id);
+  if(!s || !body) return;
+  const qv = body.querySelector('[data-sk="evQty"]');
+  const pv = body.querySelector('[data-sk="evPrice"]');
+  const qty = parseFloat(qv ? qv.value : '')||0;
+  const price = parseFloat(pv ? pv.value : '')||0;
+  const r = applyPositionEvent(migrateStockPosition(s), {t:type, qty, price, ts:Date.now()});
+  if(!r.ok){ showToast(r.error); return; }
+  Object.assign(s, r.pos);
+  if(s.shares>0 && s.currentPrice>0) s.marketValue = stockMvOf(s);
+  if(type==='add' && (s.profitTaken||[]).length){
+    showToast('已登记加仓：成本按加权平均重算；成本基准已变，请复核历史已执行档位（标记保留）');
+  } else if(type==='sell'){
+    showToast('已登记卖出：成本价不变，落袋盈亏已单独记账');
+  } else {
+    showToast('已登记加仓：成本按加权平均重算');
+  }
+  await saveStocks();
+  syncStockFormFields(s, body);
+  render();
 }
 async function saveSettings(){
   try{ await store.set(SETTINGS_KEY, JSON.stringify({goal, stockCap})); }
@@ -1242,7 +1290,27 @@ function profitRefHtml(sAlert, nextTier, ret, sSellPlan, s){
   } else {
     rows.push('<span class="muted">各止盈档已执行完毕</span>');
   }
-  return '<div class="ref-section"><div class="ref-title">止盈参考</div><div class="ref-row">' + rows.join('') + '</div></div>';
+  // 有持仓却越顶 / 全档执行完时给出路，而不是只留一句「执行完毕」的死路。
+  // 注意：本函数经 VALUE_PURE 门面抽取，只能用 escapeHtml/fmtMoney 与纯 JS，不得引用块外函数。
+  let extra = '';
+  const held = s && Number(s.shares) > 0;
+  const extendBtn = '<button type="button" class="tier-extend-btn" data-id="' + escapeHtml(String(s && s.id || '')) + '">去新增档位</button>';
+  if(held && sAlert && ret !== null && ret >= sAlert.tier.ret + 20){
+    extra += '<div class="ref-row" style="margin-top:6px;"><span class="muted">收益率已明显越过最高档，建议新增更高档位（如 100:25）</span>' + extendBtn + '</div>';
+  } else if(held && !sAlert && !nextTier){
+    extra += '<div class="ref-row" style="margin-top:6px;"><span class="muted">仍持有仓位，可新增更高档位或清仓</span>' + extendBtn + '</div>';
+  }
+  const realized = s ? (Number(s.realizedPnL)||0) : 0;
+  if(s && realized !== 0){
+    const base = Number(s.cumBuyCost)||0;
+    const px = Number(s.currentPrice)||0, c = Number(s.cost)||0, sh = Number(s.shares)||0;
+    const total = base>0 ? (realized + (px-c)*sh)/base*100 : null;
+    const sign = (total!==null && total>=0) ? '+' : '';
+    extra += '<div class="ref-row" style="margin-top:6px;"><span class="muted">已落袋</span> ' + fmtMoney(realized)
+      + (total!==null ? '<span class="muted"> · 综合收益率</span> ' + sign + total.toFixed(1) + '%' : '')
+      + '<span class="muted"> · 账面浮盈率为档位依据</span></div>';
+  }
+  return '<div class="ref-section"><div class="ref-title">止盈参考</div><div class="ref-row">' + rows.join('') + '</div>' + extra + '</div>';
 }
 
 // 买入参考：收拢买入 label + 三腿事实句 + MA 行 + 双信号 + 买入横幅
@@ -2897,6 +2965,7 @@ async function syncOnOpen(){
         if(d.settings.stockCap !== undefined) stockCap = d.settings.stockCap || 0;
       }
       migrateFunds();
+      migrateStocks();
       try{
         await store.set(STORE_KEY, JSON.stringify(funds));
         await store.set(THEME_CAP_KEY, JSON.stringify(themeCaps));
@@ -3677,6 +3746,95 @@ function profitNextTier(tiers, taken, ret){
   const r = (ret === null || ret === undefined || isNaN(Number(ret))) ? null : Number(ret);
   return t.find(x => !tk.includes(x.ret) && (r === null || r < x.ret)) || null;
 }
+// ==== 止盈档口径修复：持仓事件与档位工具（纯函数，无 DOM，供页面与单测共用） ====
+// 裁定：cost = 加权平均买入价，卖出永不改写；加仓按加权重算；落袋单独记账。
+// 档位文本解析：'收益率%:卖出%' 逗号分隔；严格递增、去重、sell∈(0,100]。
+function parseTiersText(text){
+  const raw = String(text||'').trim();
+  if(!raw) return {ok:false, error:'止盈档不能为空', tiers:null};
+  const tiers = [];
+  for(const seg of raw.split(',')){
+    const m = seg.trim().match(/^(\d+(?:\.\d+)?)\s*:\s*(\d+(?:\.\d+)?)$/);
+    if(!m) return {ok:false, error:'档位格式应为 收益率:卖出比例，如 20:10,40:20', tiers:null};
+    const ret = Number(m[1]), sell = Number(m[2]);
+    if(!(ret>0) || !(sell>0) || sell>100) return {ok:false, error:'收益率须>0，卖出比例须在 0~100 之间', tiers:null};
+    tiers.push({ret, sell});
+  }
+  for(let i=1;i<tiers.length;i++){
+    if(tiers[i].ret <= tiers[i-1].ret) return {ok:false, error:'档位收益率须严格递增', tiers:null};
+  }
+  if(tiers.length>20) return {ok:false, error:'档位最多 20 档', tiers:null};
+  return {ok:true, error:'', tiers};
+}
+// 档表指纹：换表时判定历史 profitTaken 是否失效（只存 ret 数字，换表可能撞上同名档）
+function tiersFingerprint(tiers){
+  const t = (tiers && tiers.length) ? tiers : DEFAULT_TIERS;
+  return t.map(x=>x.ret+':'+x.sell).join(',');
+}
+// 事件应用：成本只由 buy/add/corporateAction/costAdjust 改写，sell 绝不碰 cost。
+function applyPositionEvent(pos, ev){
+  const p = Object.assign({}, pos);
+  const evs = Array.isArray(p.events) ? p.events.slice() : [];
+  const cost = Number(p.cost)||0, shares = Number(p.shares)||0;
+  const qty = Number(ev && ev.qty)||0, price = Number(ev && ev.price)||0;
+  const t = ev && ev.t;
+  if(t==='buy' || t==='add'){
+    if(!(qty>0) || !(price>0)) return {ok:false, error:'股数与成交价须为正数', pos:null};
+    const newShares = shares + qty;
+    p.shares = Math.round(newShares*1e6)/1e6;
+    p.cost = Math.round((cost*shares + price*qty)/newShares*1e6)/1e6;  // 加权均价，加仓合法改变基准
+    p.cumBuyCost = Math.round(((Number(p.cumBuyCost)|| (cost*shares)) + price*qty)*1e4)/1e4;
+    p.costVersion = (Number(p.costVersion)||0)+1;
+  } else if(t==='sell'){
+    if(!(qty>0) || !(price>0)) return {ok:false, error:'股数与成交价须为正数', pos:null};
+    if(qty > shares) return {ok:false, error:'卖出股数不能超过持股数', pos:null};
+    const lockedCost = cost;   // 锁定卖出当时的成本，后续加仓不回溯重算
+    p.shares = Math.round((shares-qty)*1e6)/1e6;
+    p.realizedPnL = Math.round(((Number(p.realizedPnL)||0) + (price-lockedCost)*qty)*1e4)/1e4;
+    p.realizedProceeds = Math.round(((Number(p.realizedProceeds)||0) + price*qty)*1e4)/1e4;
+    // cost 不动：卖出是执行档位的结果，不能反过来改写档位的尺
+  } else if(t==='costAdjust'){
+    if(!(price>0)) return {ok:false, error:'校正后的成本须为正数', pos:null};
+    p.cost = price; p.costVersion = (Number(p.costVersion)||0)+1;
+  } else if(t==='corporateAction'){
+    if(ev.kind==='split' && Number(ev.ratio)>0){
+      p.shares = Math.round(shares*Number(ev.ratio)*1e6)/1e6;
+      p.cost = Math.round(cost/Number(ev.ratio)*1e6)/1e6;
+      p.costVersion = (Number(p.costVersion)||0)+1;
+    } else if(ev.kind==='dividend' && Number(ev.cash)>0){
+      p.realizedPnL = Math.round(((Number(p.realizedPnL)||0)+Number(ev.cash))*1e4)/1e4;
+    } else return {ok:false, error:'公司行动参数不足', pos:null};
+  } else {
+    return {ok:false, error:'未知事件类型', pos:null};
+  }
+  evs.push(Object.assign({ts: Date.now()}, ev));
+  p.events = evs;
+  if(!p.schemaVersion) p.schemaVersion = 1;
+  return {ok:true, error:'', pos:p};
+}
+// 幂等迁移：旧记录只有 cost/shares/profitTiers/profitTaken，不猜历史卖出。
+function migrateStockPosition(s){
+  const p = Object.assign({}, s);
+  if(!p.profitTiers || !p.profitTiers.length) p.profitTiers = DEFAULT_TIERS;
+  if(!Array.isArray(p.profitTaken)) p.profitTaken = [];
+  if(!Array.isArray(p.events)) p.events = [];
+  if(p.realizedPnL===undefined) p.realizedPnL = 0;
+  if(p.realizedProceeds===undefined) p.realizedProceeds = 0;
+  if(p.cumBuyCost===undefined) p.cumBuyCost = (Number(p.cost)||0)*(Number(p.shares)||0);
+  if(p.costVersion===undefined) p.costVersion = 0;
+  if(p.tierVersion===undefined) p.tierVersion = tiersFingerprint(p.profitTiers);
+  if(p.schemaVersion===undefined) p.schemaVersion = 1;
+  return p;
+}
+// 三率：账面浮盈率（档位唯一依据）/ 已落袋 / 综合收益率（分母=累计买入成本）
+function positionReturnSummary(pos){
+  const cost = Number(pos.cost)||0, price = Number(pos.currentPrice)||0, shares = Number(pos.shares)||0;
+  const ret = (cost>0 && price>0) ? (price-cost)/cost*100 : null;
+  const realized = Number(pos.realizedPnL)||0;
+  const base = Number(pos.cumBuyCost)|| (cost*shares);
+  const totalReturn = base>0 ? (realized + (price-cost)*shares)/base*100 : null;
+  return {ret, realizedPnL:realized, cumBuyCost:base, totalReturn};
+}
 // ==== LADDER_PURE_END ====
 
 // ==== CAL_PURE_BEGIN ====
@@ -3819,7 +3977,8 @@ async function refreshDisclosures(){
 
 // 标记本档已执行：写入 profitTaken（含更低档），随整包云同步，邮件端下一封自动跟随
 function tierDoneBtnHtml(kind, id, ret){
-  return `<button class="tier-done-btn" data-kind="${kind}" data-id="${escapeHtml(String(id))}" data-ret="${Number(ret)}">标记本档已执行</button>`;
+  return `<button class="tier-done-btn" data-kind="${kind}" data-id="${escapeHtml(String(id))}" data-ret="${Number(ret)}">标记本档已执行</button>`
+    + `<button class="tier-reset-btn" data-kind="${kind}" data-id="${escapeHtml(String(id))}">重置已执行档</button>`;
 }
 
 function pillClass(level){
@@ -4047,6 +4206,13 @@ function bindDetailFacts(){
   const facts = document.getElementById('detailFacts');
   const tierBtn = facts.querySelector('.tier-done-btn');
   if(tierBtn) tierBtn.addEventListener('click', async ()=>{ await markProfitTaken(tierBtn.dataset.kind, tierBtn.dataset.id, Number(tierBtn.dataset.ret)); });
+  const rstBtn = facts.querySelector('.tier-reset-btn');
+  if(rstBtn) rstBtn.addEventListener('click', async ()=>{ await resetProfitTaken(rstBtn.dataset.kind, rstBtn.dataset.id); });
+  const extBtn = facts.querySelector('.tier-extend-btn');
+  if(extBtn) extBtn.addEventListener('click', ()=>{
+    if(detailState) gotoDetail(detailState.kind, detailState.id);
+    showToast('在编辑表单的「自定义止盈档」里新增更高档位，如 100:25');
+  });
   const rp = facts.querySelector('.research-pill');
   if(rp) rp.addEventListener('click', ()=>{ const t = facts.querySelector('.rp-report'); if(t) t.scrollIntoView({behavior:'smooth', block:'start'}); });
 }
@@ -4280,7 +4446,7 @@ function stockFormHtml(s){
       <div class="field"><label>代码（A股6位 / 港股5位）</label><input type="text" data-sk="code" maxlength="6" value="${escapeHtml(s.code||'')}"></div>
       <div class="field full"><button type="button" class="btn ghost" data-action="fetchStock" style="border:1px solid var(--line-strong); padding:9px; border-radius:6px;">⟳ 自动获取行情（名称/现价/均线）</button><div class="small-note" data-wrap="stockFetchStatus"></div></div>
       <div class="field"><label>持股数（股）</label><input type="number" data-sk="shares" value="${s.shares??0}"></div>
-      <div class="field"><label>成本价（元/股）</label><input type="number" step="0.001" data-sk="cost" value="${s.cost??''}"></div>
+      <div class="field"><label>成本价（元/股，加权均价）</label><input type="number" step="0.001" data-sk="cost" value="${s.cost??''}"></div>
       <div class="field"><label>估值百分位（0-100，可选）</label><input type="number" data-sk="valuationPercentile" value="${s.valuationPercentile??''}"></div>
       <div class="field"><label>52周最高价（可选，自动获取回算）</label><input type="number" step="0.001" data-sk="high52w" value="${s.high52w??''}"></div>
       <div class="field"><label>目标跌幅安全垫（%，可选，如 20 表示 -20%）</label><input type="number" data-sk="targetDrawdown" value="${s.targetDrawdown??''}"></div>
@@ -4291,6 +4457,20 @@ function stockFormHtml(s){
             if(!pk) opts = `<option value="__custom__" selected>自定义：${cur}</option>` + opts;
             return opts; })()}
         </select>
+      </div>
+      <div class="field full"><label>自定义止盈档（可直接编辑，如 20:10,40:20,60:30,80:50,100:25）</label>
+        <input type="text" data-sk="tierText" value="${escapeHtml(profitTiersText(s))}">
+        <div class="small-note">冒号前是收益率%，后面是该档卖出持仓的比例%。可新增 +100% 等更高档；档位收益率须严格递增。切换上方预设会覆盖本框内容。</div>
+      </div>
+      <div class="field full"><label>持仓变动（卖出 / 加仓请登记，不要改小成本价）</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <input type="number" data-sk="evQty" placeholder="股数" style="flex:1;min-width:88px;">
+          <input type="number" step="0.001" data-sk="evPrice" placeholder="成交价 元/股" style="flex:1;min-width:120px;">
+          <button type="button" class="btn ghost" data-action="addPosition">登记加仓</button>
+          <button type="button" class="btn ghost" data-action="sellPosition">登记卖出</button>
+          <button type="button" class="btn ghost" data-action="resetTaken">重置已执行档</button>
+        </div>
+        <div class="small-note">卖出只减持股数、记落袋盈亏，<b>成本价不变</b>；加仓按加权平均重算成本。${Number(s.realizedPnL)>0 ? '当前已落袋 '+fmtMoney(Number(s.realizedPnL))+'。' : ''}</div>
       </div>
     </div>
     <div class="small-note" style="margin-top:8px;">行情每日自动更新（沪/深/港股均支持，港股按港币计价）；买卖提醒将同步到每日邮件。</div>
@@ -4305,6 +4485,18 @@ function bindStockBody(id){
   body.querySelector('[data-action="save"]').addEventListener('click', ()=> saveStockForm(id));
   body.querySelector('[data-action="delete"]').addEventListener('click', ()=> deleteStock(id));
   body.querySelector('[data-action="fetchStock"]').addEventListener('click', ()=> autoFetchStockData(id));
+  const presetEl = body.querySelector('[data-sk="tierPreset"]');
+  if(presetEl) presetEl.addEventListener('change', ()=>{
+    const tt = body.querySelector('[data-sk="tierText"]');
+    const p = TIER_PRESETS[presetEl.value];
+    if(p && tt) tt.value = p.tiers;
+  });
+  const addBtn = body.querySelector('[data-action="addPosition"]');
+  if(addBtn) addBtn.addEventListener('click', ()=> recordPositionEvent(id,'add'));
+  const sellBtn = body.querySelector('[data-action="sellPosition"]');
+  if(sellBtn) sellBtn.addEventListener('click', ()=> recordPositionEvent(id,'sell'));
+  const rstBtn = body.querySelector('[data-action="resetTaken"]');
+  if(rstBtn) rstBtn.addEventListener('click', ()=> resetProfitTaken('stock', id));
 }
 
 // 估值分位取数：浏览器直连东财估值分析接口（2026-10-15 在本页 DOM 级实测：ACAO:*，2129 期 / 160KB / 158-234ms 每只）。
@@ -4422,19 +4614,40 @@ async function saveStockForm(id){
   s.name = get('name').value.trim();
   s.code = get('code').value.trim();
   if(!/^\d{5,6}$/.test(s.code)){ showToast('代码须为5-6位数字'); return; }
-  s.shares = parseFloat(get('shares').value)||0;
-  s.cost = parseFloat(get('cost').value)||0;
   s.valuationPercentile = get('valuationPercentile').value;
   const shv = String(get('high52w').value||'').trim();
   if(shv!=='') s.high52w = parseFloat(shv)||0;
   s.targetDrawdown = get('targetDrawdown').value.trim();
-  const ptStock = get('tierPreset');
-  const psv = ptStock ? ptStock.value : '';
-  if(psv && TIER_PRESETS[psv]){
-    s.profitTiers = TIER_PRESETS[psv].tiers.split(',').map(x=>{ const seg = x.split(':').map(Number); return { ret: seg[0], sell: seg[1] }; });
-  } else if(!s.profitTiers || !s.profitTiers.length){
-    s.profitTiers = DEFAULT_TIERS;
+
+  // 成本口径守卫：只针对「手工改 cost 字段」；事件重算不走这里（合法加仓拉低成本不误报）
+  const prevCost = Number(s.cost)||0;
+  const newCost = parseFloat(get('cost').value)||0;
+  if(newCost > 0 && Number(s.currentPrice)>0 && newCost > Number(s.currentPrice)*5){
+    showToast('提示：成本价远大于现价，确认没把总成本金额填进成本单价？');
   }
+  if(prevCost>0 && newCost>0 && newCost < prevCost*0.8){
+    if(!confirm('成本价由 '+prevCost+' 下调为 '+newCost+'，收益率会跳高并可能越过最高止盈档。\n部分卖出请用「登记卖出」，不要改小成本价。\n确认这是买入成本校正？')) return;
+    s.events = (Array.isArray(s.events)?s.events:[]).concat([{t:'costAdjust', qty:0, price:newCost, from:prevCost, to:newCost, reason:'表单校正', ts:Date.now()}]);
+    s.costVersion = (Number(s.costVersion)||0)+1;
+  }
+  s.cost = newCost;
+  s.shares = parseFloat(get('shares').value)||0;
+
+  // 档位：始终以可编辑文本框为准（下拉预设只是快捷填入），解析失败不静默回退 DEFAULT_TIERS
+  const ttEl = get('tierText');
+  const parsed = parseTiersText(ttEl ? ttEl.value : profitTiersText(s));
+  if(!parsed.ok){ showToast('止盈档填写有误：' + parsed.error); return; }
+  const newTiers = parsed.tiers;
+  const oldFp = s.tierVersion || tiersFingerprint(s.profitTiers);
+  const newFp = tiersFingerprint(newTiers);
+  if(newFp !== oldFp && (s.profitTaken||[]).length){
+    if(!confirm('止盈档表已变更，原有已执行标记 [' + (s.profitTaken||[]).join(',') + '] 将全部清除。确认？')) return;
+    s.profitTaken = [];
+  }
+  s.profitTiers = newTiers;
+  s.tierVersion = newFp;
+  if(!Array.isArray(s.profitTaken)) s.profitTaken = [];
+
   if(s.shares>0 && s.currentPrice>0) s.marketValue = stockMvOf(s);
   await saveStocks();
   showToast('已保存，行情将于下一轮自动更新');
@@ -4514,6 +4727,11 @@ function fundBodyHtml(f){
             return opts; })()}
         </select>
       </div>
+      <div class="field full"><label>自定义止盈档（可直接编辑，如 20:10,40:20,60:30,80:50,100:25）</label>
+        <input type="text" data-k="tierText" value="${escapeHtml(profitTiersText(f))}">
+        <div class="small-note">冒号前是收益率%，后面是该档卖出持仓的比例%。档位收益率须严格递增；切换上方预设会覆盖本框内容。</div>
+      </div>
+      <div class="field full"><button type="button" class="btn ghost" data-action="resetTaken">重置已执行档位标记</button></div>
     </div>
 
     <div class="divider-label">⑤ 暂停 / 恢复规则</div>
@@ -4551,6 +4769,14 @@ function bindFundBody(id){
   const body = document.getElementById('body-'+id);
   body.querySelector('[data-action="save"]').addEventListener('click', ()=> saveFundForm(id));
   body.querySelector('[data-action="delete"]').addEventListener('click', ()=> deleteFund(id));
+  const presetEl = body.querySelector('[data-k="tierPreset"]');
+  if(presetEl) presetEl.addEventListener('change', ()=>{
+    const tt = body.querySelector('[data-k="tierText"]');
+    const p = TIER_PRESETS[presetEl.value];
+    if(p && tt) tt.value = p.tiers;
+  });
+  const rstBtn = body.querySelector('[data-action="resetTaken"]');
+  if(rstBtn) rstBtn.addEventListener('click', ()=> resetProfitTaken('fund', id));
   const fetchBtn = document.getElementById('autoFetchBtn-'+id);
   if(fetchBtn) fetchBtn.addEventListener('click', ()=> autoFetchFundData(id));
   // 市值 = 份额×净值，实时联动；成本两栏二选一，另一栏自动折算
@@ -4915,13 +5141,19 @@ async function saveFundForm(id){
   const qdiiEl = body.querySelector('[data-k="qdiiPremium"]');
   f.qdiiPremium = qdiiEl ? qdiiEl.value : '';
   f.manualPause = get('manualPause').checked;
-  const ptSel = get('tierPreset');
-  const pv = ptSel ? ptSel.value : '';
-  if(pv && TIER_PRESETS[pv]){
-    f.profitTiers = TIER_PRESETS[pv].tiers.split(',').map(x=>{ const seg = x.split(':').map(Number); return { ret: seg[0], sell: seg[1] }; });
-  } else if(!f.profitTiers || !f.profitTiers.length){
-    f.profitTiers = DEFAULT_TIERS;
+  // 档位：始终以可编辑文本框为准（下拉预设只是快捷填入），解析失败不静默回退
+  const ftEl = get('tierText');
+  const fParsed = parseTiersText(ftEl ? ftEl.value : profitTiersText(f));
+  if(!fParsed.ok){ showToast('止盈档填写有误：' + fParsed.error); return; }
+  const fNewTiers = fParsed.tiers;
+  const fOldFp = f.tierVersion || tiersFingerprint(f.profitTiers);
+  const fNewFp = tiersFingerprint(fNewTiers);
+  if(fNewFp !== fOldFp && (f.profitTaken||[]).length){
+    if(!confirm('止盈档表已变更，原有已执行标记 [' + (f.profitTaken||[]).join(',') + '] 将全部清除。确认？')) return;
+    f.profitTaken = [];
   }
+  f.profitTiers = fNewTiers;
+  f.tierVersion = fNewFp;
 
   const reqDays = parseInt(get('reqDays').value)||3;
   const mode = get('resumeMode').value;
@@ -5044,7 +5276,9 @@ document.getElementById('stockCapInput').addEventListener('change', async (e)=>{
 });
 document.getElementById('addStockBtn').addEventListener('click', async ()=>{
   const s = { id:'s'+Math.random().toString(36).slice(2,10), code:'', name:'', shares:0, cost:0,
-    currentPrice:0, priceDate:'', belowStreak:0 };
+    currentPrice:0, priceDate:'', belowStreak:0,
+    profitTiers: DEFAULT_TIERS, profitTaken: [], events: [], realizedPnL: 0, realizedProceeds: 0,
+    cumBuyCost: 0, costVersion: 0, schemaVersion: 1, tierVersion: tiersFingerprint(DEFAULT_TIERS) };
   stocks.push(s);
   await saveStocks();
   renderStockSection();
@@ -5134,7 +5368,7 @@ document.getElementById('addFundBtn').addEventListener('click', async ()=>{
     shares:0, marketValue:0, baseAmount:0, costBasis:0, costTotal:0, currentNav:0, ma60:0, ma120:0,
     manualPause:false, aboveMaStreak:0,
     resumeRule:{requireDays:3, mode:'ma_only', targetDrawdown:''},
-    profitTiers: DEFAULT_TIERS, profitTaken: []
+    profitTiers: DEFAULT_TIERS, profitTaken: [], tierVersion: tiersFingerprint(DEFAULT_TIERS)
   };
   funds.push(f);
   await saveFunds();
