@@ -184,3 +184,24 @@ Deno.test("基金迁移幂等：两次迁移结果全等；不猜历史赎回（
   const b = migrateFundPosition(a);
   assertEquals(b, a, "迁移必须幂等");
 });
+
+Deno.test("接线守卫：表头基金/股票收益率计入落袋——分子=浮盈+已落袋、分母=累计买入成本（缺省行回落持仓成本）", async () => {
+  const html = await Deno.readTextFile(new URL("../index.html", import.meta.url));
+  const s = html.indexOf("function render(){");
+  assert(s >= 0, "render 不存在");
+  const body = html.slice(s, html.indexOf("\nfunction setStatGroup(", s));
+  assert(/fundRealized = funds\.reduce\(\(s,f\)=> s \+ \(Number\(f\.realizedPnL\)\|\|0\), 0\)/.test(body),
+    "表头缺基金落袋累加（Number() 防缺字段）");
+  assert(/stockRealized = stocks\.reduce\(\(s,x\)=> s \+ \(Number\(x\.realizedPnL\)\|\|0\), 0\)/.test(body),
+    "表头缺股票落袋累加");
+  assertEquals((body.match(/if\(cum>0\) return s \+ cum;/g) || []).length, 2,
+    "两腿分母都必须优先用已迁移行的累计买入成本，缺省行回落持仓成本（与邮件概览同口径）");
+  assert(/fundRet = fundBase>0 \? \(\(fundMv-fundCost\)\+fundRealized\)\/fundBase\*100 : 0/.test(body),
+    "基金表头率必须 =（浮盈+落袋）/累计买入成本");
+  assert(/stockRet = stockBase>0 \? \(\(stockMv-stockCost\)\+stockRealized\)\/stockBase\*100 : 0/.test(body),
+    "股票表头率必须 =（浮盈+落袋）/累计买入成本");
+  assertEquals(html.includes("function setStatGroup(key, mv, ret, barPct, goalLbl, barColor, hint)"),
+    true, "setStatGroup 缺 hint 参");
+  assertEquals(html.includes("retEl.title = hint || '';"), true,
+    "落袋口径说明要走表头悬停提示（无落袋为空=纯浮盈口径）");
+});

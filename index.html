@@ -4054,17 +4054,36 @@ function render(){
   }, 0);
   const stockCost = stocks.reduce((s,x)=> s + (parseFloat(x.shares)||0)*(parseFloat(x.cost)||0), 0);
 
+  // 2026-11-16 用户裁定：表头基金/股票收益率计入止盈落袋——分子 = 浮盈 + 已落袋；
+  // 分母 = 累计买入成本（已迁移行用 cumBuyCost，缺省行回落持仓成本，与邮件「持仓概览」同口径）。
+  const fundRealized = funds.reduce((s,f)=> s + (Number(f.realizedPnL)||0), 0);
+  const stockRealized = stocks.reduce((s,x)=> s + (Number(x.realizedPnL)||0), 0);
+  const fundBase = funds.reduce((s,f)=>{
+    const cum = Number(f.cumBuyCost)||0;
+    if(cum>0) return s + cum;
+    const mv = parseFloat(f.marketValue)||0;
+    const cost = effectiveCost(f);
+    return s + ((mv>0 && f.currentNav>0 && cost>0) ? mv*cost/f.currentNav : mv);
+  }, 0);
+  const stockBase = stocks.reduce((s,x)=>{
+    const cum = Number(x.cumBuyCost)||0;
+    if(cum>0) return s + cum;
+    return s + (parseFloat(x.shares)||0)*(parseFloat(x.cost)||0);
+  }, 0);
+
   // 顶部分左右两组统计，与宽屏两列对齐；窄屏由 CSS 按 body[data-tab] 隐藏另一组
-  const fundRet = fundCost>0 ? (fundMv-fundCost)/fundCost*100 : 0;
-  const stockRet = stockCost>0 ? (stockMv-stockCost)/stockCost*100 : 0;
+  const fundRet = fundBase>0 ? ((fundMv-fundCost)+fundRealized)/fundBase*100 : 0;
+  const stockRet = stockBase>0 ? ((stockMv-stockCost)+stockRealized)/stockBase*100 : 0;
   const fundBarPct = fundMv/goal*100;
   const stockBarPct = stockCap>0 ? stockMv/stockCap*100 : null;
   setStatGroup('fund', fundMv, fundRet, fundBarPct,
     (goal>=10000 ? (Math.round(goal/1000)/10)+'万目标进度' : goal+'元目标进度'),
-    fundBarPct>=100 ? 'var(--jade)' : '');
+    fundBarPct>=100 ? 'var(--jade)' : '',
+    fundRealized!==0 ? '总收益口径：分子含已落袋 '+fmtMoney(fundRealized)+'，分母=累计买入成本' : '');
   setStatGroup('stock', stockMv, stockRet, stockBarPct,
     stockBarPct===null ? '仓位上限未设置' : '股票仓位上限进度',
-    (stockBarPct!==null && stockBarPct>=100) ? 'var(--brick)' : '');
+    (stockBarPct!==null && stockBarPct>=100) ? 'var(--brick)' : '',
+    stockRealized!==0 ? '总收益口径：分子含已落袋 '+fmtMoney(stockRealized)+'，分母=累计买入成本' : '');
 
   renderThemeTable();
   renderStockSection();
@@ -4072,11 +4091,12 @@ function render(){
   renderMktStrip();
 }
 
-function setStatGroup(key, mv, ret, barPct, goalLbl, barColor){
+function setStatGroup(key, mv, ret, barPct, goalLbl, barColor, hint){
   document.getElementById(key+'Value').textContent = fmtMoney(mv);
   const retEl = document.getElementById(key+'Return');
   retEl.textContent = fmtPct(ret);
   retEl.style.color = ret>=0 ? 'var(--jade)' : 'var(--brick)';
+  retEl.title = hint || ''; // 落袋≠0 时悬停可读口径说明；无落袋为空（悬停无提示=纯浮盈口径）
   const pctEl = document.getElementById(key+'GoalPct');
   pctEl.textContent = barPct===null ? '--' : barPct.toFixed(1)+'%';
   pctEl.style.color = barColor;
