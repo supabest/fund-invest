@@ -212,6 +212,8 @@ export interface HoldingsAgg {
   cost: number; // 已填成本小计
   n: number; // 持仓只数（仅计可估值的那部分）
   nCost: number; // 其中已填成本的只数
+  realized?: number; // 已落袋合计（2026-11-16 用户裁定：止盈落袋计入总收益；缺省=未迁移旧数据，按 0 计，绝不猜历史）
+  base?: number; // 累计买入成本合计（只累已迁移行的 cumBuyCost；缺省行回落 cost 作分母）
 }
 
 function money(n: number): string {
@@ -231,18 +233,24 @@ export function holdingCostOf(costPerUnit: number, shares: number, mv: number, n
 }
 
 function holdingsRow(label: string, ag: HoldingsAgg): string {
-  const pnl = ag.cost > 0 ? ag.mv - ag.cost : null;
-  const rate = pnl === null ? null : pnl / ag.cost * 100;
+  // 2026-11-16 落袋计入总收益：分子 = 市值 − 持仓成本 + 已落袋；分母 = 累计买入成本（未迁移行回落持仓成本）。
+  // 未迁移（realized/base 缺省）时与旧口径同值：pnl = mv − cost，rate = pnl / cost——老数据零观感变化。
+  const realized = Number(ag.realized) || 0;
+  const pnl = ag.cost > 0 ? ag.mv - ag.cost + realized : (realized !== 0 ? realized : null);
+  const base = Number(ag.base) || 0;
+  const denom = base > 0 ? base : ag.cost;
+  const rate = (pnl === null || denom <= 0) ? null : pnl / denom * 100;
   const color = rate === null ? C_MUTED : (rate >= 0 ? C_UP : C_DOWN);
   const rateStr = rate === null ? '--' : (rate >= 0 ? '+' : '') + rate.toFixed(1) + '%';
   const costNote = ag.nCost === 0 ? '未填成本，收益率暂不可算' : '成本已填 ' + ag.nCost + '/' + ag.n + ' 只';
-  const pnlStr = pnl === null ? '' : (pnl >= 0 ? '浮盈 +' : '浮亏 -') + money(pnl) + ' · ';
+  const realizedNote = realized !== 0 ? '已落袋 ' + (realized > 0 ? '+' : '-') + money(realized) + ' · ' : '';
+  const pnlStr = pnl === null ? '' : (pnl >= 0 ? (realized !== 0 ? '总盈 +' : '浮盈 +') : (realized !== 0 ? '总亏 -' : '浮亏 -')) + money(pnl) + ' · ';
   return '<tr>'
     + '<td style="padding:6px 10px 0 0;font-size:13px;color:' + C_MUTED + ';white-space:nowrap;">' + label + '</td>'
     + '<td style="padding:6px 10px 0 0;font-size:17px;font-weight:700;color:' + color + ';white-space:nowrap;">' + rateStr + '</td>'
     + '<td style="padding:6px 0 0;font-size:13px;color:#1B2436;white-space:nowrap;">市值 ' + money(ag.mv) + '</td>'
     + '</tr>'
-    + '<tr><td></td><td colspan="2" style="padding:0 0 4px;font-size:12px;color:' + C_MUTED + ';">' + pnlStr + costNote + '</td></tr>';
+    + '<tr><td></td><td colspan="2" style="padding:0 0 4px;font-size:12px;color:' + C_MUTED + ';">' + pnlStr + realizedNote + costNote + '</td></tr>';
 }
 
 // 汇总块：任一大类没持仓就整段不渲染（不留空壳），两边都没有则返回空串。
@@ -1347,11 +1355,15 @@ export async function handle(
           // 持仓概览累加（只计可估值的持仓：mv>0；成本缺失时 nCost 不增，收益率显示 --）
           if (fm > 0) {
             const fcost = holdingCostOf(effectiveCost(f), f.shares, fm, close);
-            const ag = (fundHold[userId] = fundHold[userId] || { mv: 0, cost: 0, n: 0, nCost: 0 });
+            const ag = (fundHold[userId] = fundHold[userId] || { mv: 0, cost: 0, n: 0, nCost: 0, realized: 0, base: 0 });
             ag.mv += fm;
             ag.cost += fcost;
             ag.n += 1;
             if (fcost > 0) ag.nCost += 1;
+            // 2026-11-16 落袋计入总收益：realized 全量累加（未迁移行无字段记 0，绝不猜历史）；base 只累已迁移行的累计买入成本
+            ag.realized = (ag.realized || 0) + (Number(f.realizedPnL) || 0);
+            const fCum = Number(f.cumBuyCost) || 0;
+            if (fCum > 0) ag.base = (ag.base || 0) + fCum;
           }
           const themeCaps = { ...DEFAULT_CAPS, ...((st.data && st.data.themeCaps) || {}) };
           // themeSum 与页面 themeMarketValue 的口径差异（已确认可收敛，勿当漂移修）：
@@ -1465,11 +1477,15 @@ export async function handle(
           const sMv = (sShare > 0 && close > 0) ? sShare * close : 0;
           if (sMv > 0) {
             const scost = holdingCostOf(parseFloat(s.cost) || 0, sShare, sMv, close);
-            const ag = (stockHold[userId] = stockHold[userId] || { mv: 0, cost: 0, n: 0, nCost: 0 });
+            const ag = (stockHold[userId] = stockHold[userId] || { mv: 0, cost: 0, n: 0, nCost: 0, realized: 0, base: 0 });
             ag.mv += sMv;
             ag.cost += scost;
             ag.n += 1;
             if (scost > 0) ag.nCost += 1;
+            // 2026-11-16 落袋计入总收益：realized 全量累加（未迁移行无字段记 0，绝不猜历史）；base 只累已迁移行的累计买入成本
+            ag.realized = (ag.realized || 0) + (Number(s.realizedPnL) || 0);
+            const sCum = Number(s.cumBuyCost) || 0;
+            if (sCum > 0) ag.base = (ag.base || 0) + sCum;
           }
           const tiers = (s.profitTiers && s.profitTiers.length) ? s.profitTiers : DEFAULT_TIERS;
           // 与基金腿同源：达标档交给 sellAlert 判定，不再自己扫「最高达标且未执行」的档

@@ -1250,6 +1250,27 @@ Deno.test('止盈参考栏：三态齐全——已达档 / 下一档 / 全部执
     '档表恒有默认档兜底，取不到下一档只可能是已全部执行——「暂无止盈档」是假话：' + doneTxt);
 });
 
+// ==== 2026-11-16 落袋计入总收益（用户裁定）：基金形态（costBasis/currentNav）与股票同一行文案 ====
+Deno.test('止盈参考栏（落袋行）：基金 costBasis/currentNav 同式出「已落袋 + 综合收益率」；股票形态回归不变', () => {
+  const flat = (h: string) => h.replace(/<[^>]*>/g, '');
+  // 基金：6000 份、每份成本 1.05、现净值 1.20（账面 +14.3%）；4000 份在 1.10 赎回落袋 ¥200；累计买入 10500
+  const fund = { id: 'f1', name: '测试基金', shares: 6000, costBasis: 1.05, currentNav: 1.20,
+    realizedPnL: 200, cumBuyCost: 10500, profitTiers: [{ ret: 20, sell: 10 }, { ret: 40, sell: 20 }], profitTaken: [] };
+  const fundRet = (1.20 - 1.05) / 1.05 * 100;
+  const fundHtml = profitRefHtml(null, { ret: 20, sell: 10 }, fundRet, null, fund as never);
+  const fundTxt = flat(fundHtml);
+  assertMatch(fundTxt, /已落袋 ¥200/, '基金也要出落袋行：' + fundTxt);
+  assertMatch(fundTxt, /综合收益率 \+10\.5%/, '(200+900)/10500 = 10.476%：' + fundTxt);
+  assertMatch(fundTxt, /账面浮盈率为档位依据/, '档位依据的口径声明两腿都要有：' + fundTxt);
+  // 股票形态回归：字段名不同、数学同式
+  const stock = { id: 't1', name: '测试股', shares: 600, cost: 30, currentPrice: 36,
+    realizedPnL: 2400, cumBuyCost: 30000, profitTiers: [{ ret: 20, sell: 10 }, { ret: 40, sell: 20 }], profitTaken: [] };
+  const stockRet = (36 - 30) / 30 * 100;
+  const stockTxt = flat(profitRefHtml(null, { ret: 40, sell: 20 }, stockRet, null, stock as never));
+  assertMatch(stockTxt, /已落袋 ¥2,400/);
+  assertMatch(stockTxt, /综合收益率 \+20\.0%/, '(2400+3600)/30000 = 20%：' + stockTxt);
+});
+
 Deno.test('买入参考栏：档位与白话明细都进栏，明细要转义；未传入的提示/横幅不得凭空出现', () => {
   const ref = { label: '双倍', text: '现价较均线 -16.0%；52 周回撤 38.0%，回撤较深；已跌穿成本安全垫' };
   const s = { currentPrice: '12.34', ma60: 14.0, ma120: 15.0 };
@@ -1754,4 +1775,38 @@ Deno.test('接线守卫：SDK 迟到自愈钩子——loadAll 只挂一次 focus
   assertEquals(body.includes('cloudRecoveryHooked'), true, '缺只挂一次的闩——重复挂监听会让 initCloud 重复跑、auth 重复订阅');
   assertEquals(/!cloudReady && window\.supabase && window\.supabase\.createClient\) initCloud\(\)/.test(body), true,
     '自愈条件必须齐全：云层未起且 SDK 真就绪才重启');
+});
+
+// ==== 2026-11-16 落袋记账接线守卫：基金腿全链路 + 邮件概览同口径 ====
+Deno.test('接线守卫：基金落袋记账全链路——表单块、按钮绑定、事件函数走适配器、迁移接线、成本下调守卫', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  // ① 两腿表单都有持仓变动块（股票 data-sk / 基金 data-k，同款文案前缀）
+  assertEquals((html.match(/持仓变动（卖出 \/ 加仓请登记/g) || []).length, 2, '股票与基金表单各一块');
+  // ② 基金绑定走 recordFundPositionEvent（加仓/卖出成对）
+  assertEquals(/recordFundPositionEvent\(id,'add'\)/.test(html), true, 'bindFundBody 缺加仓绑定');
+  assertEquals(/recordFundPositionEvent\(id,'sell'\)/.test(html), true, 'bindFundBody 缺卖出绑定');
+  // ③ 基金事件必须走 costBasis 适配器，不得旁路核心事件机
+  assertEquals(/const r = applyFundPositionEvent\(f, \{t:type, qty, price, ts:Date\.now\(\)\}\)/.test(html), true,
+    'recordFundPositionEvent 必须复用 applyFundPositionEvent（成本重算/落袋语义只此一处）');
+  // ④ 迁移接线：migrateFunds 内幂等补齐（云端与本地两条路径都过 migrateFunds）
+  assertEquals(/Object\.assign\(f, migrateFundPosition\(f\)\)/.test(html), true,
+    'migrateFunds 必须接入 migrateFundPosition，否则云端拉下的旧记录缺落袋字段');
+  // ⑤ 基金成本下调守卫与股票同款（confirm + 表单引导语）
+  assertEquals(html.includes('部分赎回请用「登记卖出」，不要改小每份成本'), true, '基金成本下调必须弹确认并引导走登记卖出');
+  assertEquals((html.match(/每份成本不变/g) || []).length >= 1, true, '基金注记/提示要说明「每份成本不变」');
+  // ⑥ 三率/落袋行字段归一：profitRefHtml 认得基金字段
+  assertEquals(/Number\(s\.currentPrice \?\? s\.currentNav\)/.test(html), true, '落袋行的现价读取必须归一（基金 currentNav）');
+  assertEquals(/Number\(s\.cost \?\? s\.costBasis\)/.test(html), true, '落袋行的成本读取必须归一（基金 costBasis）');
+});
+
+Deno.test('接线守卫：邮件持仓概览同口径——分子含已落袋、分母=累计买入成本、标签转总盈、未迁移回落旧口径', async () => {
+  const email = await Deno.readTextFile(new URL('../supabase/functions/daily-update/index.ts', import.meta.url));
+  assertEquals(email.includes('ag.mv - ag.cost + realized'), true, '分子必须含已落袋：' + 'mv−cost+realized');
+  assertEquals(/base > 0 \? base : ag\.cost/.test(email), true, '分母=累计买入成本，未迁移行回落持仓成本');
+  assertEquals(email.includes("'已落袋 '"), true, '落袋金额必须单列披露');
+  assertEquals(email.includes("'总盈 +'"), true, '含落袋后标签转「总盈」');
+  assertEquals(email.includes("'浮盈 +'"), true, '无落袋时保持「浮盈」旧标签（老用户零观感变化）');
+  // 两腿累加点都要记 realized/base
+  assertEquals((email.match(/ag\.realized = \(ag\.realized \|\| 0\) \+ \(Number\(/g) || []).length, 2, '基金腿与股票腿各一处');
+  assertEquals((email.match(/ag\.base = \(ag\.base \|\| 0\) \+ /g) || []).length, 2, '基金腿与股票腿各一处');
 });

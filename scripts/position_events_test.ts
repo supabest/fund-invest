@@ -7,6 +7,7 @@ import { assert, assertEquals } from "https://deno.land/std@0.224.0/assert/mod.t
 import {
   parseTiersText, tiersFingerprint, applyPositionEvent, migrateStockPosition,
   positionReturnSummary, profitNextTier, profitAlertFromRet, DEFAULT_TIERS,
+  migrateFundPosition, applyFundPositionEvent,
 } from "./signal_parity.ts";
 
 Deno.test("parseTiersText：可新增 +100% 档；非法输入绝不静默回退默认档表", () => {
@@ -126,4 +127,60 @@ Deno.test("接线守卫：档位文本框与持仓事件登记入口都已落地
   assert(/function resetProfitTaken\(/.test(html));
   assert(/function migrateStocks\(/.test(html));
   assert(/function tiersFingerprint\(/.test(html));
+});
+
+// ==== 2026-11-16 用户裁定：止盈落袋收益计入基金/股票总收益 ====
+// 基金腿复用同一核心事件机（costBasis↔cost 别名进/出）；综合收益率分母=累计买入成本，
+// 账面浮盈率仍是档位唯一依据——判据零改动，只加记账与展示。
+Deno.test("基金适配·赎回：只减份额、每份成本不变、落袋入流水、累计买入成本不动（分母不缩小）", () => {
+  let f = migrateFundPosition({ costBasis: 1.05, shares: 10000, profitTiers: DEFAULT_TIERS, profitTaken: [] });
+  assertEquals(f.cumBuyCost, 10500, "迁移初始化 = 每份成本×份额");
+  assertEquals(f.realizedPnL, 0);
+  assertEquals(f.cost, undefined, "基金对象不得混入股票字段名 cost");
+  const r = applyFundPositionEvent(f, { t: "sell", qty: 4000, price: 1.20 });
+  assertEquals(r.ok, true);
+  f = r.pos!;
+  assertEquals(f.costBasis, 1.05, "赎回绝不改写每份成本（档位的尺）");
+  assertEquals(f.shares, 6000);
+  assertEquals(f.realizedPnL, 600, "(1.20−1.05)×4000 落袋");
+  assertEquals(f.realizedProceeds, 4800);
+  assertEquals(f.cumBuyCost, 10500, "分母不因赎回缩小——杜绝「卖出后收益率爆表」");
+  assertEquals(f.cost, undefined, "别名出后不得残留股票字段");
+});
+
+Deno.test("基金适配·申购：加权平均重算每份成本、累计买入成本增加、历史落袋不回溯", () => {
+  let f = migrateFundPosition({ costBasis: 1.05, shares: 10000 });
+  f = applyFundPositionEvent(f, { t: "sell", qty: 4000, price: 1.20 }).pos!;
+  const realizedBefore = f.realizedPnL;
+  const added = applyFundPositionEvent(f, { t: "add", qty: 10000, price: 0.90 });
+  assertEquals(added.ok, true);
+  f = added.pos!;
+  assertEquals(f.shares, 16000);
+  assertEquals(f.costBasis, 0.95625, "(1.05×6000 + 0.90×10000)/16000 = 15300/16000，赎回后剩 6000 份参与加权");
+  assertEquals(f.cumBuyCost, 19500, "10500 + 9000；赎回不扣减累计买入");
+  assertEquals(f.realizedPnL, realizedBefore, "申购不得重算历史已落袋金额");
+});
+
+Deno.test("三率归一：基金形态（costBasis/currentNav）与股票形态同式；卖价≠现价时综合率 ≠ 账面率", () => {
+  // 4000 份在 1.10 赎回（落袋 200），余 6000 份现价 1.20（浮盈 900）
+  const fund = { costBasis: 1.05, currentNav: 1.20, shares: 6000, realizedPnL: 200, cumBuyCost: 10500 };
+  const sm = positionReturnSummary(fund);
+  assertEquals(Math.round(sm.ret! * 100) / 100, 14.29, "账面浮盈率 = (1.20−1.05)/1.05");
+  assertEquals(Math.round(sm.totalReturn! * 100) / 100, 10.48, "综合 = (200+900)/10500");
+  assertEquals(sm.realizedPnL, 200);
+  // 股票形态回归：同式同值
+  const stock = positionReturnSummary({ cost: 30, currentPrice: 36, shares: 600, realizedPnL: 2400, cumBuyCost: 30000 });
+  assertEquals(Math.round(stock.ret! * 100) / 100, 20);
+  assertEquals(Math.round(stock.totalReturn! * 100) / 100, Math.round((2400 + 3600) / 30000 * 10000) / 100, "20%");
+});
+
+Deno.test("基金迁移幂等：两次迁移结果全等；不猜历史赎回（realizedPnL 初始 0）", () => {
+  const old = { costBasis: 1.0523, shares: 10000, profitTiers: DEFAULT_TIERS, profitTaken: [20, 40] };
+  const a = migrateFundPosition(old);
+  assertEquals(a.costBasis, 1.0523);
+  assertEquals(a.realizedPnL, 0, "绝不猜历史赎回");
+  assertEquals(a.cumBuyCost, Math.round(1.0523 * 10000 * 1e4) / 1e4);
+  assertEquals(a.cost, undefined, "迁移后不得残留别名中间字段");
+  const b = migrateFundPosition(a);
+  assertEquals(b, a, "迁移必须幂等");
 });

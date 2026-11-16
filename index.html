@@ -737,6 +737,8 @@ function migrateFunds(){
     if((f.shares===undefined||f.shares==='') && f.marketValue>0 && f.currentNav>0){
       f.shares = Math.round(f.marketValue/f.currentNav*10000)/10000;
     }
+    // 2026-11-16 落袋记账：基金也走持仓事件流水（幂等补齐 realizedPnL/cumBuyCost/events，绝不猜历史赎回）
+    Object.assign(f, migrateFundPosition(f));
     if(!f.profitTiers) f.profitTiers = DEFAULT_TIERS;
     if(!f.profitTaken) f.profitTaken = [];
     if(!f.tierVersion) f.tierVersion = tiersFingerprint(f.profitTiers);
@@ -869,6 +871,29 @@ async function recordPositionEvent(id, type){
   await saveStocks();
   syncStockFormFields(s, body);
   render();
+  refreshDetail(); // 登记后止盈参考的落袋行立即刷新（非详情视图时该函数空态直退）
+}
+// 基金持仓变动登记（2026-11-16 落袋记账）：赎回/申购走事件流水——卖出只减份额、每份成本不变、落袋单独记账
+async function recordFundPositionEvent(id, type){
+  const f = funds.find(x=>x.id===id);
+  const body = document.getElementById('body-'+id);
+  if(!f || !body) return;
+  const qv = body.querySelector('[data-k="evQty"]');
+  const pv = body.querySelector('[data-k="evPrice"]');
+  const qty = parseFloat(qv ? qv.value : '')||0;
+  const price = parseFloat(pv ? pv.value : '')||0;
+  const r = applyFundPositionEvent(f, {t:type, qty, price, ts:Date.now()});
+  if(!r.ok){ showToast(r.error); return; }
+  Object.assign(f, r.pos);
+  if(f.shares>0 && f.currentNav>0) f.marketValue = f.shares*f.currentNav;
+  if(f.shares>0 && f.costBasis>0) f.costTotal = Math.round(f.costBasis*f.shares*100)/100;
+  if(type==='sell') showToast('已登记赎回：每份成本不变，落袋盈亏已单独记账');
+  else showToast('已登记申购：每份成本按加权平均重算');
+  await saveFunds();
+  const setF = (k,v)=>{ const el = body.querySelector('[data-k="'+k+'"]'); if(el) el.value = v; };
+  setF('shares', f.shares); setF('costBasis', f.costBasis); setF('costTotal', f.costTotal);
+  render();
+  refreshDetail(); // 登记后止盈参考的落袋行立即刷新（非详情视图时该函数空态直退）
 }
 async function saveSettings(){
   try{ await store.set(SETTINGS_KEY, JSON.stringify({goal, stockCap})); }
@@ -1303,7 +1328,8 @@ function profitRefHtml(sAlert, nextTier, ret, sSellPlan, s){
   const realized = s ? (Number(s.realizedPnL)||0) : 0;
   if(s && realized !== 0){
     const base = Number(s.cumBuyCost)||0;
-    const px = Number(s.currentPrice)||0, c = Number(s.cost)||0, sh = Number(s.shares)||0;
+    // 字段归一（2026-11-16 落袋计入总收益）：股票 cost/currentPrice，基金 costBasis/currentNav，两腿同一行文案
+    const px = Number(s.currentPrice ?? s.currentNav)||0, c = Number(s.cost ?? s.costBasis)||0, sh = Number(s.shares)||0;
     const total = base>0 ? (realized + (px-c)*sh)/base*100 : null;
     const sign = (total!==null && total>=0) ? '+' : '';
     extra += '<div class="ref-row" style="margin-top:6px;"><span class="muted">已落袋</span> ' + fmtMoney(realized)
@@ -3826,14 +3852,30 @@ function migrateStockPosition(s){
   if(p.schemaVersion===undefined) p.schemaVersion = 1;
   return p;
 }
-// 三率：账面浮盈率（档位唯一依据）/ 已落袋 / 综合收益率（分母=累计买入成本）
+// 三率：账面浮盈率（档位唯一依据）/ 已落袋 / 综合收益率（分母=累计买入成本）。
+// 2026-11-16 用户裁定：止盈落袋收益计入基金/股票总收益——字段读取归一，
+// 基金（costBasis/currentNav）与股票（cost/currentPrice）共用同一套三率式。
 function positionReturnSummary(pos){
-  const cost = Number(pos.cost)||0, price = Number(pos.currentPrice)||0, shares = Number(pos.shares)||0;
+  const cost = Number(pos.cost ?? pos.costBasis)||0, price = Number(pos.currentPrice ?? pos.currentNav)||0, shares = Number(pos.shares)||0;
   const ret = (cost>0 && price>0) ? (price-cost)/cost*100 : null;
   const realized = Number(pos.realizedPnL)||0;
   const base = Number(pos.cumBuyCost)|| (cost*shares);
   const totalReturn = base>0 ? (realized + (price-cost)*shares)/base*100 : null;
   return {ret, realizedPnL:realized, cumBuyCost:base, totalReturn};
+}
+// 基金适配器：核心事件机只认 cost/shares，基金的成本字段叫 costBasis——别名进、别名出，
+// 复用同一套已测语义（卖出不动每份成本、申购加权重算、落袋走流水）。
+function migrateFundPosition(f){
+  const out = migrateStockPosition(Object.assign({}, f, { cost: Number(f.costBasis)||0 }));
+  out.costBasis = out.cost; delete out.cost;
+  return out;
+}
+function applyFundPositionEvent(f, ev){
+  const r = applyPositionEvent(Object.assign({}, f, { cost: Number(f.costBasis)||0 }), ev);
+  if(!r.ok) return r;
+  const out = r.pos;
+  out.costBasis = out.cost; delete out.cost;
+  return { ok:true, error:'', pos:out };
 }
 // ==== LADDER_PURE_END ====
 
@@ -4701,6 +4743,15 @@ function fundBodyHtml(f){
       <div class="field"><label>持仓总成本（元，与左边二选一）</label><input type="number" data-k="costTotal" value="${f.costTotal??''}"></div>
       <div class="field"><label>当前市值（元，自动 =份额×净值）</label><input type="text" readonly data-k="mvDisplay" value="${fmtMoney(f.shares>0&&f.currentNav>0 ? f.shares*f.currentNav : (f.marketValue||0))}" style="opacity:.75;"></div>
       <div class="field full"><div class="small-note">成本二选一：填「持仓总成本」会按 份额 自动折算出每份成本净值，填「成本净值」则反算总成本，两边保持一致。注意不要把总金额填进成本净值（收益率会接近 -100%）。折算需要先填「持有份额」。</div></div>
+      <div class="field full"><label>持仓变动（卖出 / 加仓请登记，不要改小成本净值）</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+          <input type="number" step="0.0001" data-k="evQty" placeholder="份额" style="flex:1;min-width:88px;">
+          <input type="number" step="0.0001" data-k="evPrice" placeholder="成交净值 元/份" style="flex:1;min-width:120px;">
+          <button type="button" class="btn ghost" data-action="addPosition">登记加仓</button>
+          <button type="button" class="btn ghost" data-action="sellPosition">登记卖出</button>
+        </div>
+        <div class="small-note">卖出只减份额、记落袋盈亏，<b>每份成本不变</b>；加仓按加权平均重算每份成本。${Number(f.realizedPnL)>0 ? '当前已落袋 '+fmtMoney(Number(f.realizedPnL))+'。' : ''}</div>
+      </div>
     </div>
 
     <div class="divider-label">③ 行情参考（点「一键获取」自动填入，无需手填）</div>
@@ -4777,6 +4828,11 @@ function bindFundBody(id){
   });
   const rstBtn = body.querySelector('[data-action="resetTaken"]');
   if(rstBtn) rstBtn.addEventListener('click', ()=> resetProfitTaken('fund', id));
+  // 持仓变动登记（2026-11-16 落袋记账）：与股票表单同款，赎回/申购走事件流水
+  const fAddBtn = body.querySelector('[data-action="addPosition"]');
+  if(fAddBtn) fAddBtn.addEventListener('click', ()=> recordFundPositionEvent(id,'add'));
+  const fSellBtn = body.querySelector('[data-action="sellPosition"]');
+  if(fSellBtn) fSellBtn.addEventListener('click', ()=> recordFundPositionEvent(id,'sell'));
   const fetchBtn = document.getElementById('autoFetchBtn-'+id);
   if(fetchBtn) fetchBtn.addEventListener('click', ()=> autoFetchFundData(id));
   // 市值 = 份额×净值，实时联动；成本两栏二选一，另一栏自动折算
@@ -5129,6 +5185,7 @@ async function saveFundForm(id){
   f.benchmark = get('benchmark').value;
   f.shares = parseFloat(get('shares').value)||0;
   f.baseAmount = parseFloat(get('baseAmount').value)||0;
+  const prevCostBasis = Number(f.costBasis)||0;
   f.costBasis = parseFloat(get('costBasis').value)||0;
   f.costTotal = parseFloat(get('costTotal').value)||0;
   f.fundCode = get('fundCode').value.trim();
@@ -5171,6 +5228,12 @@ async function saveFundForm(id){
 
   if(f.costBasis>0 && f.currentNav>0 && f.costBasis > f.currentNav*5){
     showToast('提示：成本净值远大于当前净值，确认没把总成本金额填进成本净值？');
+  }
+  // 成本口径守卫（2026-11-16 与股票表单同款）：部分赎回请用「登记卖出」，不要改小每份成本
+  if(prevCostBasis>0 && f.costBasis>0 && f.costBasis < prevCostBasis*0.8){
+    if(!confirm('每份成本由 '+prevCostBasis+' 下调为 '+f.costBasis+'，收益率会跳高并可能越过最高止盈档。\n部分赎回请用「登记卖出」，不要改小每份成本。\n确认这是买入成本校正？')) return;
+    f.events = (Array.isArray(f.events)?f.events:[]).concat([{t:'costAdjust', qty:0, price:f.costBasis, from:prevCostBasis, to:f.costBasis, reason:'表单校正', ts:Date.now()}]);
+    f.costVersion = (Number(f.costVersion)||0)+1;
   }
 
   await saveFunds();

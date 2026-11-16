@@ -210,6 +210,32 @@ Deno.test("holdingsSummaryHtml：两边都没持仓 → 空串（不留空壳标
   );
 });
 
+// ==== 2026-11-16 落袋计入总收益（用户裁定）：分子含已落袋、分母=累计买入成本；未迁移旧数据零观感变化 ====
+Deno.test("holdingsSummaryHtml：落袋计入——分子含已落袋、分母=累计买入成本、标签转「总盈」并披露已落袋金额", () => {
+  // 4000 份在 1.10 赎回落袋 ¥2,000；余份额现价重估 mv 9,600、持仓成本 6,300、累计买入 10,500
+  // 分子 = 9600−6300+2000 = 5300；分母 = 10500 → +50.5%
+  const html = holdingsSummaryHtml(
+    { mv: 9600, cost: 6300, n: 1, nCost: 1, realized: 2000, base: 10500 },
+    null, "2026-11-16",
+  );
+  assertEquals(html.includes("+50.5%"), true, "5300/10500 = 50.476% → +50.5%：分母绝不因赎回缩小");
+  assertEquals(html.includes("总盈 +¥5,300"), true, "含落袋后标签不再是浮盈");
+  assertEquals(html.includes("已落袋 +¥2,000"), true, "落袋金额必须单列披露，不能只默默并进总数");
+  assertEquals(html.includes("浮盈"), false, "已落袋行内不再用「浮盈」误导");
+  assertEquals(html.includes("成本已填 1/1 只"), true);
+});
+
+Deno.test("holdingsSummaryHtml：未迁移旧数据（无 realized/base 字段）输出与旧口径逐字一致——老用户零观感变化", () => {
+  const html = holdingsSummaryHtml({ mv: 10000, cost: 8000, n: 2, nCost: 2 }, null, "2026-10-24");
+  assertEquals(html.includes("+25.0%"), true, "分母回落持仓成本");
+  assertEquals(html.includes("浮盈 +¥2,000"), true, "无落袋时标签保持「浮盈」");
+  assertEquals(html.includes("已落袋"), false, "没有落袋数据就不披露落袋行");
+  // 负收益同样保持旧形态
+  const down = holdingsSummaryHtml(null, { mv: 64900, cost: 67040, n: 4, nCost: 4 }, "2026-10-24");
+  assertEquals(down.includes("-3.2%"), true);
+  assertEquals(down.includes("浮亏 -¥2,140"), true);
+});
+
 Deno.test("接线：汇总块必须真出现在发出去的邮件里，且位置在日期之后、基金分析之前", async () => {
   const real = globalThis.fetch;
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
