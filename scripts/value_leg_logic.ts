@@ -4,7 +4,9 @@ const SHIM = `function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({
   // 三栏渲染函数依赖 fmtPct/fmtMoney，二者定义在标记块外；门面按同口径补一份，只服务测试调用
   + `function fmtPct(n, digits){ if(n===null || n===undefined || isNaN(n)) return '--'; const d=(digits===undefined?1:digits); const s=Number(n).toFixed(d); return (n>0?'+':'')+s+'%'; }\n`
   + `function fmtMoney(n){ if(isNaN(n)) return '¥0'; return '¥'+Math.round(n).toLocaleString('zh-CN'); }\n`;
-const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter', 'legRange', 'legHasMore', 'legTiebreakCol', 'valueFmtPct', 'valueTierLabel', 'valueGateHtml', 'renderValueTop10', 'SWAP_GAP', 'divergeLists', 'swapSuggest', 'renderDivergeBoard',
+const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter', 'legRange', 'legHasMore', 'legTiebreakCol', 'valueFmtPct', 'valueTierLabel', 'valueGateHtml', 'renderValueTop10', 'SWAP_GAP', 'swapSuggest',
+  'CORE_W', 'CORE_MOAT_INNER', 'CORE_MOS_LO', 'CORE_MOS_HI', 'CORE_DEBT_CEIL', 'CORE_MOAT_REL_PP', 'CORE_TREND_N',
+  'coreNum', 'coreClamp01', 'coreTrendKey', 'corePoolPillars', 'corePoolSort',
   'TREND_LOOKBACK', 'TREND_KLT', 'TREND_FQT', 'TREND_MIN_MONTHS', 'TREND_POSITION_MA', 'TREND_R2_STEADY', 'TREND_DD_RATIO_MIN', 'monthEndCloses', 'olsLogTrend',
   'longTrendStats', 'longTrendLabel', 'brokenLegOf', 'trendBadgeHtml',
   'trendNaWhy', 'trendStaleHtml', 'trendStaleDays', 'fetchStatBump', 'trendPick', 'secidOf',
@@ -12,7 +14,7 @@ const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter
   'EM_VAL_MIN_ROWS', 'valPctSupported', 'emValUrl', 'valuationPctFromRows', 'valPctCaliber', 'valPctNaWhy',
   'valPctNeedFetch', 'valPctApply', 'valPctHtml', 'valPctMerge', 'valPctLockNote',
   'TREND_LABEL_CN', 'TREND_NA_CN',
-  'INCOME_INDUSTRIES', 'INCOME_DY_MIN', 'INCOME_DY5_MIN', 'INCOME_ROIC_MIN', 'INCOME_LIMIT',
+  'INCOME_INDUSTRIES', 'INCOME_DY_MIN', 'INCOME_DY5_MIN', 'INCOME_DEBT_MAX', 'INCOME_LIMIT',
   'incomeChannelOf', 'renderIncomeList', 'foldCardHtml',
   'ROIC_GATE_PCT', 'valueMedian', 'valueIndStatsOf', 'valueMoatVetoHtml', 'valueVetoHtml', 'valueAssessmentHtml',
   'ROIC_TREND_FLOOR_PCT', 'valueTrendExempt',
@@ -34,11 +36,30 @@ export const VALUE_TABLE = NS.VALUE_TABLE as Record<string, string>;
 export const valueFmtPct = NS.valueFmtPct as (v: number | null, d?: number) => string;
 export const valueTierLabel = NS.valueTierLabel as (t: string | null) => string;
 export const valueGateHtml = NS.valueGateHtml as (row: Record<string, unknown> | null, indByL2?: Record<string, { med: number; n: number }> | null) => string;
-export const renderValueTop10 = NS.renderValueTop10 as (state: { batch: string; top10: Record<string, unknown>[] } | null, trendMap?: Record<string, Record<string, unknown>> | null) => string;
+export const renderValueTop10 = NS.renderValueTop10 as (state: { batch: string; top10: Record<string, unknown>[] } | null, trendMap?: Record<string, Record<string, unknown>> | null, indByL2?: Record<string, IndRef> | null) => string;
 export const SWAP_GAP = NS.SWAP_GAP as number;
-export const divergeLists = NS.divergeLists as (rows: Record<string, unknown>[]) => { wronged: Record<string, unknown>[]; rich: Record<string, unknown>[] };
 export const swapSuggest = NS.swapSuggest as (row: Record<string, unknown> | null, poolRows: Record<string, unknown>[], heldCodes?: string[]) => { target: Record<string, unknown>; gap: number } | null;
-export const renderDivergeBoard = NS.renderDivergeBoard as (state: { batch: string; rows: Map<string, Record<string, unknown>> } | null) => string;
+
+// ---- 核心池 Top10 · 长期价值（2026-11-16 用户裁定：护城河 40% 强调）----
+export const CORE_W = NS.CORE_W as Record<string, number>;
+export const CORE_MOAT_INNER = NS.CORE_MOAT_INNER as Record<string, number>;
+export const CORE_MOS_LO = NS.CORE_MOS_LO as number;
+export const CORE_MOS_HI = NS.CORE_MOS_HI as number;
+export const CORE_DEBT_CEIL = NS.CORE_DEBT_CEIL as number;
+export const CORE_MOAT_REL_PP = NS.CORE_MOAT_REL_PP as number;
+export const CORE_TREND_N = NS.CORE_TREND_N as Record<string, number>;
+export const coreNum = NS.coreNum as (v: unknown) => number | null;
+export const coreClamp01 = NS.coreClamp01 as (x: number | null | undefined) => number | null;
+export type CoreTrendKey = 'steady' | 'mixed' | 'broken_annualized' | 'broken_recent' | 'na';
+export const coreTrendKey = NS.coreTrendKey as (t: Record<string, unknown> | null | undefined) => CoreTrendKey;
+export type CorePillars = { moat: number | null; safety: number | null; health: number | null };
+export const corePoolPillars = NS.corePoolPillars as (
+  r: Record<string, unknown>, indMed: number | null | undefined, roicLo: number, roicHi: number,
+) => CorePillars;
+export type CorePoolRow = Record<string, unknown> & { pillars: CorePillars; trendKey: CoreTrendKey; coreScore: number | null };
+export const corePoolSort = NS.corePoolSort as (
+  rows: Record<string, unknown>[] | null, indByL2?: Record<string, IndRef> | null, trendCache?: Record<string, Record<string, unknown>> | null,
+) => CorePoolRow[];
 export const LEG_PAGE_SIZE = NS.LEG_PAGE_SIZE as number;
 export const legOrderOpts = NS.legOrderOpts as () => { ascending: boolean; nullsFirst: boolean };
 export const legFilter = NS.legFilter as (codes: string[]) => string;
@@ -94,13 +115,13 @@ export const valPctHtml = NS.valPctHtml as (meta: ValPctMeta | null, today?: str
 export const valPctMerge = NS.valPctMerge as (prev: Record<string, any> | null, fresh: Record<string, any>) => Record<string, any> | null;
 export const valPctLockNote = NS.valPctLockNote as (used: number | string | null, meta: ValPctMeta | null) => string;
 
-// ---- 收益型观察名单（2026-10-30 用户裁定：独立通道，非门禁例外）----
+// ---- 收益型观察名单（2026-10-30 独立通道 → **2026-11-16 用户裁定收紧为全四要求**）----
 export const INCOME_INDUSTRIES = NS.INCOME_INDUSTRIES as string[];
 export const INCOME_DY_MIN = NS.INCOME_DY_MIN as number;
 export const INCOME_DY5_MIN = NS.INCOME_DY5_MIN as number;
-export const INCOME_ROIC_MIN = NS.INCOME_ROIC_MIN as number;
+export const INCOME_DEBT_MAX = NS.INCOME_DEBT_MAX as number;   // 有息负债率上限（缺失不剔除）
 export const INCOME_LIMIT = NS.INCOME_LIMIT as number;
-export type IncomeRow = Record<string, unknown> & { alreadyQualified?: boolean; highLeverage?: boolean };
+export type IncomeRow = Record<string, unknown> & { inCorePool?: boolean };
 export const incomeChannelOf = NS.incomeChannelOf as (rows: Record<string, unknown>[]) => { list: IncomeRow[]; total: number };
 export const renderIncomeList = NS.renderIncomeList as (state: { batch: string; list: IncomeRow[]; total: number } | null) => string;
 export const foldCardHtml = NS.foldCardHtml as (key: string, titleInner: string, bodyHtml: string) => string;

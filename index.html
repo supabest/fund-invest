@@ -688,8 +688,7 @@ let goal = GOAL;      // 基金目标总额（可在页面调整，主题上限�
 let stockCap = 0;     // 股票总仓位上限（0=不限）
 
 // 量化评分（stock_score 最新批次）：null=尚未生成/加载失败，UI 优雅降级
-let scoreState = null; // { batch, rows: Map<code,row>, top10: row[] }
-let scoreTried = false; // 已尝试拉取；纯本地未接云时不展示占位文案
+let scoreState = null; // { batch, rows: Map<code,row> }——量化初筛 Top10 卡已删（2026-11-16），rows 只服务持仓卡片评分明细
 
 // 价值腿（stock_value 最新批次）：与 scoreState 同范式——null=未生成/读取失败 → 卡片优雅降级
 let valueState = null;   // { batch, rows: Map<bareCode,row>, top10: row[] }；null=未生成/读取失败 → 卡片优雅降级
@@ -960,10 +959,9 @@ function initCloud(tries){
   setSyncUI();
 }
 
-// ===================== 量化评分（stock_score 只读） =====================
+// ===================== 量化评分（stock_score 只读，2026-11-16 起只服务持仓卡片评分明细） =====================
 async function loadStockScores(){
   if(!cloudReady || !sb) return;
-  scoreTried = true;
   try{
     const { data: b, error: be } = await sb.from('stock_score').select('batch_date')
       .order('batch_date',{ascending:false}).limit(1).maybeSingle();
@@ -981,7 +979,7 @@ async function loadStockScores(){
       if(!legHasMore(data.length)) break;
     }
     const rows = all.filter(r=>r && r.final!==null && r.final!==undefined);
-    scoreState = { batch, rows: new Map(rows.map(r=>[String(r.code),r])), top10: rows.filter(r=>r.in_pool).slice(0,10) };
+    scoreState = { batch, rows: new Map(rows.map(r=>[String(r.code),r])) };  // Top10 卡已删（2026-11-16）：rows 只服务持仓卡评分明细
   }catch(e){ console.warn('scores load failed', e); }
 }
 
@@ -1105,21 +1103,8 @@ async function loadValueIndustryRef(){
   }catch(e){ console.warn('industry ref load failed', e); }
 }
 
-function scoreStars(f){ return f>=90?'★★★★★':f>=80?'★★★★☆':f>=70?'★★★★':f>=60?'★★★':f>=50?'★★':'★'; }
-function renderScoreTop10(){
-  if(!scoreState)
-    return scoreTried ? `<div class="signal-strip"><span class="signal-pill pill-normal">评分批次尚未生成（夜间批处理上线后自动出现）</span></div>` : '';
-  const { batch, top10 } = scoreState;
-  return foldCardHtml('score', `精选池 Top10 · 量化初筛 <span style="font-weight:400;font-size:11.5px;color:var(--muted)">批次 ${escapeHtml(String(batch))}</span>`,
-    `${top10.length ? top10.map((r,i)=>{
-      const mkt = (r.market_rank!=null && r.market_n) ? ' · 市场前' + Math.max(1, Math.round(100 - r.market_rank/r.market_n*100)) + '%' : '';
-      const ind = (r.ind_rank!=null && r.ind_n) ? ' 行业' + r.ind_rank + '/' + r.ind_n : '';
-      const fl = ((r.flags)||[]).length ? ' ⚠' + r.flags.join('、') : '';
-      const conf = (r.confidence==='A'||r.confidence==='B'||r.confidence==='C') ? `<span class="conf-badge conf-${r.confidence}">${r.confidence}</span>` : '';
-      return `<div class="score-row" data-code="${escapeHtml(String(r.code))}"><span style="color:var(--muted);width:24px">#${i+1}</span><b>${escapeHtml(r.name||'')}</b>${conf}<span style="color:var(--muted);font-size:11.5px">${escapeHtml(String(r.code))}</span><span class="score-pill">${r.final.toFixed(1)}分 ${scoreStars(r.final)}</span><span style="color:var(--muted);font-size:11px">${escapeHtml(r.ths_l1||'')}${ind}${mkt}${escapeHtml(fl)}</span></div>`;
-    }).join('') : '<div class="score-row" style="color:var(--muted)">本批次精选池无评分行</div>'}
-    <div class="score-card-note">评分为横截面相对位置（质量30/成长30/估值20/动量20，行业内百分位），不构成买卖建议；点开持仓卡片可见你的股票同口径明细。</div>`);
-}
+// 量化初筛 Top10 卡已于 2026-11-16 按用户裁定删除（Q/G/V/M 加权榜与「护城河宽、安全边际高」口径相反，
+// 现网实测对价值门禁 0/10 通过）；持仓卡片的评分明细（scorePillHtml）保留，scoreState.rows 仍加载。
 
 // 三张榜单卡折叠：默认收起由 CSS 保证，展开状态按 key 存 localStorage，每次渲染后回放；
 // 只写 '1'/'0' 两个值，读不到（含隐私模式禁用存储）一律按默认收起处理。
@@ -1515,34 +1500,120 @@ function foldCardHtml(key, titleInner, bodyHtml){
     +'<button type="button" class="fold-btn" aria-expanded="false">展开</button></div>'
     +'<div class="fold-body">'+bodyHtml+'</div></div>';
 }
-function renderValueTop10(state, trendMap){
+// ==== 核心池 Top10 · 长期价值（2026-11-16 用户裁定：三榜统一为「护城河宽、安全边际高、财务稳健、长期投资价值」）====
+// Universe 不变：价值门禁 qualified + A 级——门禁本身就是四要求的底线（ROIC≥8% 护城河锚、MOS≥2pp、三硬否决不碰），
+// 合格池零变化；变的只是「合格者中谁更靠前」：从 vq（四维相对百分位合成）改为四支柱复合，护城河为最强支柱。
+// 权重是披露在卡脚注里的设计参数；支柱读数逐行展示，为什么它排前是可读的。
+var CORE_W = { moat: 0.40, safety: 0.25, health: 0.15, trend: 0.20 };
+var CORE_MOAT_INNER = { abs: 0.4, rel: 0.3, stability: 0.3 };
+var CORE_MOS_LO = 2, CORE_MOS_HI = 8;      // 安全边际绝对尺：2pp（门禁地板）记 0 → 8pp 记 1
+var CORE_DEBT_CEIL = 0.75;                 // 稳健负债率顶：≤75% 线性计分，>75% 该项记 0（缺失不扣，缺数据不伪装）
+var CORE_MOAT_REL_PP = 15;                 // 「高于行业中位」的满分差：+15pp 记 1（2026-11-15 批池内超额 0.4~18.9pp）
+// 趋势支柱数值（2026-11-16 用户裁定：长期趋势进排序；破位必须按腿拆——2026-10-14 前视取证裁定延续：
+// 「上市以来年化≤0」腿含顶部上市起点污染、四个前视窗口反而中位正超额，按纠缠同值 0.55 计；
+// 「破 24 月线且近 24 月在跌」腿是唯一稳定跑输的（−1~−3pp/年），才真正压到 0.15。
+// 未取到（东财连不上/次新股/缓存未落地）= 中性 0.55，数据落地后 loadTrendBadges→renderStockSection 自动重排，
+// 绝不把「没取到」伪装成「趋势差」。
+var CORE_TREND_N = { steady: 1, mixed: 0.55, broken_annualized: 0.55, broken_recent: 0.15, na: 0.55 };
+function coreNum(v){ return (v===null || v===undefined || isNaN(Number(v))) ? null : Number(v); }
+function coreClamp01(x){ return (x===null || x===undefined) ? null : Math.max(0, Math.min(1, x)); }
+// 破位分腿：与 brokenLegOf 同式（label=broken 时 annualized≤0 → 年化腿，否则近端腿）；
+// 注意 Number(null)=0 是两函数共用的历史既定行为（→ 年化腿 0.55，与中性同值，分值不受影响）；
+// 只有非有限值（undefined/NaN）才「宁可不归因」→ 回 na 中性，不把「未知」压成近端腿
+function coreTrendKey(t){
+  if(!t) return 'na';
+  if(t.label === 'steady') return 'steady';
+  if(t.label === 'mixed') return 'mixed';
+  if(t.label === 'broken'){
+    var a = Number(t.annualized);
+    if(!isFinite(a)) return 'na';
+    return a <= 0 ? 'broken_annualized' : 'broken_recent';
+  }
+  return 'na';
+}
+// 四支柱。缺数据一律「重归一」而非记 0：护城河缺行业中位 → 在 abs+stab 两项内归一；
+// 稳健缺负债率 → 在 v_health 一项内归一。NA 永不伪装成劣势，也永不伪装成优势。
+function corePoolPillars(r, indMed, roicLo, roicHi){
+  var med = coreNum(r.roic_med), min3 = coreNum(r.roic_min3);
+  var abs = (med===null || roicHi<=roicLo) ? null : coreClamp01((med-roicLo)/(roicHi-roicLo));
+  var rel = (med===null || indMed===null || indMed===undefined) ? null : coreClamp01((med-indMed)/CORE_MOAT_REL_PP);
+  var stab = (med!==null && min3!==null && med>0) ? coreClamp01(min3/med) : null;
+  var mParts = [], mW = 0;
+  if(abs!==null){ mParts.push(abs*CORE_MOAT_INNER.abs); mW += CORE_MOAT_INNER.abs; }
+  if(rel!==null){ mParts.push(rel*CORE_MOAT_INNER.rel); mW += CORE_MOAT_INNER.rel; }
+  if(stab!==null){ mParts.push(stab*CORE_MOAT_INNER.stability); mW += CORE_MOAT_INNER.stability; }
+  var moat = mW>0 ? mParts.reduce(function(a,b){return a+b;},0)/mW : null;
+  var mos = coreNum(r.margin_of_safety);
+  var safety = (mos===null) ? null : coreClamp01((mos-CORE_MOS_LO)/(CORE_MOS_HI-CORE_MOS_LO));
+  var healthDim = coreNum(r.v_health), debt = coreNum(r.debt_ratio);
+  var hParts = [], hW = 0;
+  if(healthDim!==null){ hParts.push(coreClamp01(healthDim/100)*0.6); hW += 0.6; }
+  if(debt!==null){ hParts.push(coreClamp01(1 - debt/CORE_DEBT_CEIL)*0.4); hW += 0.4; }
+  var health = hW>0 ? hParts.reduce(function(a,b){return a+b;},0)/hW : null;
+  return { moat: moat, safety: safety, health: health };
+}
+// 复合排序：支柱齐备→全权重；缺→按可用支柱重归一；并列按 vq 降序再按 code 升序（全序键，重渲染必须同序）。
+function corePoolSort(rows, indByL2, trendCache){
+  var list = (rows||[]).filter(function(r){
+    return r && r.tier==='qualified' && r.confidence==='A' && r.vq!==null && r.vq!==undefined;
+  });
+  var meds = list.map(function(r){ return coreNum(r.roic_med); }).filter(function(v){ return v!==null; });
+  var lo = meds.length ? Math.min.apply(null, meds) : 0, hi = meds.length ? Math.max.apply(null, meds) : 1;
+  list = list.map(function(r){
+    var indMed = (indByL2 && indByL2[r.ths_l2] && indByL2[r.ths_l2].med !== undefined) ? indByL2[r.ths_l2].med : null;
+    var p = corePoolPillars(r, indMed, lo, hi);
+    var tk = coreTrendKey(trendCache ? trendCache[String(r.code)] : null);
+    var parts = [], w = 0;
+    if(p.moat!==null){ parts.push(p.moat*CORE_W.moat); w += CORE_W.moat; }
+    if(p.safety!==null){ parts.push(p.safety*CORE_W.safety); w += CORE_W.safety; }
+    if(p.health!==null){ parts.push(p.health*CORE_W.health); w += CORE_W.health; }
+    // 趋势支柱始终入权（na=0.55 中性）：未取到若走「重归一」会虚增名次（三支柱独撑），若记 0 则伪装成劣势——
+    // 2026-11-16 裁定取中性：与 mixed 同档，数据落地后 loadTrendBadges→renderStockSection 自动重排。
+    parts.push(CORE_TREND_N[tk]*CORE_W.trend); w += CORE_W.trend;
+    var total = w>0 ? parts.reduce(function(a,b){return a+b;},0)/w : null;
+    return Object.assign({}, r, { pillars: p, trendKey: tk, coreScore: total });
+  });
+  list.sort(function(a, b){
+    var as = a.coreScore===null ? -1 : a.coreScore, bs = b.coreScore===null ? -1 : b.coreScore;
+    if(bs !== as) return bs - as;
+    if((Number(b.vq)||0) !== (Number(a.vq)||0)) return (Number(b.vq)||0) - (Number(a.vq)||0);
+    return String(a.code) < String(b.code) ? -1 : 1;
+  });
+  return list;
+}
+function renderValueTop10(state, trendMap, indByL2){
   if(!state) return '';
-  const list = (state.top10||[]).filter(r => r.tier==='qualified' && r.confidence==='A' && r.vq!==null && r.vq!==undefined)
-    .sort((a,b)=>b.vq-a.vq).slice(0,10);
-  return foldCardHtml('value', '价值 Top10 · 巴菲特式质量价值 '
+  const list = corePoolSort(state.top10||[], indByL2, trendMap).slice(0,10);
+  return foldCardHtml('value', '核心池 Top10 · 长期价值 '
     +'<span style="font-weight:400;font-size:11.5px;color:var(--muted)">批次 '+escapeHtml(String(state.batch))+'</span>',
-    (list.length ? list.map((r,i)=>'<div class="score-row" data-code="'+escapeHtml(String(r.code))+'">'
+    (list.length ? list.map((r,i)=>{
+      const p = r.pillars || {}, pct = v => (v===null || v===undefined) ? '—' : Math.round(v*100);
+      return '<div class="score-row" data-code="'+escapeHtml(String(r.code))+'">'
       +'<span style="color:var(--muted);width:24px">#'+(i+1)+'</span><b>'+escapeHtml(r.name||'')+'</b>'
       +'<span style="color:var(--muted);font-size:11.5px">'+escapeHtml(String(r.code))+'</span>'
-      +'<span class="score-pill">'+Number(r.vq).toFixed(1)+'分</span>'
+      +'<span class="score-pill">'+(r.coreScore===null?'—':(r.coreScore*100).toFixed(1))+'分</span>'
       +trendBadgeHtml(trendMap ? trendMap[String(r.code)] : null)
-      +'<span style="color:var(--muted);font-size:11px">owner yield '+valueFmtPct(r.owner_yield)
-      +' · 安全边际 '+valueFmtPp(r.margin_of_safety,2)+' · ROIC中位 '+valueFmtPct(r.roic_med, 2)
-      + (r.pool_n && r.pool_rank ? ' · 池内 P' + Math.max(1, Math.round(100 - r.pool_rank / r.pool_n * 100)) : '')
-      +'</span></div>').join('')
+      +'<span style="color:var(--muted);font-size:11px">护城河 '+pct(p.moat)+' · 边际 '+pct(p.safety)+' · 稳健 '+pct(p.health)
+      +' · ROIC中位 '+valueFmtPct(r.roic_med, 2)+' · 安全边际 '+valueFmtPp(r.margin_of_safety,2)
+      +' · 负债率 '+(coreNum(r.debt_ratio)===null?'NA':Math.round(r.debt_ratio*100)+'%')
+      +' · vq '+Number(r.vq).toFixed(1)+'</span></div>';
+    }).join('')
       : '<div class="score-row" style="color:var(--muted)">本批次无 A 级合格标的</div>')
-    +'<div class="score-card-note">门禁用绝对阈值（值不值得拥有），排序用行业内百分位（合格者中谁更靠前）；不构成买卖建议。</div>');
+    +'<div class="score-card-note">门禁=四要求底线（ROIC≥8% 护城河锚 · 安全边际≥2pp · 资不抵债/商誉/烧钱杠杆硬否决）；'
+      +'排序=护城河40%+安全边际25%+稳健15%+长期趋势20%，护城河=ROIC绝对水平+高于行业中位+近3年稳定性，'
+      +'破位按前视取证分腿（年化腿0.55/近端腿0.15）；不构成买卖建议。</div>');
 }
 
-// ---- 收益型观察名单（2026-10-30 用户裁定：B 不改门禁，改并列的独立通道）----
-// 通道 ≠ 门禁例外：门禁回答「值不值」（ROIC 8% 是 WACC 锚），放行会等于让「股息高但资本回报一般」冒充合格；
-// 通道只回答「这条路在什么条件下值得看」，与价值榜并列、互不替代（同一只可两边都在，打标区分）。
-// 阈值有分布依据（2026-10-30 全市场实测）：股息率 4.0 ≈ P95（3.99）、5年股息 2.5 ≈ P90（2.69）、ROIC 中位 3.0 ≈ P25（3.26）。
+// ---- 收益型观察名单（2026-10-30 用户裁定独立通道 → **2026-11-16 用户裁定收紧为全四要求**）----
+// 收紧后 = 白名单行业 × 股息率≥4% × 5年股息≥2.5% × **价值门禁全过（tier=qualified：ROIC≥8% 护城河锚 +
+// 安全边际≥2pp + 资不抵债/商誉/烧钱杠杆三硬否决不碰）** × 有息负债率≤75%。
+// 实测（2026-11-15 批）：股息双筛后 42 行 → 收紧后 7 行；粤高速A（股息 5.1% 但 owner yield 为负、MOS −4.4pp）
+// 等「高息无边际」股出局——通道与核心池同章程，只是加了股息透镜；旧三筛阈值（ROIC≥3）与高杠杆提示退出历史。
 // 白名单 = 分红是常态、现金流可预测的行业；名单外股息再高也不进——那更可能是一次性卖资产而非可持续回报。
 var INCOME_INDUSTRIES = ['电力','燃气','公路铁路运输','港口航运','机场航运','环境治理','建筑装饰'];
 var INCOME_DY_MIN = 4;
 var INCOME_DY5_MIN = 2.5;
-var INCOME_ROIC_MIN = 3;
+var INCOME_DEBT_MAX = 0.75;
 var INCOME_LIMIT = 15;
 
 function incomeNum(v){ return (v === null || v === undefined || isNaN(Number(v))) ? null : Number(v); }
@@ -1551,11 +1622,12 @@ function incomeChannelOf(rows){
   (rows || []).forEach(function(r){
     if (!r) return;
     if (INCOME_INDUSTRIES.indexOf(String(r.ths_l2 || '')) < 0) return;
-    var dy = incomeNum(r.div_yield), dy5 = incomeNum(r.div_yield_5y), roic = incomeNum(r.roic_med), debt = incomeNum(r.debt_ratio);
+    var dy = incomeNum(r.div_yield), dy5 = incomeNum(r.div_yield_5y), debt = incomeNum(r.debt_ratio);
     if (dy === null || dy < INCOME_DY_MIN) return;          // 缺数据 = 剔除：不当 0，也不当通过
     if (dy5 === null || dy5 < INCOME_DY5_MIN) return;
-    if (roic === null || roic < INCOME_ROIC_MIN) return;
-    list.push({ ...r, alreadyQualified: r.tier === 'qualified', highLeverage: debt !== null && debt > 0.9 });
+    if (r.tier !== 'qualified') return;                     // 2026-11-16 收紧：价值门禁全过（护城河+边际+否决）才入选
+    if (debt !== null && debt > INCOME_DEBT_MAX) return;    // 财务稳健上限；缺失不剔除（cap 只在证实超限时拦）
+    list.push({ ...r, inCorePool: r.in_pool === true });
   });
   list.sort(function(a, b){ return Number(b.div_yield) - Number(a.div_yield); });
   return { list: list, total: list.length };
@@ -1563,59 +1635,28 @@ function incomeChannelOf(rows){
 function renderIncomeList(state){
   if (!state || !state.list) return '';
   var list = state.list.slice(0, INCOME_LIMIT);
-  return foldCardHtml('income', '收益型观察名单 · 独立通道 '
+  return foldCardHtml('income', '收益型观察名单 · 高息透镜 '
     +'<span style="font-weight:400;font-size:11.5px;color:var(--muted)">共 '+Number(state.total)+' 只 · 批次 '+escapeHtml(String(state.batch))+'</span>',
-    (list.length ? '' : '<div class="score-row" style="color:var(--muted)">本批次无符合三筛的标的（这不是「通道不存在」）</div>')
+    (list.length ? '' : '<div class="score-row" style="color:var(--muted)">本批次无同时通过价值门禁与股息双筛的标的（这不是「通道不存在」）</div>')
     + list.map(function(r, i){
       var debt = incomeNum(r.debt_ratio);
       return '<div class="score-row" data-code="'+escapeHtml(String(r.code))+'">'
         +'<span style="color:var(--muted);width:24px">#'+(i+1)+'</span><b>'+escapeHtml(r.name || '')+'</b>'
         +'<span style="color:var(--muted);font-size:11.5px">'+escapeHtml(String(r.code))+'</span>'
         +'<span class="score-pill">股息 '+valueFmtPct(r.div_yield, 2)+'</span>'
-        + (r.alreadyQualified ? '<span class="score-pill">已在价值榜</span>' : '')
-        + (r.highLeverage ? '<span class="score-pill score-pill-warn">高杠杆</span>' : '')
+        + (r.inCorePool ? '<span class="score-pill">池内核心</span>' : '')
         +'<span style="color:var(--muted);font-size:11px">'+escapeHtml(String(r.ths_l2 || ''))
         +' · 5年股息 '+valueFmtPct(r.div_yield_5y, 2)+' · ROIC中位 '+valueFmtPct(r.roic_med, 2)
         +' · 有息负债率 '+(debt === null ? 'NA' : (debt * 100).toFixed(0)+'%')
         +'</span></div>';
     }).join('')
-    +'<div class="score-card-note">本通道不套用 8% 护城河门禁：股息率≥'+INCOME_DY_MIN+'%、5年股息≥'+INCOME_DY5_MIN+'%、ROIC中位≥'+INCOME_ROIC_MIN+'% 三筛，杠杆只提示不拦；与价值榜并列，不构成买卖建议。</div>');
+    +'<div class="score-card-note">四要求全过才入选：白名单行业 × 股息率≥'+INCOME_DY_MIN+'% × 5年股息≥'+INCOME_DY5_MIN
+      +'% × 价值门禁（ROIC≥8% 护城河锚 · 安全边际≥2pp · 三硬否决不碰）× 有息负债率≤75%；'
+      +'与核心池并列的高息透镜，不构成买卖建议。</div>');
 }
 
-// ==== 以下续写：分歧榜与换仓逻辑（Task 8）====
+// ==== 以下续写：换仓逻辑（分歧榜已于 2026-11-16 随量化初筛卡一并删除：它对比的正是两套已退场的排名）====
 var SWAP_GAP = 5;   // pp；spec §7.3 换仓门槛——改动需先改 spec（受前视时间表约束，届满前不得调）
-
-function pctOf(values, v, reverse){
-  var n = values.length; if(!n) return null;
-  var below = values.filter(function(x){ return x < v; }).length;
-  var eq = values.filter(function(x){ return x === v; }).length;
-  var p = (below + 0.5*eq) / n * 100;
-  return reverse ? 100 - p : p;
-}
-
-// 分歧榜（spec §7.2 逐字：「VQ **池内**前 20 分位 × V1.1 主分后 50 分位」）：
-// 总体必须是「池内 + A 级 + 两分齐备」，与前视脚本 forwardUniverse 同一个总体——否则页面看到的榜
-// 与前视时间表声称验证的那张榜**同名、不同总体**，本功能「判生死」的证据基础失效。
-// 缺 in_pool 判据的实际后果（终审实测）：一只「已从 stock_pool 摘除但仍有主分快照」的持仓行会
-// ①自己混进榜单 ②改掉其余所有行的百分位（实例：加 1 只池外持仓，600519 从 87.5→70 直接出榜）。
-// 写成 `!== false` 而非 `=== true`：见计划「控制方裁定」第 2 条（保住既有 5 条测试的无 in_pool fixture）。
-function divergeLists(rows){
-  var use = (rows || []).filter(function(r){
-    return r && r.vq !== null && r.vq !== undefined && r.main_final !== null && r.main_final !== undefined
-      && r.confidence === 'A' && r.in_pool !== false;
-  });
-  var vqs = use.map(function(r){ return Number(r.vq); });
-  var ms  = use.map(function(r){ return Number(r.main_final); });
-  var wronged = [], rich = [];
-  for (var i = 0; i < use.length; i++) {
-    var vp = pctOf(vqs, Number(use[i].vq)), mp = pctOf(ms, Number(use[i].main_final));
-    if (vp >= 80 && mp <= 50) wronged.push({ ...use[i], vp, mp });        // 分位随行进榜（spec §7.2 示例要 (P8)/(P22)）
-    if (vp <= 50 && mp >= 80) rich.push({ ...use[i], vp, mp });
-  }
-  wronged.sort(function(a,b){ return b.vq - a.vq; });
-  rich.sort(function(a,b){ return b.main_final - a.main_final; });
-  return { wronged: wronged, rich: rich };
-}
 
 // 换仓建议：纯机会成本比较，只看安全边际差；too_rich 永不构成卖出（spec §7.3）
 function swapSuggest(row, poolRows, heldCodes){
@@ -1631,32 +1672,6 @@ function swapSuggest(row, poolRows, heldCodes){
     if (gap >= SWAP_GAP - 1e-9 && (!best || gap > best.gap)) best = { target: x, gap: gap };
   }
   return best;
-}
-
-function divergeRowHtml(r, tag){
-  var ex = r.extras || {};
-  var ml = ex.main_legs || null;
-  // 归因句（spec §7.2）：价值侧说“为什么便宜”，主分侧说“为什么被低估”——动量腿低是错杀最常见成因；主分侧说“为什么高分”
-  var leg = function(v){ return (v === null || v === undefined || isNaN(Number(v))) ? '—' : Number(v).toFixed(0); };
-  var why = ml ? (' 主分腿：Q' + leg(ml.quality) + '/G' + leg(ml.growth) + '/V' + leg(ml.value) + '/M' + leg(ml.momentum)) : ' 主分四条腿未快照';
-  return '<div class="score-row"><span class="warn-pill">' + tag + '</span><b>' + escapeHtml(r.name || r.code) + '</b>'
-    + '<span style="color:var(--muted);font-size:11.5px">' + escapeHtml(String(r.code)) + '</span>'
-    + '<span class="score-pill">VQ ' + Number(r.vq).toFixed(1) + '(P' + Math.round(r.vp) + ') / 主分 ' + Number(r.main_final).toFixed(1) + '(P' + Math.round(r.mp) + ')</span>'
-    + '<span style="color:var(--muted);font-size:11px">owner yield ' + valueFmtPct(r.owner_yield)
-    + ' · 安全边际 ' + valueFmtPp(r.margin_of_safety, 2) + ' · ROIC中位 ' + valueFmtPct(r.roic_med, 2) + ' · ' + escapeHtml(why) + '</span></div>';
-}
-
-function renderDivergeBoard(state){
-  if (!state || !state.rows || typeof state.rows.forEach !== 'function') return '';
-  var all = [];
-  state.rows.forEach(function(r){ all.push(r); });
-  var d = divergeLists(all);
-  return foldCardHtml('diverge', '分歧榜 · 两套分数不一致的地方'
-    + '<span style="font-weight:400;font-size:11.5px;color:var(--muted)">批次 ' + escapeHtml(String(state.batch)) + '</span>',
-    (d.wronged.length ? d.wronged.slice(0, 5).map(function(r){ return divergeRowHtml(r, '被错杀'); }).join('') : '')
-    + (d.rich.length ? d.rich.slice(0, 5).map(function(r){ return divergeRowHtml(r, '虚高'); }).join('') : '')
-    + (d.wronged.length + d.rich.length === 0 ? '<div class="score-row" style="color:var(--muted)">本批次无显著分歧样本（两套分数同向）</div>' : '')
-    + '<div class="score-card-note">分歧榜只展示两套口径哪里不一致，不构成买卖建议。</div>');
 }
 // ---- 两条腿 REST 查询构造（2026-10-13 Step 9 预检修复单：缺陷 A + 缺陷 B）----
 // A：PostgREST 未指定 nulls 修饰符时走 PG 默认 DESC NULLS FIRST，而引擎不变式（value_engine.ts:211）
@@ -2133,9 +2148,10 @@ function trendHydrate(){
 // 裁决本身在纯块里（trendPick），这里只负责「保留」= 不写。
 function loadTrendBadges(){
   trendHydrate();
-  var list = (valueState && valueState.top10 ? valueState.top10 : [])
-    .filter(function(r){ return r && r.tier === 'qualified' && r.confidence === 'A' && r.vq !== null && r.vq !== undefined; })
-    .sort(function(a, b){ return b.vq - a.vq; }).slice(0, 10);
+  // 2026-11-16 核心池复合排序：候选拉取 = 复合前 12（趋势缺省中性，按三支柱基座排序），
+  // 趋势落地后重排可能洗牌前 10 的边缘——候选比展示多 2 只兜住切榜。
+  var list = corePoolSort((valueState && valueState.top10 ? valueState.top10 : []),
+    valueIndRef ? valueIndRef.byL2 : null, trendCache).slice(0, 12);
   var todo = list.filter(function(r){ var c = trendCache[String(r.code)]; return !c || c.stale; });
   if(!todo.length) return Promise.resolve(0);
   // 取数与落缓存分两段：这一段只负责把结果收集回来，一律交给 .then 里的 apply 判定成败口径，
@@ -4462,18 +4478,14 @@ function renderStockSection(){
   list.innerHTML = '';
   // 板块轮动概览条：股票列表最上一张卡（自上而下——先看行业方向，再看个股初筛）；无 sectorState 时返回空串不占位
   list.insertAdjacentHTML('beforeend', sectorStockStripHtml());
-  // Top10 区块紧随其后；无批次时 renderScoreTop10 内部降级为占位文案
-  list.insertAdjacentHTML('beforeend', renderScoreTop10());
-  // 价值 Top10 紧随评分 Top10；未生成时的降级文案在调用点判定（VALUE_PURE 纯逻辑不读全局）
-  list.insertAdjacentHTML('beforeend', valueState ? renderValueTop10(valueState, trendCache)
+  // 核心池主榜（2026-11-16 裁定：量化初筛卡与分歧榜卡删除，只留核心池+收益型两张榜）；
+  // 未生成时的降级文案在调用点判定（VALUE_PURE 纯逻辑不读全局）
+  list.insertAdjacentHTML('beforeend', valueState ? renderValueTop10(valueState, trendCache, valueIndRef ? valueIndRef.byL2 : null)
     : (valueTried ? '<div class="signal-strip"><span class="signal-pill pill-normal">价值批次尚未生成（夜间批处理上线后自动出现）</span></div>' : ''));
-  // 收益型观察名单：独立通道，紧随价值 Top10；零命中由纯函数出卡说明，未生成时在这里降级
+  // 收益型观察名单：独立取数通道，紧随核心池；零命中由纯函数出卡说明，未生成时在这里降级
   list.insertAdjacentHTML('beforeend', incomeState ? renderIncomeList(incomeState)
     : (incomeTried ? '<div class="signal-strip"><span class="signal-pill pill-normal">收益型名单待价值批次生成后出现</span></div>' : ''));
-  // Task 7 在 renderStockSection 里插的价值 Top10 语句之后，同一口径的降级（纯函数不读全局）：
-  list.insertAdjacentHTML('beforeend', valueState ? renderDivergeBoard(valueState)
-    : (valueTried ? '<div class="signal-strip"><span class="signal-pill pill-normal">分歧榜待价值批次生成后出现</span></div>' : ''));
-  // 三张榜单卡的折叠状态回放（默认收起；上次展开过的仍然展开）
+  // 两张榜单卡的折叠状态回放（默认收起；上次展开过的仍然展开）
   applyFoldState(list);
   const sectorOvJump = document.getElementById('sectorOvJumpBtn');
   if(sectorOvJump) sectorOvJump.addEventListener('click', ()=>{ const b = document.querySelector('.tab-btn[data-tab="funds"]'); if(b) b.click(); });

@@ -9,7 +9,9 @@ import { valueFmtPct, valueTierLabel, valueGateHtml, renderValueTop10,
   trendNaWhy, trendStaleHtml, trendStaleDays, fetchStatBump, trendPick,
   EM_VAL_MIN_ROWS, valPctSupported, emValUrl, valuationPctFromRows, valPctCaliber, valPctNaWhy,
   valPctNeedFetch, valPctApply, valPctHtml, valPctMerge, valPctLockNote,
-  incomeChannelOf, renderIncomeList, foldCardHtml,
+  incomeChannelOf, renderIncomeList, foldCardHtml, INCOME_DEBT_MAX,
+  CORE_W, CORE_MOAT_INNER, CORE_MOS_LO, CORE_MOS_HI, CORE_DEBT_CEIL, CORE_MOAT_REL_PP, CORE_TREND_N,
+  coreTrendKey, corePoolPillars, corePoolSort,
   valueMedian, valueIndStatsOf, ROIC_GATE_PCT, valueAssessmentHtml,
   valueTrendExempt, ROIC_TREND_FLOOR_PCT,
   profitRefHtml, buyRefHtml,
@@ -73,27 +75,14 @@ Deno.test('valueGateHtml：veto_reasons 非空 → 硬否决块 + 每条否决�
   assertEquals(h.includes('roe_low'), true);
 });
 
-// ==== Step 1（Task 8）：分歧榜 + 换仓提示行失败测试 ====
-import { divergeLists, swapSuggest, renderDivergeBoard, SWAP_GAP } from "./value_leg_logic.ts";
+// ==== Step 1（Task 8）：换仓提示行测试（分歧榜已于 2026-11-16 随量化初筛卡一并删除）====
+import { swapSuggest, SWAP_GAP } from "./value_leg_logic.ts";
 
 const v = (code: string, vq: number, main: number, mos: number) =>
   ({ code, name: code, vq, main_final: main, margin_of_safety: mos, tier: 'qualified', confidence: 'A', rf_fallback: false });
 
 Deno.test('SWAP_GAP 常数为 5pp（改动需先改 spec，不得局部改代码）', () => {
   assertEquals(SWAP_GAP, 5);
-});
-
-Deno.test('divergeLists：被错杀 = VQ 前 20 分位 × 主分后 50 分位；两组均只取 A 级', () => {
-  const rows = [ v('a', 95, 30, 6), v('b', 50, 50, 3), v('c', 10, 95, 1), v('d', 92, 28, 5), v('e', 90, 20, 4) ];
-  const d = divergeLists(rows);
-  assertEquals(d.wronged.map(r => r.code).includes('a'), true);
-  assertEquals(d.rich.map(r => r.code).includes('c'), true);
-  assertEquals(d.wronged.every(r => r.confidence === 'A'), true);
-});
-
-Deno.test('divergeLists：main_final 缺失的行不参与（无主分快照就无从谈分歧）', () => {
-  const rows = [v('a', 95, 30, 6), { ...v('z', 99, 1, 8), main_final: null }];
-  assertEquals(divergeLists(rows).wronged.map(r => r.code).includes('z'), false);
 });
 
 Deno.test('swapSuggest：X 的 mos 比 Y 高 ≥5pp 才给建议；4.9pp 不给（边界包含等于）', () => {
@@ -105,19 +94,6 @@ Deno.test('swapSuggest：X 的 mos 比 Y 高 ≥5pp 才给建议；4.9pp 不给�
 Deno.test('swapSuggest：任一侧 rf_fallback（口径不一致）→ 整体静默 null，不混用尺子算优势', () => {
   const pool = [ { ...v('x', 80, 60, 8.0), rf_fallback: true }, v('y', 70, 60, 3.0) ];
   assertEquals(swapSuggest(pool[1], pool), null);
-});
-
-Deno.test('renderDivergeBoard：两组标题 + 归因句（含主分四条腿）+ 免责脚注；null 降级为空串', () => {
-  // 样本必须足量且真正存在分歧：单行时百分位恒为 50，永远进不了 ≥80 / ≤50 双条件
-  const rows = [ v('a', 95, 30, 6), v('b', 50, 50, 3), v('c', 10, 95, 1), v('d', 92, 28, 5), v('e', 90, 20, 4) ]
-    .map(r => ({ ...r, owner_yield: 6.2, roic_med: 18, extras: { main_legs: { quality: 82, growth: 40, value: 44, momentum: 30 } } }));
-  const state = { batch: '2026-10-11', top10: rows, rows: new Map(rows.map(r => [r.code, r])) } as never;
-  const html = renderDivergeBoard(state);
-  assertEquals(html.includes('被错杀'), true);
-  assertEquals(html.includes('虚高'), true);
-  assertEquals(html.includes('主分腿：Q82/G40/V44/M30'), true);        // 归因句（spec §7.2）
-  assertEquals(html.includes('不构成买卖建议'), true);
-  assertEquals(renderDivergeBoard(null), '');
 });
 
 // ==== Task 8 修复轮 1：5 条新测试（接在既有 14 条之后）====
@@ -137,56 +113,19 @@ Deno.test('swapSuggest：浮点边界不得靠运气——真实差恰为 5.0pp 
   assertEquals(Number(s!.gap.toFixed(1)), 5);
 });
 
-Deno.test('divergeLists：非 A 级行不得上榜（spec §7.2/§6：缺数据造成的便宜不得混进结论）', () => {
-  // 样本必须够多：只剩一行 A 级时 pctOf 恒为 50，谁都进不了榜——那就测不到过滤器了。
-  const rows = [ v('a', 95, 30, 6), v('b', 50, 50, 3), v('c', 10, 95, 1), v('d', 92, 28, 5), v('e', 90, 20, 4),
-    { ...v('z1', 99, 1, 9), confidence: 'C' }, { ...v('z2', 1, 99, 0), confidence: 'B' } ];
-  const d = divergeLists(rows);
-  assertEquals(d.wronged.map(r => r.code), ['a']);    // z1 比 a 更“被错杀”，但它是 C 级 → 必须不在榜上
-  assertEquals(d.rich.map(r => r.code), ['c']);       // z2 同理（B 级）
-});
-
-Deno.test('divergeLists：池外持仓行既不进榜、也不挤掉他人的分位（终审 I-1，spec §7.2「池内」）', () => {
-  const base = [
-    { ...v('a', 95, 30, 6), in_pool: true }, { ...v('b', 50, 50, 3), in_pool: true },
-    { ...v('c', 10, 95, 1), in_pool: true }, { ...v('d', 92, 28, 5), in_pool: true },
-  ];
-  assertEquals(divergeLists(base).wronged.map(r => r.code), ['a']);          // 池内 4 行：a 的 VQ 分位 87.5 ≥80 → 进榜（终审实测值）
-  assertEquals(divergeLists(base).rich.map(r => r.code), ['c']);
-  const withOut = base.concat([{ ...v('x', 99, 20, 9), in_pool: false }]);   // x：已从 stock_pool 摘除但两分齐备的持仓行
-  const d = divergeLists(withOut);
-  assertEquals(d.wronged.map(r => r.code), ['a']);                            // x 不得进榜，且 a 不得被挤掉
-  assertEquals(d.rich.map(r => r.code), ['c']);
-});
-
 Deno.test('swapSuggest：候选必须 tier=qualified（too_rich/vetoed/unqualified 都不算“更便宜的合格标的”）', () => {
   const y = v('y', 70, 60, 3.0);
   const pool = [y, { ...v('rich', 80, 60, 9.0), tier: 'too_rich' }, { ...v('veto', 80, 60, 8.5), tier: 'vetoed' }];
   assertEquals(swapSuggest(y, pool, []), null);
 });
 
-Deno.test('renderDivergeBoard：state.rows 缺席时优雅降级为空串（不抛）', () => {
-  assertEquals(renderDivergeBoard({ batch: '2026-10-11' } as never), '');
-});
-
 // ==== 终审修复单（F-7g / F-8 配套测试）====
-Deno.test('renderDivergeBoard：归因句带上让样本入选的分位 (P90)/(P50)（spec §7.2 示例、终审 M-4）', () => {
-  const rows = [v('a', 95, 30, 6), v('b', 50, 50, 3), v('c', 10, 95, 1), v('d', 92, 28, 5), v('e', 90, 20, 4)];
-  const state = { batch: '2026-10-11', rows: new Map(rows.map(r => [r.code, r as never])) } as never;
-  const html = renderDivergeBoard(state);
-  assertEquals(html.includes('VQ 95.0(P90) / 主分 30.0(P50)'), true);
-  assertEquals(html.includes('VQ 10.0(P10) / 主分 95.0(P90)'), true);
-});
-
-Deno.test('安全边际三处统一按 pp 渲染，旧单位 4.35% 不得残留（终审 N-1）；Top10 另带池内分位（F-3e）', () => {
+Deno.test('安全边际三处统一按 pp 渲染，旧单位 4.35% 不得残留（终审 N-1）；核心池行另带支柱读数（2026-11-16）', () => {
   assertEquals(valueGateHtml(row).includes('安全边际 4.35pp'), true);
   assertEquals(valueGateHtml(row).includes('4.35%'), false);
   const top = { batch: '2026-10-11', top10: [{ ...row, pool_rank: 12, pool_n: 200 }] };
   assertEquals(renderValueTop10(top).includes('安全边际 4.35pp'), true);
-  assertEquals(renderValueTop10(top).includes('池内 P94'), true);
-  const drows = [v('a',95,30,6), v('b',50,50,3), v('c',10,95,1), v('d',92,28,5), v('e',90,20,4)];
-  const dstate = { batch: '2026-10-11', rows: new Map(drows.map(r => [r.code, r as never])) } as never;
-  assertEquals(renderDivergeBoard(dstate).includes('安全边际 6.00pp'), true);  // 第三处沿用 2 位小数
+  assertEquals(renderValueTop10(top).includes('护城河 '), true);   // 复合支柱读数逐行展示
 });
 
 // ==== 2026-10-13 Step 9 预检修复单（缺陷 A：DESC NULLS FIRST 让 Top10 恒空；缺陷 B：单页 1000 行静默截断）====
@@ -562,7 +501,7 @@ Deno.test('接线守卫：取数必须走月线全历史（klt=103 / fqt=2 / lmt
     .filter(l => /renderValueTop10\s*\(/.test(l))
     .filter(l => !/^\s*function\s+renderValueTop10/.test(l));
   assertEquals(callLines.length >= 1, true, '找不到 renderValueTop10 的调用点（只有定义，没人渲染？）');
-  assertEquals(callLines.some(l => /renderValueTop10\s*\(\s*valueState\s*,\s*trendCache\s*\)/.test(l)), true,
+  assertEquals(callLines.some(l => /renderValueTop10\s*\(\s*valueState\s*,\s*trendCache/.test(l)), true,
     '渲染调用点没把 trendCache 传进 renderValueTop10，角标恒为 NA；实际调用点：\n' + callLines.join('\n'));
 });
 
@@ -573,6 +512,133 @@ Deno.test('renderValueTop10：传入 trendMap 则行内挂角标；不传第二�
   const without = renderValueTop10(st);
   assertEquals(without.includes('trend-na'), true, '未传 map 要显式“数据不足”而非消失');
   assertEquals(without.includes('78.4'), true, '角标不得影响分数渲染');
+});
+
+// ==== 核心池 Top10 · 长期价值（2026-11-16 用户裁定：护城河 40% 复合排序；破位分腿；缺数据重归一）====
+const coreRow = (code: string, over: Record<string, unknown> = {}) => ({ code, name: 'N' + code, tier: 'qualified', confidence: 'A', vq: 80,
+  ths_l2: '汽车零部件', roic_med: 18, roic_min3: 15.3, margin_of_safety: 4.35, v_health: 66, debt_ratio: 0.36, ...over });
+
+Deno.test('核心池常量：权重 40/25/15/20、护城河内层 0.4/0.3/0.3、MOS 尺 2→8pp、负债顶 0.75、趋势数值表含破位分腿', () => {
+  assertEquals(CORE_W, { moat: 0.40, safety: 0.25, health: 0.15, trend: 0.20 });
+  assertEquals(CORE_MOAT_INNER, { abs: 0.4, rel: 0.3, stability: 0.3 });
+  assertEquals(CORE_MOS_LO, 2);
+  assertEquals(CORE_MOS_HI, 8);
+  assertEquals(CORE_DEBT_CEIL, 0.75);
+  assertEquals(CORE_MOAT_REL_PP, 15);
+  assertEquals(CORE_TREND_N, { steady: 1, mixed: 0.55, broken_annualized: 0.55, broken_recent: 0.15, na: 0.55 });
+});
+
+Deno.test('coreTrendKey：破位必须分腿（年化腿/近端腿），与 brokenLegOf 同式；未知腿宁回 na 不压成近端', () => {
+  assertEquals(coreTrendKey(null), 'na');
+  assertEquals(coreTrendKey(undefined as never), 'na');
+  assertEquals(coreTrendKey({ label: 'steady' } as never), 'steady');
+  assertEquals(coreTrendKey({ label: 'mixed' } as never), 'mixed');
+  assertEquals(coreTrendKey({ label: 'broken', annualized: -0.02 } as never), 'broken_annualized');
+  assertEquals(coreTrendKey({ label: 'broken', annualized: 0.05 } as never), 'broken_recent');
+  // Number(null)=0 是两函数共用的历史既定行为 → 年化腿（0.55 与中性同值，分值不受影响）；undefined 才是真「未知」
+  assertEquals(coreTrendKey({ label: 'broken', annualized: null } as never), 'broken_annualized');
+  assertEquals(coreTrendKey({ label: 'broken', annualized: undefined } as never), 'na');
+  assertEquals(coreTrendKey({ label: 'nonsense' } as never), 'na');
+  // 同一份 stats 两函数必须给同一腿（判据同源的文档化钉子）
+  assertEquals(brokenLegOf({ label: 'broken', annualized: -0.02 } as never) === 'annualized', true);
+  assertEquals(brokenLegOf({ label: 'broken', annualized: 0.05 } as never) === 'recent', true);
+  assertEquals(brokenLegOf({ label: 'broken', annualized: null } as never) === 'annualized', true);   // Number(null)=0 历史既定
+  assertEquals(brokenLegOf({ label: 'broken', annualized: undefined } as never) === null, true);       // 非有限 → 宁可不归因
+});
+
+Deno.test('corePoolPillars：护城河=绝对40%+相对行业30%+稳定性30%；某项缺数据在剩余项内重归一，绝不记 0', () => {
+  // abs=(18-9.53)/(24.74-9.53)=0.5569 · rel=(18-6.9)/15=0.74 · stab=15.3/18=0.85
+  const p = corePoolPillars(coreRow('a'), 6.9, 9.53, 24.74);
+  assertEquals(Math.round(p.moat! * 1000), 700);       // 0.4×0.5569+0.3×0.74+0.3×0.85=0.6997
+  assertEquals(Math.round(p.safety! * 1000), 392);     // (4.35-2)/6=0.3917
+  assertEquals(Math.round(p.health! * 1000), 604);     // 0.6×0.66+0.4×(1-0.36/0.75)=0.604
+  const noInd = corePoolPillars(coreRow('a'), null, 9.53, 24.74);                       // 缺行业中位
+  assertEquals(Math.round(noInd.moat! * 1000), 682);   // (0.4×0.5569+0.3×0.85)/0.7=0.6825
+  const noMin3 = corePoolPillars(coreRow('a', { roic_min3: null }), 6.9, 9.53, 24.74);  // 缺近3年最低
+  assertEquals(Math.round(noMin3.moat! * 1000), 635);  // (0.4×0.5569+0.3×0.74)/0.7=0.6354
+  const noBoth = corePoolPillars(coreRow('a', { roic_min3: null }), null, 9.53, 24.74); // 只剩绝对项
+  assertEquals(Math.round(noBoth.moat! * 1000), 557);  // abs 独撑=0.5569
+});
+
+Deno.test('corePoolPillars：MOS 是绝对尺（2pp→0 / 8pp→1，超界截断）；负债率>75% 该项记 0；全缺 → null 不伪装', () => {
+  assertEquals(corePoolPillars(coreRow('a', { margin_of_safety: 2 }), 6.9, 9.53, 24.74).safety, 0);
+  assertEquals(corePoolPillars(coreRow('a', { margin_of_safety: 1.2 }), 6.9, 9.53, 24.74).safety, 0);
+  assertEquals(corePoolPillars(coreRow('a', { margin_of_safety: 8 }), 6.9, 9.53, 24.74).safety, 1);
+  assertEquals(corePoolPillars(coreRow('a', { margin_of_safety: 9.5 }), 6.9, 9.53, 24.74).safety, 1);
+  assertEquals(corePoolPillars(coreRow('a', { margin_of_safety: null }), 6.9, 9.53, 24.74).safety, null);
+  assertEquals(corePoolPillars(coreRow('a', { debt_ratio: 0.9 }), 6.9, 9.53, 24.74).health, 0.396);  // 负债项归 0，稳健维独撑
+  assertEquals(corePoolPillars(coreRow('a', { debt_ratio: null }), 6.9, 9.53, 24.74).health, 0.66);  // 缺负债在稳健维内重归一
+  assertEquals(corePoolPillars(coreRow('a', { roic_med: null }), 6.9, 9.53, 24.74).moat, null);
+  assertEquals(corePoolPillars({ code: 'e' } as never, 6.9, 9.53, 24.74), { moat: null, safety: null, health: null });
+});
+
+Deno.test('corePoolSort：只收 qualified+A+vq 齐备；复合序把「宽护城河+高边际」排前；趋势未取到按三支柱基座排', () => {
+  const lo = coreRow('lo', { roic_med: 9.5, roic_min3: 9.0, margin_of_safety: 2.0, v_health: 40, debt_ratio: 0.6 });
+  const hi = coreRow('hi', { roic_med: 24.7, roic_min3: 22.0, margin_of_safety: 7.5, v_health: 90, debt_ratio: 0.2 });
+  const out = corePoolSort([lo, hi,
+    { ...hi, code: 'veto', tier: 'vetoed' }, { ...hi, code: 'bcc', confidence: 'C' }, { ...hi, code: 'nvq', vq: null }]);
+  assertEquals(out.map(r => r.code), ['hi', 'lo']);
+  assertEquals(out[0].coreScore! > out[1].coreScore!, true);
+  assertEquals(out[0].trendKey, 'na');
+  assertEquals(out[0].pillars.safety! > out[1].pillars.safety!, true);   // 支柱读数随行返回（渲染层直接用）
+});
+
+Deno.test('corePoolSort：趋势进排序——steady 独占鳌头；破位分腿生效（年化腿 0.55 > 近端腿 0.15）；并列按 vq→code 全序破平', () => {
+  const mk = (code: string, over: Record<string, unknown> = {}) =>
+    coreRow(code, { roic_med: 18, roic_min3: 15.3, margin_of_safety: 4.35, v_health: 66, debt_ratio: 0.36, ...over });
+  const ind = { 汽车零部件: { med: 6.9, n: 40 } };
+  const trend = { aa: { label: 'steady' }, bb: { label: 'mixed' }, cc: { label: 'broken', annualized: -0.02 },
+    dd: { label: 'broken', annualized: 0.05 }, ee: { label: 'nope' } } as never;
+  const out = corePoolSort(['ee', 'dd', 'cc', 'bb', 'aa'].map(c => mk(c)), ind, trend);
+  assertEquals(out.map(r => r.trendKey), ['steady', 'mixed', 'broken_annualized', 'na', 'broken_recent']);
+  // 全柱相同 → 复合分只由趋势数值决定：1 > 0.55×3 > 0.15；三个 0.55 同分按 code 升序（全序键保证重渲染同序）
+  assertEquals(out.map(r => r.code), ['aa', 'bb', 'cc', 'ee', 'dd']);
+});
+
+Deno.test('corePoolSort：缺数据重归一而非记 0——缺负债率行不被负债项拖累；全缺行=纯中性 0.55（趋势支柱始终入权）', () => {
+  const full = coreRow('full', { roic_med: 18, roic_min3: 15.3, margin_of_safety: 4.35, v_health: 66, debt_ratio: 0.36 });
+  const noDebt = coreRow('nodebt', { roic_med: 18, roic_min3: 15.3, margin_of_safety: 4.35, v_health: 66, debt_ratio: null });
+  const bare = coreRow('bare', { roic_med: null, roic_min3: null, margin_of_safety: null, v_health: null, debt_ratio: null });
+  const out = corePoolSort([bare, noDebt, full]);
+  // nodebt 0.6712 > full 0.6606：重归一的中性语义（缺一项=该项不参与），不是「缺数据占便宜」的伪装——按裁定钉成文档
+  assertEquals(out.map(r => r.code), ['nodebt', 'full', 'bare']);
+  assertEquals(Math.round(out[2].coreScore! * 1000), 550);   // 全缺 = 仅剩趋势中性 0.55：未知 ≠ 已知差，也不冒充已知好
+});
+
+Deno.test('renderValueTop10：标题=核心池 Top10·长期价值；脚注钉住四支柱权重与破位分腿；支柱读数/vq/ROIC 逐行可读', () => {
+  const html = renderValueTop10({ batch: '2026-11-16', top10: [coreRow('600031')] as never[] });
+  assertEquals(html.includes('核心池 Top10 · 长期价值'), true);
+  assertEquals(html.includes('护城河40%+安全边际25%+稳健15%+长期趋势20%'), true);
+  assertEquals(html.includes('破位按前视取证分腿'), true);
+  assertEquals(html.includes('护城河 '), true);
+  assertEquals(html.includes('ROIC中位 18.00%'), true);
+  assertEquals(html.includes('vq 80.0'), true);
+});
+
+Deno.test('接线守卫：loadTrendBadges 候选=核心池复合前 12（趋势缺省按三支柱排，落地后 loadTrendBadges→renderStockSection 自动重排）', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const start = html.indexOf('function loadTrendBadges(');
+  assertEquals(start >= 0, true, 'loadTrendBadges 不存在');
+  const body = html.slice(start, html.indexOf('\n}\n', start));
+  assertEquals(/corePoolSort\(\(valueState && valueState\.top10 \? valueState\.top10 : \[\]\)/.test(body), true,
+    '候选拉取必须是 corePoolSort 复合序（趋势未取到=中性 0.55，不得按旧纯 vq 序）');
+  assertEquals(body.includes('.slice(0, 12)'), true, '候选=12（比展示多 2 只），兜住趋势落地后的切榜边缘');
+  assertEquals(/b\.vq\s*-\s*a\.vq/.test(body), false, '旧的纯 vq 候选序不得残留');
+});
+
+Deno.test('接线守卫：股票区只渲染两张榜（核心池+收益型），量化初筛/分歧榜源码删净（2026-11-16 裁定）', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const s = html.indexOf('function renderStockSection(');
+  const body = html.slice(s, html.indexOf('\n}\n', s));
+  assertEquals(body.includes('renderValueTop10(valueState, trendCache, valueIndRef ? valueIndRef.byL2 : null)'), true,
+    '核心池主榜未接（或行业参照没传进排序）');
+  assertEquals(body.includes('renderIncomeList(incomeState)'), true, '收益型卡未接');
+  assertEquals(body.includes('renderScoreTop10'), false, '量化初筛卡调用残留');
+  assertEquals(body.includes('renderDivergeBoard'), false, '分歧榜调用残留');
+  for (const gone of ['function renderScoreTop10', 'function renderDivergeBoard', 'function divergeLists',
+    'function pctOf(', 'function scoreStars', 'INCOME_ROIC_MIN', 'alreadyQualified', 'highLeverage']) {
+    assertEquals(html.includes(gone), false, '已删符号残留：' + gone);
+  }
 });
 
 Deno.test('接线守卫：submitLogin 必须给两处 auth 调用套超时 + try/catch（否则网络挂起 = 界面永久「正在登录…」）', async () => {
@@ -887,66 +953,74 @@ Deno.test('自动值与在用值不一致时必须当面说清谁在驱动信号
   assertEquals(valPctLockNote(85, null), '', '从没取过数 = 不存在第二口径，没什么要说');
 });
 
-// ==== 收益型观察名单（2026-10-30 用户裁定：独立通道，不套用 8% 护城河门禁；前 15；保留打标）====
-const incRow = { code:'600900', name:'长江电力', ths_l2:'电力',
-  div_yield:4.6, div_yield_5y:3.2, roic_med:6.1, debt_ratio:0.55, tier:'vetoed' };
+// ==== 收益型观察名单（2026-10-30 独立通道 → 2026-11-16 用户裁定收紧为全四要求；前 15）====
+// 夹具形态＝收紧后能活下来的行：白名单行业 + 股息双门 + 价值门禁全过（tier=qualified）+ 负债率合规。
+const incRow = { code:'600900', name:'长江电力', ths_l2:'电力', in_pool:true,
+  div_yield:4.6, div_yield_5y:3.2, roic_med:12.5, debt_ratio:0.55, tier:'qualified' };
 
-Deno.test('收益型名单：四道筛子逐格生效（行业白名单 / 股息率≥4 / 5年股息≥2.5 / ROIC≥3）', () => {
+Deno.test('INCOME_DEBT_MAX 常数为 0.75（2026-11-16 裁定：与核心池负债率顶同值；旧 ROIC≥3 三筛已废）', () => {
+  assertEquals(INCOME_DEBT_MAX, 0.75);
+});
+
+Deno.test('收益型名单：五道筛子逐格生效（行业白名单 / 股息率≥4 / 5年股息≥2.5 / 价值门禁全过 / 负债率≤75%）', () => {
   const out = incomeChannelOf([
-    incRow,
+    incRow,                                             // 唯一幸存者：五道筛全过
     { ...incRow, code:'x_ind', ths_l2:'白酒' },
     { ...incRow, code:'x_dy', div_yield:3.9 },
     { ...incRow, code:'x_dy5', div_yield_5y:2.4 },
-    { ...incRow, code:'x_roic', roic_med:2.9 },
+    { ...incRow, code:'x_rich', tier:'too_rich' },      // 护城河宽但无安全边际 → 高息透镜也不收（粤高速A 形态）
+    { ...incRow, code:'x_veto', tier:'vetoed' },
+    { ...incRow, code:'x_unq', tier:'unqualified' },
+    { ...incRow, code:'x_debt', debt_ratio:0.751 },
   ]);
   assertEquals(out.total, 1);
   assertEquals(out.list.map(r => r.code), ['600900']);
 });
 
-Deno.test('收益型名单：阈值是闭区间，恰好等于门槛必须入选（4 / 2.5 / 3 均二进制精确）', () => {
-  const out = incomeChannelOf([{ ...incRow, div_yield:4, div_yield_5y:2.5, roic_med:3 }]);
+Deno.test('收益型名单：阈值是闭区间，恰好等于门槛必须入选（4 / 2.5 / 0.75 均二进制精确）', () => {
+  const out = incomeChannelOf([{ ...incRow, div_yield:4, div_yield_5y:2.5, debt_ratio:0.75 }]);
   assertEquals(out.total, 1);
 });
 
-Deno.test('收益型名单：缺失字段整行剔除，不得当 0、也不得当通过', () => {
+Deno.test('收益型名单：股息缺失整行剔除，不得当 0、也不得当通过；tier 缺失=门禁未知=剔除；负债率缺失不剔除', () => {
   const out = incomeChannelOf([
-    incRow,
+    { ...incRow, code:'n_debt', div_yield:5.5, debt_ratio:null },   // 幸存者二：负债缺失只不拦
+    incRow,                                                          // 幸存者一
     { ...incRow, code:'n_dy', div_yield:null },
     { ...incRow, code:'n_dy5', div_yield_5y:undefined },
-    { ...incRow, code:'n_roic', roic_med:null },
-    { ...incRow, code:'n_ind', ths_l2:null },
+    { ...incRow, code:'n_tier', tier:undefined },
   ]);
-  assertEquals(out.total, 1);
-  assertEquals(out.list[0].code, '600900');
+  assertEquals(out.total, 2);
+  assertEquals(out.list.map(r => r.code), ['n_debt', '600900']);   // 股息降序
 });
 
-Deno.test('收益型名单：按股息率降序、页面只取前 15、已在价值榜与高杠杆各自打标', () => {
+Deno.test('收益型名单：按股息率降序、页面只取前 15、池内核心按 in_pool 严格 true 打标', () => {
   const rows = Array.from({ length: 18 }, (_, i) => ({ ...incRow, code: 'c' + String(i).padStart(2, '0'), div_yield: 6 - i * 0.1 }));
-  rows[0] = { ...rows[0], tier: 'qualified' };          // c00 已在价值榜
-  rows[1] = { ...rows[1], debt_ratio: 0.95 };           // c01 高杠杆
+  rows[0] = { ...rows[0], in_pool: true };              // c00 池内核心
+  rows[1] = { ...rows[1], in_pool: false };             // c01 池外
+  rows[2] = { ...rows[2], in_pool: undefined as never };  // 缺字段 ≠ 池内（=== true 才标，绝不 undefined 冒充）
   const out = incomeChannelOf(rows);
   assertEquals(out.total, 18);
   assertEquals(out.list[0].code, 'c00');
-  assertEquals(out.list[0].alreadyQualified, true);
-  assertEquals(out.list[0].highLeverage, false);        // 未触发也必须显式给 false，别让渲染层读 undefined
-  assertEquals(out.list[1].highLeverage, true);
+  assertEquals(out.list[0].inCorePool, true);
+  assertEquals(out.list[1].inCorePool, false);
+  assertEquals(out.list[2].inCorePool, false);
   const html = renderIncomeList({ batch: '2026-10-11', list: out.list, total: out.total });
   assertEquals((html.match(/class="score-row"/g) || []).length, 15);
   assertEquals(html.includes('共 18 只'), true);
-  assertEquals(html.includes('已在价值榜'), true);
-  assertEquals(html.includes('高杠杆'), true);
+  assertEquals(html.includes('池内核心'), true);
   assertEquals(html.includes('c17'), false);            // 第 16~18 只被截掉
   assertEquals(html.includes('不构成买卖建议'), true);
 });
 
-Deno.test('renderIncomeList：null → 空串（降级文案由调用点决定）；有批次但零命中必须出卡说明，不得静默消失；脚注点明不套 8% 门禁', () => {
+Deno.test('renderIncomeList：null → 空串（降级文案由调用点决定）；有批次但零命中必须出卡说明，不得静默消失；脚注点明四要求全过', () => {
   assertEquals(renderIncomeList(null), '');
   const empty = renderIncomeList({ batch: '2026-10-11', list: [], total: 0 });
-  assertEquals(empty.includes('本批次无符合'), true);   // 空榜 ≠ 无此功能：静默消失正是仓库记过的降级
+  assertEquals(empty.includes('本批次无同时通过'), true);   // 空榜 ≠ 无此功能：静默消失正是仓库记过的降级
   assertEquals(empty.includes('不构成买卖建议'), true);
   const html = renderIncomeList({ batch: '2026-10-11', list: [incRow as never], total: 1 });
-  assertEquals(html.includes('8%'), true);
-  assertEquals(html.includes('杠杆'), true);
+  assertEquals(html.includes('8%'), true);              // 脚注须点明价值门禁锚
+  assertEquals(html.includes('有息负债率'), true);
 });
 
 Deno.test('接线守卫：收益型名单独立取数（不得复用只含精选池+持仓的 valueState），并接进并行加载与渲染点', async () => {
@@ -963,19 +1037,19 @@ Deno.test('接线守卫：收益型名单独立取数（不得复用只含精选
   assertEquals(body.includes('legFilter('), false, '收益型名单不得用 legFilter');
   assertEquals(/Promise\.all\(\[[^\]]*loadIncomeWatch\(\)[^\]]*\]\)/.test(html), true,
     '收益型取数必须与首屏同一批并行，否则回流/竞态');
-  const vi = html.indexOf('renderValueTop10(valueState, trendCache)');
+  const vi = html.indexOf('renderValueTop10(valueState, trendCache, valueIndRef ? valueIndRef.byL2 : null)');
   const ii = html.indexOf('renderIncomeList(incomeState)');
-  assertEquals(vi >= 0 && ii > vi, true, '收益型卡片必须接在价值 Top10 之后');
+  assertEquals(vi >= 0 && ii > vi, true, '收益型卡片必须接在核心池榜之后（且主榜调用点带行业参照）');
 });
 
-Deno.test('高杠杆标记：>90% 才亮，恰好 90% 不亮；debt 缺失只影响标记、不影响入选', () => {
-  const at90 = incomeChannelOf([{ ...incRow, code:'l90', debt_ratio: 0.9 }]);
-  const at91 = incomeChannelOf([{ ...incRow, code:'l91', debt_ratio: 0.91 }]);
-  assertEquals(at90.list[0].highLeverage, false);
-  assertEquals(at91.list[0].highLeverage, true);
-  const na = incomeChannelOf([{ ...incRow, code:'lna', debt_ratio: null }]);
+Deno.test('负债率上限：>75% 剔除、恰好 75% 留（0.75 二进制精确）；缺失不拦也不伪装', () => {
+  const at75 = incomeChannelOf([{ ...incRow, code:'d75', debt_ratio: 0.75 }]);
+  const at76 = incomeChannelOf([{ ...incRow, code:'d76', debt_ratio: 0.751 }]);
+  assertEquals(at75.total, 1);
+  assertEquals(at76.total, 0);
+  const na = incomeChannelOf([{ ...incRow, code:'dna', debt_ratio: null }]);
   assertEquals(na.total, 1);
-  assertEquals(na.list[0].highLeverage, false);
+  assertEquals(na.list[0].code, 'dna');
 });
 
 Deno.test('valueMedian / valueIndStatsOf：行业中位只吃有效 roic_med，n=有效行数', () => {
@@ -1093,7 +1167,7 @@ Deno.test('foldCardHtml：卡片带折叠键、默认收起（无 fold-open）�
   assertEquals(foldCardHtml('a"b', 't', 'b').includes('data-fold-key="a&quot;b"'), true);
 });
 
-Deno.test('三张榜单卡都必须走折叠壳：价值/收益型（纯函数内），精选池由接线守卫钉住', () => {
+Deno.test('两张榜单卡都必须走折叠壳：核心池/收益型（纯函数内）；已删的量化初筛卡不得残留', () => {
   const v = renderValueTop10({ batch: '2026-10-11', top10: [row] as never[] });
   assertEquals(v.includes('data-fold-key="value"'), true);
   assertEquals(v.includes('fold-open'), false);
@@ -1114,8 +1188,8 @@ Deno.test('接线守卫：默认收起靠 CSS（无 fold-open 即隐藏），展
   const start = html.indexOf('function renderStockSection(');
   const applyAt = html.indexOf('applyFoldState(list)', start);
   assertEquals(start >= 0 && applyAt > start, true, 'renderStockSection 里没调用 applyFoldState(list)');
-  // 精选池卡也要折叠（它在纯块之外，只能源码级钉住）
-  assertEquals(html.includes("foldCardHtml('score'"), true, '精选池 Top10 未接折叠');
+  // 2026-11-16 裁定：量化初筛卡（foldCardHtml('score'）删除——删卡必须删净，不得留半张
+  assertEquals(html.includes("foldCardHtml('score'"), false, '量化初筛卡已删，foldCardHtml(\'score\' 不得残留');
 });
 
 Deno.test('接线守卫（体级）：回放要真的按存储开关卡片，判定只认 "1"（"0" 必须继续收起）', async () => {
@@ -1130,27 +1204,6 @@ Deno.test('接线守卫（体级）：回放要真的按存储开关卡片，判
   const rbody = html.slice(rs, html.indexOf('\n}\n', rs));
   assertEquals(rbody.includes("localStorage.getItem('dinvest_fold_'+key)==='1'"), true,
     '只能把 "1" 当展开：否则上次收起过的卡片刷新后会自己打开');
-});
-
-Deno.test('分歧榜也走折叠壳（默认收起），正文与零命中提示不被折叠改口径', () => {
-  const g = renderDivergeBoard({ batch: '2026-10-11', rows: new Map() });
-  assertEquals(g.includes('data-fold-key="diverge"'), true, '分歧榜未接折叠');
-  assertEquals(g.includes('fold-open'), false, '分歧榜默认必须收起');
-  assertEquals(g.includes('aria-expanded="false"'), true);
-  assertEquals(g.includes('分歧榜 · 两套分数不一致的地方'), true, '标题被折叠壳改丢');
-  assertEquals(g.includes('本批次无显著分歧样本'), true, '零命中提示必须在折叠正文里保留');
-  assertEquals(g.includes('不构成买卖建议'), true, '免责说明不能丢');
-  // 有样本时正文照旧进折叠体（5 行才能让首位 vq 落到 P80）
-  const hit = renderDivergeBoard({ batch: '2026-10-11', rows: new Map([
-    ['c1', { code: 'c1', name: '甲', vq: 90, main_final: 50, confidence: 'A', in_pool: true }],
-    ['c2', { code: 'c2', name: '乙', vq: 80, main_final: 60, confidence: 'A', in_pool: true }],
-    ['c3', { code: 'c3', name: '丙', vq: 70, main_final: 70, confidence: 'A', in_pool: true }],
-    ['c4', { code: 'c4', name: '丁', vq: 60, main_final: 80, confidence: 'A', in_pool: true }],
-    ['c5', { code: 'c5', name: '戊', vq: 50, main_final: 90, confidence: 'A', in_pool: true }],
-  ]) });
-  assertEquals(hit.includes('data-fold-key="diverge"'), true);
-  assertEquals(hit.includes('被错杀'), true);
-  assertEquals(hit.includes('虚高'), true);
 });
 
 Deno.test('接线守卫：折叠按钮必须有委托点击监听（卡片是渲染后动态插入的，不能只在创建时绑）', async () => {
@@ -1518,13 +1571,9 @@ Deno.test('资本回报读数（两位小数）：雷达格、同业中位、ROE
   assertMatch(txt, /本股高于同行业中位 6\.90%/, 'verdict 里的同业中位也是同一口径：' + txt);
 });
 
-Deno.test('资本回报读数（两位小数）：三张榜单行的「ROIC中位」不得留一位小数口径', () => {
+Deno.test('资本回报读数（两位小数）：两张榜单行的「ROIC中位」不得留一位小数口径', () => {
   assertMatch(renderValueTop10({ batch: '2026-11-01', top10: [row] as never[] }), /ROIC中位 18\.00%/);
-  assertMatch(renderIncomeList({ batch: '2026-11-01', list: [incRow as never], total: 1 }), /ROIC中位 6\.10%/);
-  const rows = [ v('a', 95, 30, 6), v('d', 92, 28, 5), v('e', 90, 20, 4), v('b', 50, 50, 3), v('c', 10, 95, 1) ]
-    .map(r => ({ ...r, owner_yield: 6.2, roic_med: 18 }));
-  const board = renderDivergeBoard({ batch: '2026-11-01', top10: rows, rows: new Map(rows.map(r => [r.code, r])) } as never);
-  assertMatch(board, /ROIC中位 18\.00%/);
+  assertMatch(renderIncomeList({ batch: '2026-11-01', list: [incRow as never], total: 1 }), /ROIC中位 12\.50%/);
 });
 
 Deno.test('资本回报读数（两位小数·残留取证）：7.998735 改两位后仍显示 8.00%，同屏「未达 8%」不得因此被改掉', () => {
