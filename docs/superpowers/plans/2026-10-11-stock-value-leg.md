@@ -3599,10 +3599,12 @@ select cron.schedule('stock-value-nightly', '45 13 * * *',
 
 令牌写 `$DAILY_UPDATE_TOKEN` 变量插值，**执行后不得** `select job.command`（含 Bearer 原值，既有凭据安全规范）；只 `select jobid, schedule from cron.job where jobname='stock-value-nightly'` 确认已注册。
 
-- [x] **Step 9: 前端双端部署（Pages + Vercel；⚠ 需用户明示）**
+- [x] **Step 9: 前端单通道部署（仅 Cloudflare Pages；⚠ 需用户明示）**
 
-沿用既有链：`cp index.html site/index.html` → `wrangler pages deploy . --project-name=fund-invest888 --branch=main` → `vercel deploy --prod --yes`。
-验收踩过的两个坑必须重做：① 部署后先打专属 URL 确认新内容（`grep -c renderDivergeBoard`），再 `sleep 25` 后复验 `pages.dev` 别名（别名传播有延迟）；② `*.vercel.app` 直连可能超时，内容级拿不到证据时**如实说明**，只以 CLI `vercel inspect` 的 `target: production` / `status: Ready` 为据。
+单通道发布链（2026-11-14 用户裁定：Vercel 弃用）：`cp index.html site/index.html` → `cd site && wrangler pages deploy . --project-name=fund-invest888 --branch=main`。站点唯一入口 `https://fund-invest888.pages.dev/`；`site/` 不入库，GitHub Pages 从未启用，`git push` 只更新 GitHub、**不会**更新线上页面。
+验收要点：① 部署后先打专属 `<hash>.fund-invest888.pages.dev` 确认含新内容，再复验 `fund-invest888.pages.dev` 别名（别名传播可能延迟约 25s，建议带 `?v=<ts>` 防缓存），两处均需与本地 `index.html` 逐字节一致；② **严禁把部署命令管道进 tail/head 后判成败**（历史踩坑：退出码被管道吞掉）。
+
+> **通道变更（2026-11-14，用户裁定）**：本站后续只发 Cloudflare Pages，**Vercel 弃用**，不再执行 `vercel deploy --prod --yes`，也不再验收 `*.vercel.app`。下方 2026-10-13 实跑账及 `.superpowers/sdd/` 台账中的 Vercel 记录均为历史存档，不代表现行发布步骤。
 
 > **Step 9 实跑账（2026-10-13，用户明示「双端部署 + push」）**：部署前只读预检在生产响应上打出**两条前端缺陷**，且都源于本计划第 1979 行 prescribed 的写法（不是实现偏差）——
 > ① **缺陷 A（致命）**：`order('vq',{ascending:false})` 未指定 nulls 修饰符 ⇒ PG 默认 `DESC NULLS FIRST`，而引擎不变式 `vetoed ⇒ vq=null` 让精选池 1116 行中 **1090 行无分**；真服务器实测旧串返回的 1000 行里**有分行 0**、首条有分行名次 **1091** ⇒ 价值腿 Top10 恒空。② **缺陷 B**：全页 `.range(` 出现 0 次，`db-max-rows=1000` 静默截断 ⇒ 池尾 **116 行**（含持仓股）拿不到；同族第三处 `loadThsPoolNames()` 的 `.limit(1000)` 会丢尾部行业名。

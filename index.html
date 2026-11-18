@@ -694,7 +694,8 @@ let scoreState = null; // { batch, rows: Map<code,row> }——量化初筛 Top10
 let valueState = null;   // { batch, rows: Map<bareCode,row>, top10: row[] }；null=未生成/读取失败 → 卡片优雅降级
 let valueTried = false;
 // 收益型观察名单（独立通道）：总体是「白名单行业 × 全市场」，与 valueState 的「精选池+持仓」不同 → 必须单独取数
-let incomeState = null;  // { batch, list: row[], total }；null=未生成/读取失败
+let incomeState = null;  // { batch, list: row[], total, gateOn }；null=未生成/读取失败
+let incomeRaw = null;    // { batch, rows } 原始行：行业参照可能晚于名单到达，门统一在 incomeApplyGate 应用
 let incomeTried = false;
 
 // 港股价值腿（stock_value_hk 最新批次，降维口径）：独立表独立取数，null=未生成/读取失败 → 整区不出
@@ -954,7 +955,7 @@ function initCloud(tries){
   // 评分表 anon 可读、全局共享，客户端就绪即拉一次；失败仅降级不阻塞页面
   // boot 这批 loader 眼里的持仓指纹：syncOnOpen 之后据此判断是否补跑（冷启动竞态，2026-11-15 手机端实测）
   batchStocksKey = stocksKeyOf();
-  Promise.all([loadStockScores(), loadStockValue(), loadIncomeWatch(), loadValueIndustryRef(), loadStockValueHk()]).then(()=>{ render(); loadTrendBadges(); });
+  Promise.all([loadStockScores(), loadStockValue(), loadIncomeWatch(), loadValueIndustryRef(), loadStockValueHk()]).then(()=>{ incomeApplyGate(); render(); loadTrendBadges(); });
   loadFundamentals().then(()=>renderStockSection());
   setSyncUI();
 }
@@ -1029,9 +1030,20 @@ async function loadIncomeWatch(){
       data.push(...page);
       if(!legHasMore(page.length)) break;
     }
-    const ch = incomeChannelOf(data);
-    incomeState = { batch, list: ch.list, total: ch.total };
+    incomeRaw = { batch, rows: data };
+    incomeApplyGate();
   }catch(e){ console.warn('income watch load failed', e); }
+}
+// 行业领先门应用点（2026-11-17 用户裁定：收益型与核心池同门——总市值居所属细分行业前五）。
+// loadIncomeWatch 在首屏 Promise.all 里与 loadValueIndustryRef 并行、到达顺序不定：
+// 先到者只落原始行（incomeRaw），统一在这里按「参照就绪且批次一致」现算——
+// 参照未就绪/批次不一致 → 门不启用（gateOn=false，脚注如实披露），绝不因参照失败清空名单。
+function incomeApplyGate(){
+  if(!incomeRaw) return;
+  var caps = (valueIndRef && valueIndRef.byCaps && String(valueIndRef.batch) === String(incomeRaw.batch))
+    ? valueIndRef.byCaps : null;
+  var ch = incomeChannelOf(incomeRaw.rows, caps);
+  incomeState = { batch: incomeRaw.batch, list: ch.list, total: ch.total, gateOn: !!caps };
 }
 
 // 港股价值腿（stock_value_hk 只读，降维口径）：范式照 loadIncomeWatch——先取最新批次，再按持仓码取行。
@@ -1081,9 +1093,9 @@ async function reloadBatchStatesAfterSync(){
 }
 
 // 价值门禁的行业参照（2026-10-30 用户要求）：否决理由要能看懂「本股多少、门槛多少、同业多少」，
-// 不能只丢一句「无护城河证据」让人误以为缺数据。只取 ths_l2 + roic_med 两列的全市场行，
-// 按 L2 汇总中位；按 code 升序翻页保证分页稳定（与 nulls 修饰符无关）。
-let valueIndRef = null;   // { batch, byL2: { l2: { med, n } } }
+// 不能只丢一句「无护城河证据」让人误以为缺数据。只取 ths_l2 + roic_med + mktcap 三列的全市场行，
+// 按 L2 汇总 ROIC 中位（byL2）与总市值名次样本（byCaps，2026-11-17 行业领先门）；按 code 升序翻页保证分页稳定。
+let valueIndRef = null;   // { batch, byL2: { l2: { med, n } }, byCaps: { l2: [mktcap…] } }
 async function loadValueIndustryRef(){
   if(!cloudReady || !sb) return;
   try{
@@ -1093,13 +1105,13 @@ async function loadValueIndustryRef(){
     const rows = [];
     for(let i=0;i<LEG_MAX_PAGES;i++){
       const [from,to] = legRange(i);
-      const { data: page, error } = await sb.from('stock_value').select('ths_l2,roic_med')
+      const { data: page, error } = await sb.from('stock_value').select('ths_l2,roic_med,mktcap')
         .eq('batch_date', b.batch_date).order(legTiebreakCol(), {ascending:true}).range(from,to);
       if(error || !page) return;
       rows.push(...page);
       if(!legHasMore(page.length)) break;
     }
-    valueIndRef = { batch: b.batch_date, byL2: valueIndStatsOf(rows) };
+    valueIndRef = { batch: b.batch_date, byL2: valueIndStatsOf(rows), byCaps: valueCapsOf(rows) };
   }catch(e){ console.warn('industry ref load failed', e); }
 }
 
@@ -1240,6 +1252,28 @@ function valueIndStatsOf(rows){
     out[k] = { med: Math.round(valueMedian(acc[k]) / 0.01) / 100, n: acc[k].length };
   });
   return out;
+}
+// 行业市值样本（2026-11-17 用户裁定「行业领先门」= 总市值居所属细分行业前五）：
+// 与预演 SQL 同口径（mktcap IS NOT NULL AND >0）——缺失/非正市值不进样本也不计入 n；
+// 不排序，名次由 valueCapRankOf 现数「严格大于家数」，与数组顺序无关、结果确定。
+function valueCapsOf(rows){
+  var acc = {};
+  (rows || []).forEach(function(r){
+    if(!r) return;
+    var k = r.ths_l2, v = valueNumOrNull(r.mktcap);
+    if(k === null || k === undefined || k === '' || v === null || v <= 0) return;
+    (acc[k] = acc[k] || []).push(v);
+  });
+  return acc;
+}
+// RANK 语义名次：rank = 1 + 严格大于该市值的家数（并列共享名次，下一名次跳位，与 SQL RANK() 一致）。
+// 本股不可排名（行业无样本/市值缺失）→ null，交由门层豁免并披露，绝不当作 0 或垫底。
+function valueCapRankOf(byCaps, l2, mktcap){
+  var arr = byCaps ? byCaps[l2] : null, v = valueNumOrNull(mktcap);
+  if(!arr || !arr.length || v === null || v <= 0) return null;
+  var greater = 0;
+  for(var i=0;i<arr.length;i++){ if(arr[i] > v) greater++; }
+  return { rank: greater + 1, n: arr.length };
 }
 function valueMoatVetoHtml(row, indByL2){
   var med = valueNumOrNull(row && row.roic_med);
@@ -1509,6 +1543,8 @@ var CORE_MOAT_INNER = { abs: 0.4, rel: 0.3, stability: 0.3 };
 var CORE_MOS_LO = 2, CORE_MOS_HI = 8;      // 安全边际绝对尺：2pp（门禁地板）记 0 → 8pp 记 1
 var CORE_DEBT_CEIL = 0.75;                 // 稳健负债率顶：≤75% 线性计分，>75% 该项记 0（缺失不扣，缺数据不伪装）
 var CORE_MOAT_REL_PP = 15;                 // 「高于行业中位」的满分差：+15pp 记 1（2026-11-15 批池内超额 0.4~18.9pp）
+var CORE_CAP_TOP = 5;                      // 行业领先门（2026-11-17 用户裁定）：总市值居所属细分行业前五才入选——
+                                           // 行业地位是护城河最硬的证据；并列共享名次，市值缺失豁免并披露
 // 趋势支柱数值（2026-11-16 用户裁定：长期趋势进排序；破位必须按腿拆——2026-10-14 前视取证裁定延续：
 // 「上市以来年化≤0」腿含顶部上市起点污染、四个前视窗口反而中位正超额，按纠缠同值 0.55 计；
 // 「破 24 月线且近 24 月在跌」腿是唯一稳定跑输的（−1~−3pp/年），才真正压到 0.15。
@@ -1553,14 +1589,17 @@ function corePoolPillars(r, indMed, roicLo, roicHi){
   return { moat: moat, safety: safety, health: health };
 }
 // 复合排序：支柱齐备→全权重；缺→按可用支柱重归一；并列按 vq 降序再按 code 升序（全序键，重渲染必须同序）。
-function corePoolSort(rows, indByL2, trendCache){
+// 行业领先门（2026-11-17 用户裁定）在四要求门禁**之后**：先合格（tier+A+vq 齐备），再要求总市值居行业前五。
+// indRef={ byL2, byCaps }：byL2 供护城河相对项，byCaps 供领先门；byCaps 缺席=参照未就绪→门不启用（渲染层披露）。
+function corePoolSort(rows, indRef, trendCache){
+  var byL2 = indRef ? indRef.byL2 : null, caps = indRef ? indRef.byCaps : null;
   var list = (rows||[]).filter(function(r){
     return r && r.tier==='qualified' && r.confidence==='A' && r.vq!==null && r.vq!==undefined;
   });
   var meds = list.map(function(r){ return coreNum(r.roic_med); }).filter(function(v){ return v!==null; });
   var lo = meds.length ? Math.min.apply(null, meds) : 0, hi = meds.length ? Math.max.apply(null, meds) : 1;
   list = list.map(function(r){
-    var indMed = (indByL2 && indByL2[r.ths_l2] && indByL2[r.ths_l2].med !== undefined) ? indByL2[r.ths_l2].med : null;
+    var indMed = (byL2 && byL2[r.ths_l2] && byL2[r.ths_l2].med !== undefined) ? byL2[r.ths_l2].med : null;
     var p = corePoolPillars(r, indMed, lo, hi);
     var tk = coreTrendKey(trendCache ? trendCache[String(r.code)] : null);
     var parts = [], w = 0;
@@ -1571,8 +1610,16 @@ function corePoolSort(rows, indByL2, trendCache){
     // 2026-11-16 裁定取中性：与 mixed 同档，数据落地后 loadTrendBadges→renderStockSection 自动重排。
     parts.push(CORE_TREND_N[tk]*CORE_W.trend); w += CORE_W.trend;
     var total = w>0 ? parts.reduce(function(a,b){return a+b;},0)/w : null;
-    return Object.assign({}, r, { pillars: p, trendKey: tk, coreScore: total });
+    // 领先门读数随行返回：capRank=null 且 capGateOn=真 ⇒ 本股市值缺失/行业无样本 → 豁免（渲染层披露）。
+    var rk = caps ? valueCapRankOf(caps, r.ths_l2, r.mktcap) : null;
+    return Object.assign({}, r, { pillars: p, trendKey: tk, coreScore: total,
+      capGateOn: !!caps, capRank: rk ? rk.rank : null, capN: rk ? rk.n : null });
   });
+  if(caps){
+    list = list.filter(function(r){
+      return r.capRank===null || r.capRank<=CORE_CAP_TOP;   // capRank=null=豁免（缺数据不伪装成不领先）
+    });
+  }
   list.sort(function(a, b){
     var as = a.coreScore===null ? -1 : a.coreScore, bs = b.coreScore===null ? -1 : b.coreScore;
     if(bs !== as) return bs - as;
@@ -1581,9 +1628,12 @@ function corePoolSort(rows, indByL2, trendCache){
   });
   return list;
 }
-function renderValueTop10(state, trendMap, indByL2){
+function renderValueTop10(state, trendMap, indRef){
   if(!state) return '';
-  const list = corePoolSort(state.top10||[], indByL2, trendMap).slice(0,10);
+  // 领先门启用条件：参照就绪（byCaps 有货）且批次与本榜一致——跨批次市值名次不可混用。
+  // 任一不满足 → 门不启用、脚注如实披露，绝不因一次参照失败清空榜单。
+  var refOk = !!(indRef && indRef.byCaps && String(indRef.batch) === String(state.batch));
+  const list = corePoolSort(state.top10||[], refOk ? indRef : null, trendMap).slice(0,10);
   return foldCardHtml('value', '核心池 Top10 · 长期价值 '
     +'<span style="font-weight:400;font-size:11.5px;color:var(--muted)">批次 '+escapeHtml(String(state.batch))+'</span>',
     (list.length ? list.map((r,i)=>{
@@ -1596,10 +1646,14 @@ function renderValueTop10(state, trendMap, indByL2){
       +'<span style="color:var(--muted);font-size:11px">护城河 '+pct(p.moat)+' · 边际 '+pct(p.safety)+' · 稳健 '+pct(p.health)
       +' · ROIC中位 '+valueFmtPct(r.roic_med, 2)+' · 安全边际 '+valueFmtPp(r.margin_of_safety,2)
       +' · 负债率 '+(coreNum(r.debt_ratio)===null?'NA':Math.round(r.debt_ratio*100)+'%')
-      +' · vq '+Number(r.vq).toFixed(1)+'</span></div>';
+      +' · vq '+Number(r.vq).toFixed(1)
+      +(r.capGateOn ? (r.capRank===null ? ' · 行业规模数据缺失（豁免）' : ' · 行业第'+r.capRank+'/'+r.capN) : '')
+      +'</span></div>';
     }).join('')
       : '<div class="score-row" style="color:var(--muted)">本批次无 A 级合格标的</div>')
     +'<div class="score-card-note">门禁=四要求底线（ROIC≥8% 护城河锚 · 安全边际≥2pp · 资不抵债/商誉/烧钱杠杆硬否决）；'
+      +(refOk ? '入选另要求总市值居所属细分行业前五（并列共享名次 · 市值缺失豁免并披露）；'
+              : '行业市值参照未就绪（或批次不一致），行业领先门本批未启用；')
       +'排序=护城河40%+安全边际25%+稳健15%+长期趋势20%，护城河=ROIC绝对水平+高于行业中位+近3年稳定性，'
       +'破位按前视取证分腿（年化腿0.55/近端腿0.15）；不构成买卖建议。</div>');
 }
@@ -1610,6 +1664,7 @@ function renderValueTop10(state, trendMap, indByL2){
 // 实测（2026-11-15 批）：股息双筛后 42 行 → 收紧后 7 行；粤高速A（股息 5.1% 但 owner yield 为负、MOS −4.4pp）
 // 等「高息无边际」股出局——通道与核心池同章程，只是加了股息透镜；旧三筛阈值（ROIC≥3）与高杠杆提示退出历史。
 // 白名单 = 分红是常态、现金流可预测的行业；名单外股息再高也不进——那更可能是一次性卖资产而非可持续回报。
+// 2026-11-17 用户裁定：**收益型同步加行业领先门**——四要求之后，再要求总市值居所属细分行业前五（与核心池同门）。
 var INCOME_INDUSTRIES = ['电力','燃气','公路铁路运输','港口航运','机场航运','环境治理','建筑装饰'];
 var INCOME_DY_MIN = 4;
 var INCOME_DY5_MIN = 2.5;
@@ -1617,7 +1672,8 @@ var INCOME_DEBT_MAX = 0.75;
 var INCOME_LIMIT = 15;
 
 function incomeNum(v){ return (v === null || v === undefined || isNaN(Number(v))) ? null : Number(v); }
-function incomeChannelOf(rows){
+// byCaps 缺席 = 行业参照未就绪 → 规模门不启用（gateOn=false，渲染层脚注披露）；本股市值缺失/行业无样本 → 豁免+披露。
+function incomeChannelOf(rows, byCaps){
   var list = [];
   (rows || []).forEach(function(r){
     if (!r) return;
@@ -1627,17 +1683,21 @@ function incomeChannelOf(rows){
     if (dy5 === null || dy5 < INCOME_DY5_MIN) return;
     if (r.tier !== 'qualified') return;                     // 2026-11-16 收紧：价值门禁全过（护城河+边际+否决）才入选
     if (debt !== null && debt > INCOME_DEBT_MAX) return;    // 财务稳健上限；缺失不剔除（cap 只在证实超限时拦）
-    list.push({ ...r, inCorePool: r.in_pool === true });
+    var rk = byCaps ? valueCapRankOf(byCaps, r.ths_l2, r.mktcap) : null;
+    if (byCaps && rk !== null && rk.rank > CORE_CAP_TOP) return;   // 2026-11-17：先四要求，再行业规模领先
+    list.push({ ...r, inCorePool: r.in_pool === true, capGateOn: !!byCaps,
+      capRank: rk ? rk.rank : null, capN: rk ? rk.n : null });
   });
   list.sort(function(a, b){ return Number(b.div_yield) - Number(a.div_yield); });
-  return { list: list, total: list.length };
+  return { list: list, total: list.length, gateOn: !!byCaps };
 }
 function renderIncomeList(state){
   if (!state || !state.list) return '';
+  var gateOn = state.gateOn === true;
   var list = state.list.slice(0, INCOME_LIMIT);
   return foldCardHtml('income', '收益型观察名单 · 高息透镜 '
     +'<span style="font-weight:400;font-size:11.5px;color:var(--muted)">共 '+Number(state.total)+' 只 · 批次 '+escapeHtml(String(state.batch))+'</span>',
-    (list.length ? '' : '<div class="score-row" style="color:var(--muted)">本批次无同时通过价值门禁与股息双筛的标的（这不是「通道不存在」）</div>')
+    (list.length ? '' : '<div class="score-row" style="color:var(--muted)">本批次无同时通过全部入选要求的标的（这不是「通道不存在」）</div>')
     + list.map(function(r, i){
       var debt = incomeNum(r.debt_ratio);
       return '<div class="score-row" data-code="'+escapeHtml(String(r.code))+'">'
@@ -1648,11 +1708,14 @@ function renderIncomeList(state){
         +'<span style="color:var(--muted);font-size:11px">'+escapeHtml(String(r.ths_l2 || ''))
         +' · 5年股息 '+valueFmtPct(r.div_yield_5y, 2)+' · ROIC中位 '+valueFmtPct(r.roic_med, 2)
         +' · 有息负债率 '+(debt === null ? 'NA' : (debt * 100).toFixed(0)+'%')
+        +(r.capGateOn ? (r.capRank===null ? ' · 行业规模数据缺失（豁免）' : ' · 行业第'+r.capRank+'/'+r.capN) : '')
         +'</span></div>';
     }).join('')
     +'<div class="score-card-note">四要求全过才入选：白名单行业 × 股息率≥'+INCOME_DY_MIN+'% × 5年股息≥'+INCOME_DY5_MIN
-      +'% × 价值门禁（ROIC≥8% 护城河锚 · 安全边际≥2pp · 三硬否决不碰）× 有息负债率≤75%；'
-      +'与核心池并列的高息透镜，不构成买卖建议。</div>');
+      +'% × 价值门禁（ROIC≥8% 护城河锚 · 安全边际≥2pp · 三硬否决不碰）× 有息负债率≤75%'
+      +(gateOn ? '，且总市值须居所属细分行业前五（并列共享名次 · 市值缺失豁免并披露）'
+               : '；行业市值参照未就绪，行业领先门本批未启用')
+      +'；与核心池并列的高息透镜，不构成买卖建议。</div>');
 }
 
 // ==== 以下续写：换仓逻辑（分歧榜已于 2026-11-16 随量化初筛卡一并删除：它对比的正是两套已退场的排名）====
@@ -2151,7 +2214,7 @@ function loadTrendBadges(){
   // 2026-11-16 核心池复合排序：候选拉取 = 复合前 12（趋势缺省中性，按三支柱基座排序），
   // 趋势落地后重排可能洗牌前 10 的边缘——候选比展示多 2 只兜住切榜。
   var list = corePoolSort((valueState && valueState.top10 ? valueState.top10 : []),
-    valueIndRef ? valueIndRef.byL2 : null, trendCache).slice(0, 12);
+    valueIndRef, trendCache).slice(0, 12);
   var todo = list.filter(function(r){ var c = trendCache[String(r.code)]; return !c || c.stale; });
   if(!todo.length) return Promise.resolve(0);
   // 取数与落缓存分两段：这一段只负责把结果收集回来，一律交给 .then 里的 apply 判定成败口径，
@@ -4480,7 +4543,7 @@ function renderStockSection(){
   list.insertAdjacentHTML('beforeend', sectorStockStripHtml());
   // 核心池主榜（2026-11-16 裁定：量化初筛卡与分歧榜卡删除，只留核心池+收益型两张榜）；
   // 未生成时的降级文案在调用点判定（VALUE_PURE 纯逻辑不读全局）
-  list.insertAdjacentHTML('beforeend', valueState ? renderValueTop10(valueState, trendCache, valueIndRef ? valueIndRef.byL2 : null)
+  list.insertAdjacentHTML('beforeend', valueState ? renderValueTop10(valueState, trendCache, valueIndRef)
     : (valueTried ? '<div class="signal-strip"><span class="signal-pill pill-normal">价值批次尚未生成（夜间批处理上线后自动出现）</span></div>' : ''));
   // 收益型观察名单：独立取数通道，紧随核心池；零命中由纯函数出卡说明，未生成时在这里降级
   list.insertAdjacentHTML('beforeend', incomeState ? renderIncomeList(incomeState)

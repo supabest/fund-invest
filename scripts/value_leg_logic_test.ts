@@ -10,8 +10,8 @@ import { valueFmtPct, valueTierLabel, valueGateHtml, renderValueTop10,
   EM_VAL_MIN_ROWS, valPctSupported, emValUrl, valuationPctFromRows, valPctCaliber, valPctNaWhy,
   valPctNeedFetch, valPctApply, valPctHtml, valPctMerge, valPctLockNote,
   incomeChannelOf, renderIncomeList, foldCardHtml, INCOME_DEBT_MAX,
-  CORE_W, CORE_MOAT_INNER, CORE_MOS_LO, CORE_MOS_HI, CORE_DEBT_CEIL, CORE_MOAT_REL_PP, CORE_TREND_N,
-  coreTrendKey, corePoolPillars, corePoolSort,
+  CORE_W, CORE_MOAT_INNER, CORE_MOS_LO, CORE_MOS_HI, CORE_DEBT_CEIL, CORE_MOAT_REL_PP, CORE_TREND_N, CORE_CAP_TOP,
+  coreTrendKey, corePoolPillars, corePoolSort, valueCapsOf, valueCapRankOf,
   valueMedian, valueIndStatsOf, ROIC_GATE_PCT, valueAssessmentHtml,
   valueTrendExempt, ROIC_TREND_FLOOR_PCT,
   profitRefHtml, buyRefHtml,
@@ -589,7 +589,7 @@ Deno.test('corePoolSort：趋势进排序——steady 独占鳌头；破位分�
   const ind = { 汽车零部件: { med: 6.9, n: 40 } };
   const trend = { aa: { label: 'steady' }, bb: { label: 'mixed' }, cc: { label: 'broken', annualized: -0.02 },
     dd: { label: 'broken', annualized: 0.05 }, ee: { label: 'nope' } } as never;
-  const out = corePoolSort(['ee', 'dd', 'cc', 'bb', 'aa'].map(c => mk(c)), ind, trend);
+  const out = corePoolSort(['ee', 'dd', 'cc', 'bb', 'aa'].map(c => mk(c)), { byL2: ind }, trend);
   assertEquals(out.map(r => r.trendKey), ['steady', 'mixed', 'broken_annualized', 'na', 'broken_recent']);
   // 全柱相同 → 复合分只由趋势数值决定：1 > 0.55×3 > 0.15；三个 0.55 同分按 code 升序（全序键保证重渲染同序）
   assertEquals(out.map(r => r.code), ['aa', 'bb', 'cc', 'ee', 'dd']);
@@ -630,8 +630,8 @@ Deno.test('接线守卫：股票区只渲染两张榜（核心池+收益型）�
   const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
   const s = html.indexOf('function renderStockSection(');
   const body = html.slice(s, html.indexOf('\n}\n', s));
-  assertEquals(body.includes('renderValueTop10(valueState, trendCache, valueIndRef ? valueIndRef.byL2 : null)'), true,
-    '核心池主榜未接（或行业参照没传进排序）');
+  assertEquals(body.includes('renderValueTop10(valueState, trendCache, valueIndRef)'), true,
+    '核心池主榜未接（或行业参照整包没传进排序——byCaps 领先门会恒不启用）');
   assertEquals(body.includes('renderIncomeList(incomeState)'), true, '收益型卡未接');
   assertEquals(body.includes('renderScoreTop10'), false, '量化初筛卡调用残留');
   assertEquals(body.includes('renderDivergeBoard'), false, '分歧榜调用残留');
@@ -1030,14 +1030,14 @@ Deno.test('接线守卫：收益型名单独立取数（不得复用只含精选
   const end = html.indexOf('\n}\n', start);
   assertEquals(end > start, true, 'loadIncomeWatch 函数体边界未找到');
   const body = html.slice(start, end);
-  for (const t of ['stock_value', "in('ths_l2'", 'legOrderOpts(', 'legRange(', 'legHasMore(', 'legTiebreakCol(', 'incomeChannelOf(']) {
+  for (const t of ['stock_value', "in('ths_l2'", 'legOrderOpts(', 'legRange(', 'legHasMore(', 'legTiebreakCol(', 'incomeRaw = { batch, rows: data }', 'incomeApplyGate()']) {
     assertEquals(body.includes(t), true, 'loadIncomeWatch 缺少：' + t);
   }
   // legFilter 只取「精选池 + 持仓」，与独立通道「白名单行业 × 全市场」的总体不符——用了就是同名不同总体
   assertEquals(body.includes('legFilter('), false, '收益型名单不得用 legFilter');
   assertEquals(/Promise\.all\(\[[^\]]*loadIncomeWatch\(\)[^\]]*\]\)/.test(html), true,
     '收益型取数必须与首屏同一批并行，否则回流/竞态');
-  const vi = html.indexOf('renderValueTop10(valueState, trendCache, valueIndRef ? valueIndRef.byL2 : null)');
+  const vi = html.indexOf('renderValueTop10(valueState, trendCache, valueIndRef)');
   const ii = html.indexOf('renderIncomeList(incomeState)');
   assertEquals(vi >= 0 && ii > vi, true, '收益型卡片必须接在核心池榜之后（且主榜调用点带行业参照）');
 });
@@ -1050,6 +1050,151 @@ Deno.test('负债率上限：>75% 剔除、恰好 75% 留（0.75 二进制精确
   const na = incomeChannelOf([{ ...incRow, code:'dna', debt_ratio: null }]);
   assertEquals(na.total, 1);
   assertEquals(na.list[0].code, 'dna');
+});
+
+// ==== 行业领先门（2026-11-17 用户裁定：核心池与收益型同门——总市值居所属细分行业前五）====
+// 参照样本夹具：7 家零部件公司，市值降序无并列（整数远离阈值，防浮点边界假活）。
+const CAPS7 = { 汽车零部件: [1000, 900, 800, 700, 600, 500, 400] };
+
+Deno.test('CORE_CAP_TOP 常数为 5（2026-11-17 裁定；改动需先改裁定，不得局部改代码）', () => {
+  assertEquals(CORE_CAP_TOP, 5);
+});
+
+Deno.test('valueCapsOf：市值缺失/非正不进样本也不计 n；行业空键不收；按 L2 聚组', () => {
+  const caps = valueCapsOf([
+    { ths_l2: '电力', mktcap: 9000 }, { ths_l2: '电力', mktcap: 8000 },
+    { ths_l2: '电力', mktcap: null }, { ths_l2: '电力', mktcap: 0 }, { ths_l2: '电力', mktcap: -5 },
+    { ths_l2: '', mktcap: 100 }, { ths_l2: null, mktcap: 100 }, { mktcap: 100 },
+    null as never, { ths_l2: '燃气', mktcap: '300' as never },
+  ]);
+  assertEquals(caps['电力'], [9000, 8000]);
+  assertEquals(caps['燃气'], [300]);          // 数字串按数值收（与 valueNumOrNull 同口径）
+  assertEquals(Object.keys(caps).sort(), ['燃气', '电力']);
+});
+
+Deno.test('valueCapRankOf：RANK 语义——rank=1+严格大于家数，并列共享名次、下一名次跳位；与数组顺序无关', () => {
+  const caps = { 电力: [9000, 8000, 8000, 7000, 6000, 5000] };
+  assertEquals(valueCapRankOf(caps, '电力', 9000), { rank: 1, n: 6 });
+  assertEquals(valueCapRankOf(caps, '电力', 8000), { rank: 2, n: 6 });   // 两家并列第 2
+  assertEquals(valueCapRankOf(caps, '电力', 7000), { rank: 4, n: 6 });   // 跳过第 3（SQL RANK 同式）
+  assertEquals(valueCapRankOf(caps, '电力', 5000), { rank: 6, n: 6 });
+  const shuffled = { 电力: [5000, 8000, 9000, 6000, 8000, 7000] };
+  assertEquals(valueCapRankOf(shuffled, '电力', 7000), { rank: 4, n: 6 }, '名次依赖数组顺序=不确定输出');
+});
+
+Deno.test('valueCapRankOf：本股不可排名一律 null（行业无样本/市值缺失/非正），绝不当 0 或垫底', () => {
+  assertEquals(valueCapRankOf(CAPS7, '白酒', 1000), null);      // 行业无样本
+  assertEquals(valueCapRankOf(CAPS7, '汽车零部件', null), null);
+  assertEquals(valueCapRankOf(CAPS7, '汽车零部件', 0), null);
+  assertEquals(valueCapRankOf(CAPS7, '汽车零部件', -1), null);
+  assertEquals(valueCapRankOf(null, '汽车零部件', 1000), null);
+  assertEquals(valueCapRankOf({ 汽车零部件: [] }, '汽车零部件', 1000), null);
+});
+
+Deno.test('corePoolSort 领先门：rank≤5 留、rank>5 剔；市值缺失豁免且披露字段随行；门在四要求之后（否决股市值第一也不收）', () => {
+  const rows = [
+    coreRow('r5', { mktcap: 600 }),                              // 第 5 → 留
+    coreRow('r6', { mktcap: 500 }),                              // 第 6 → 剔
+    coreRow('r1', { mktcap: 1000 }),                             // 第 1 → 留
+    coreRow('rna', { mktcap: null }),                            // 市值缺失 → 豁免留
+    coreRow('rnoind', { ths_l2: '白酒', mktcap: 1000 }),          // 行业无样本 → 豁免留
+    { ...coreRow('veto', { mktcap: 1000 }), tier: 'vetoed' },     // 四要求先拦，领先门救不回
+  ];
+  const out = corePoolSort(rows, { byCaps: CAPS7 });
+  assertEquals(out.map(r => r.code).sort(), ['r1', 'r5', 'rna', 'rnoind']);
+  const byCode = new Map(out.map(r => [r.code, r]));
+  assertEquals(byCode.get('r5')!.capRank, 5);
+  assertEquals(byCode.get('r5')!.capN, 7);
+  assertEquals(byCode.get('r5')!.capGateOn, true);
+  assertEquals(byCode.get('rna')!.capRank, null);                // 豁免≠不领先：读数如实 null
+  assertEquals(byCode.get('rna')!.capGateOn, true);
+});
+
+Deno.test('corePoolSort 领先门：并列共享名次——两家并列第 5 都留，第 7 剔（RANK 跳位后 5+2=7）', () => {
+  const caps = { 汽车零部件: [1000, 900, 800, 700, 600, 600, 500] };
+  const out = corePoolSort([
+    coreRow('t5a', { mktcap: 600 }), coreRow('t5b', { mktcap: 600 }), coreRow('t7', { mktcap: 500 }),
+  ], { byCaps: caps });
+  assertEquals(out.map(r => r.code).sort(), ['t5a', 't5b']);
+});
+
+Deno.test('corePoolSort 领先门：byCaps 缺席（参照未就绪）→ 门不启用，全留且 capGateOn=false，绝不因参照失败清空榜单', () => {
+  const rows = [coreRow('a', { mktcap: 100 }), coreRow('b', { mktcap: 1 })];   // 若门误启用 b 会被剔
+  for (const ref of [null, undefined, {}, { byL2: { 汽车零部件: { med: 6.9, n: 40 } } }, { byCaps: null }]) {
+    const out = corePoolSort(rows, ref as never);
+    assertEquals(out.length, 2, '参照缺席清空了榜单：' + JSON.stringify(ref));
+    assertEquals(out.every(r => r.capGateOn === false), true);
+    assertEquals(out.every(r => r.capRank === null), true);
+  }
+});
+
+Deno.test('收益型领先门：与核心池同门——四要求全过后 rank>5 仍剔；市值缺失豁免；byCaps 缺席门不启用（gateOn=false）', () => {
+  const caps = { 电力: [9000, 8000, 7000, 6000, 5000, 4000] };
+  const out = incomeChannelOf([
+    { ...incRow, code: 'ok1', mktcap: 9000 },                    // 第 1 → 留
+    { ...incRow, code: 'ok5', mktcap: 5000, div_yield: 4.2 },     // 第 5 → 留
+    { ...incRow, code: 'x6', mktcap: 4000, div_yield: 5.5 },      // 第 6 → 剔（股息再高也不收）
+    { ...incRow, code: 'na', mktcap: null, div_yield: 4.1 },      // 市值缺失 → 豁免留
+  ], caps);
+  assertEquals(out.gateOn, true);
+  assertEquals(out.list.map(r => r.code), ['ok1', 'ok5', 'na']);   // 股息降序
+  assertEquals(out.list[0].capRank, 1);
+  assertEquals(out.list[0].capN, 6);
+  assertEquals(out.list[2].capRank, null);
+  const off = incomeChannelOf([{ ...incRow, code: 'x6', mktcap: 4000 }]);   // 无参照 → 门不启用
+  assertEquals(off.gateOn, false);
+  assertEquals(off.total, 1);
+  assertEquals(off.list[0].capGateOn, false);
+});
+
+Deno.test('renderValueTop10 披露：参照就绪且批次一致 → 脚注钉住前五门 + 逐行「行业第X/N」；市值缺失行当面写豁免', () => {
+  const st = { batch: '2026-11-17', top10: [coreRow('600031', { mktcap: 600 }), coreRow('000338', { mktcap: null })] as never[] };
+  const html = renderValueTop10(st, undefined, { batch: '2026-11-17', byL2: {}, byCaps: CAPS7 });
+  assertEquals(html.includes('入选另要求总市值居所属细分行业前五'), true);
+  assertEquals(html.includes('行业第5/7'), true);
+  assertEquals(html.includes('行业规模数据缺失（豁免）'), true);
+  assertEquals(html.includes('行业领先门本批未启用'), false);
+});
+
+Deno.test('renderValueTop10 披露：参照未就绪或批次不一致 → 门不启用且脚注如实说，不得静默启用/静默清榜', () => {
+  const st = { batch: '2026-11-17', top10: [coreRow('600031', { mktcap: 100 })] as never[] };   // 小市值：门若误启用会被剔
+  for (const ref of [undefined, null, { batch: '2026-11-16', byCaps: CAPS7 }, { batch: '2026-11-17', byCaps: null }]) {
+    const html = renderValueTop10(st, undefined, ref as never);
+    assertEquals(html.includes('行业领先门本批未启用'), true, '未披露门未启用：' + JSON.stringify(ref));
+    assertEquals(html.includes('600031'), true, '参照失败把榜单清空了：' + JSON.stringify(ref));
+    assertEquals(html.includes('行业第'), false, '门未启用却挂了行业名次读数');
+  }
+});
+
+Deno.test('renderIncomeList 披露：gateOn=true 脚注钉住前五门 + 逐行名次/豁免；gateOn=false 如实说未启用', () => {
+  const on = renderIncomeList({ batch: '2026-11-17', total: 2, gateOn: true, list: [
+    { ...incRow, capGateOn: true, capRank: 1, capN: 6 } as never,
+    { ...incRow, code: '600011', capGateOn: true, capRank: null, capN: null } as never,
+  ] });
+  assertEquals(on.includes('且总市值须居所属细分行业前五'), true);
+  assertEquals(on.includes('行业第1/6'), true);
+  assertEquals(on.includes('行业规模数据缺失（豁免）'), true);
+  const off = renderIncomeList({ batch: '2026-11-17', total: 1, gateOn: false, list: [incRow as never] });
+  assertEquals(off.includes('行业领先门本批未启用'), true);
+  assertEquals(off.includes('且总市值须居所属细分行业前五'), false);
+});
+
+Deno.test('接线守卫：incomeApplyGate 统一应用门——批次一致才启用、走纯函数、落 gateOn；loadIncomeWatch 与首屏 Promise.all 都接了它', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const s = html.indexOf('function incomeApplyGate(');
+  assertEquals(s >= 0, true, 'incomeApplyGate 不存在（门没有统一应用点）');
+  const body = html.slice(s, html.indexOf('\n}\n', s));
+  assertEquals(body.includes('String(valueIndRef.batch) === String(incomeRaw.batch)'), true,
+    '参照与名单批次不一致时不得启用门（跨批次市值名次不可混用）');
+  assertEquals(body.includes('incomeChannelOf(incomeRaw.rows, caps)'), true, '阈值筛选必须走纯函数');
+  assertEquals(body.includes('gateOn: !!caps'), true, 'gateOn 必须如实落进 incomeState');
+  assertEquals(/Promise\.all\(\[[^\]]*\]\)\.then\(\(\)=>\{\s*incomeApplyGate\(\);/.test(html), true,
+    '首屏并行加载完成后必须补跑 incomeApplyGate（参照晚到也要能启用门）');
+  // loadTrendBadges 的候选排序必须吃整包参照（只传 byL2 会让候选与主榜的门不一致）
+  const t = html.indexOf('function loadTrendBadges(');
+  const tbody = html.slice(t, html.indexOf('\n}\n', t));
+  assertEquals(tbody.includes('valueIndRef, trendCache).slice(0, 12)'), true,
+    'loadTrendBadges 候选没吃整包 indRef，领先门在候选与主榜不同步');
 });
 
 Deno.test('valueMedian / valueIndStatsOf：行业中位只吃有效 roic_med，n=有效行数', () => {
@@ -1147,8 +1292,9 @@ Deno.test('接线守卫：行业参照是独立只读取数，挂进首屏 Promi
   assertEquals(html.includes('function loadValueIndustryRef('), true, '缺行业参照取数');
   const s = html.indexOf('function loadValueIndustryRef(');
   const body = html.slice(s, html.indexOf('\n}\n', s));
-  assertEquals(body.includes(".select('ths_l2,roic_med')"), true, '只取两列，别把整表拉回来');
+  assertEquals(body.includes(".select('ths_l2,roic_med,mktcap')"), true, '只取三列（中位+市值样本），别把整表拉回来');
   assertEquals(body.includes('valueIndStatsOf('), true, '中位计算必须走纯函数');
+  assertEquals(body.includes('valueCapsOf('), true, '市值样本必须走纯函数（行业领先门的参照）');
   const all = html.match(/Promise\.all\(\[[^\]]*\]\)/g) || [];
   assertEquals(all.some(x => x.includes('loadValueIndustryRef()')), true, '未并入首屏并行取数');
   assertEquals(html.includes('valueGateHtml(vRowForSwap, valueIndRef'), true, '门禁卡没拿到行业参照');

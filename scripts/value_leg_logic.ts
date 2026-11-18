@@ -5,8 +5,8 @@ const SHIM = `function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({
   + `function fmtPct(n, digits){ if(n===null || n===undefined || isNaN(n)) return '--'; const d=(digits===undefined?1:digits); const s=Number(n).toFixed(d); return (n>0?'+':'')+s+'%'; }\n`
   + `function fmtMoney(n){ if(isNaN(n)) return '¥0'; return '¥'+Math.round(n).toLocaleString('zh-CN'); }\n`;
 const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter', 'legRange', 'legHasMore', 'legTiebreakCol', 'valueFmtPct', 'valueTierLabel', 'valueGateHtml', 'renderValueTop10', 'SWAP_GAP', 'swapSuggest',
-  'CORE_W', 'CORE_MOAT_INNER', 'CORE_MOS_LO', 'CORE_MOS_HI', 'CORE_DEBT_CEIL', 'CORE_MOAT_REL_PP', 'CORE_TREND_N',
-  'coreNum', 'coreClamp01', 'coreTrendKey', 'corePoolPillars', 'corePoolSort',
+  'CORE_W', 'CORE_MOAT_INNER', 'CORE_MOS_LO', 'CORE_MOS_HI', 'CORE_DEBT_CEIL', 'CORE_MOAT_REL_PP', 'CORE_TREND_N', 'CORE_CAP_TOP',
+  'coreNum', 'coreClamp01', 'coreTrendKey', 'corePoolPillars', 'corePoolSort', 'valueCapsOf', 'valueCapRankOf',
   'TREND_LOOKBACK', 'TREND_KLT', 'TREND_FQT', 'TREND_MIN_MONTHS', 'TREND_POSITION_MA', 'TREND_R2_STEADY', 'TREND_DD_RATIO_MIN', 'monthEndCloses', 'olsLogTrend',
   'longTrendStats', 'longTrendLabel', 'brokenLegOf', 'trendBadgeHtml',
   'trendNaWhy', 'trendStaleHtml', 'trendStaleDays', 'fetchStatBump', 'trendPick', 'secidOf',
@@ -36,7 +36,9 @@ export const VALUE_TABLE = NS.VALUE_TABLE as Record<string, string>;
 export const valueFmtPct = NS.valueFmtPct as (v: number | null, d?: number) => string;
 export const valueTierLabel = NS.valueTierLabel as (t: string | null) => string;
 export const valueGateHtml = NS.valueGateHtml as (row: Record<string, unknown> | null, indByL2?: Record<string, { med: number; n: number }> | null) => string;
-export const renderValueTop10 = NS.renderValueTop10 as (state: { batch: string; top10: Record<string, unknown>[] } | null, trendMap?: Record<string, Record<string, unknown>> | null, indByL2?: Record<string, IndRef> | null) => string;
+export type CapsByInd = Record<string, number[]>;
+export type IndRefBundle = { batch?: unknown; byL2?: Record<string, IndRef> | null; byCaps?: CapsByInd | null } | null | undefined;
+export const renderValueTop10 = NS.renderValueTop10 as (state: { batch: string; top10: Record<string, unknown>[] } | null, trendMap?: Record<string, Record<string, unknown>> | null, indRef?: IndRefBundle) => string;
 export const SWAP_GAP = NS.SWAP_GAP as number;
 export const swapSuggest = NS.swapSuggest as (row: Record<string, unknown> | null, poolRows: Record<string, unknown>[], heldCodes?: string[]) => { target: Record<string, unknown>; gap: number } | null;
 
@@ -47,6 +49,7 @@ export const CORE_MOS_LO = NS.CORE_MOS_LO as number;
 export const CORE_MOS_HI = NS.CORE_MOS_HI as number;
 export const CORE_DEBT_CEIL = NS.CORE_DEBT_CEIL as number;
 export const CORE_MOAT_REL_PP = NS.CORE_MOAT_REL_PP as number;
+export const CORE_CAP_TOP = NS.CORE_CAP_TOP as number;   // 行业领先门：总市值居所属细分行业前五（2026-11-17 用户裁定）
 export const CORE_TREND_N = NS.CORE_TREND_N as Record<string, number>;
 export const coreNum = NS.coreNum as (v: unknown) => number | null;
 export const coreClamp01 = NS.coreClamp01 as (x: number | null | undefined) => number | null;
@@ -56,10 +59,15 @@ export type CorePillars = { moat: number | null; safety: number | null; health: 
 export const corePoolPillars = NS.corePoolPillars as (
   r: Record<string, unknown>, indMed: number | null | undefined, roicLo: number, roicHi: number,
 ) => CorePillars;
-export type CorePoolRow = Record<string, unknown> & { pillars: CorePillars; trendKey: CoreTrendKey; coreScore: number | null };
+export type CorePoolRow = Record<string, unknown> & { pillars: CorePillars; trendKey: CoreTrendKey; coreScore: number | null;
+  capGateOn: boolean; capRank: number | null; capN: number | null };
 export const corePoolSort = NS.corePoolSort as (
-  rows: Record<string, unknown>[] | null, indByL2?: Record<string, IndRef> | null, trendCache?: Record<string, Record<string, unknown>> | null,
+  rows: Record<string, unknown>[] | null, indRef?: IndRefBundle, trendCache?: Record<string, Record<string, unknown>> | null,
 ) => CorePoolRow[];
+export const valueCapsOf = NS.valueCapsOf as (rows: Record<string, unknown>[]) => CapsByInd;
+export const valueCapRankOf = NS.valueCapRankOf as (
+  byCaps: CapsByInd | null | undefined, l2: unknown, mktcap: unknown,
+) => { rank: number; n: number } | null;
 export const LEG_PAGE_SIZE = NS.LEG_PAGE_SIZE as number;
 export const legOrderOpts = NS.legOrderOpts as () => { ascending: boolean; nullsFirst: boolean };
 export const legFilter = NS.legFilter as (codes: string[]) => string;
@@ -121,9 +129,11 @@ export const INCOME_DY_MIN = NS.INCOME_DY_MIN as number;
 export const INCOME_DY5_MIN = NS.INCOME_DY5_MIN as number;
 export const INCOME_DEBT_MAX = NS.INCOME_DEBT_MAX as number;   // 有息负债率上限（缺失不剔除）
 export const INCOME_LIMIT = NS.INCOME_LIMIT as number;
-export type IncomeRow = Record<string, unknown> & { inCorePool?: boolean };
-export const incomeChannelOf = NS.incomeChannelOf as (rows: Record<string, unknown>[]) => { list: IncomeRow[]; total: number };
-export const renderIncomeList = NS.renderIncomeList as (state: { batch: string; list: IncomeRow[]; total: number } | null) => string;
+export type IncomeRow = Record<string, unknown> & { inCorePool?: boolean; capGateOn?: boolean; capRank?: number | null; capN?: number | null };
+export const incomeChannelOf = NS.incomeChannelOf as (
+  rows: Record<string, unknown>[], byCaps?: CapsByInd | null,
+) => { list: IncomeRow[]; total: number; gateOn: boolean };
+export const renderIncomeList = NS.renderIncomeList as (state: { batch: string; list: IncomeRow[]; total: number; gateOn?: boolean } | null) => string;
 export const foldCardHtml = NS.foldCardHtml as (key: string, titleInner: string, bodyHtml: string) => string;
 // 2026-10-30：否决理由的人话版。门槛常量与引擎 ROIC_GATE 同值（测试读引擎源码钉住）。
 export const ROIC_GATE_PCT = NS.ROIC_GATE_PCT as number;
