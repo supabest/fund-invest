@@ -10,6 +10,7 @@ const EXPORT_NAMES = ['VALUE_TABLE', 'LEG_PAGE_SIZE', 'legOrderOpts', 'legFilter
   'TREND_LOOKBACK', 'TREND_KLT', 'TREND_FQT', 'TREND_MIN_MONTHS', 'TREND_POSITION_MA', 'TREND_R2_STEADY', 'TREND_DD_RATIO_MIN', 'monthEndCloses', 'olsLogTrend',
   'longTrendStats', 'longTrendLabel', 'brokenLegOf', 'trendBadgeHtml',
   'trendNaWhy', 'trendStaleHtml', 'trendStaleDays', 'fetchStatBump', 'trendPick', 'secidOf',
+  'isUsCode', 'normUsCode', 'usMarketOf', 'isStockCode',
   'AUTH_TIMEOUT_MS', 'authErrHint',
   'EM_VAL_MIN_ROWS', 'valPctSupported', 'emValUrl', 'valuationPctFromRows', 'valPctCaliber', 'valPctNaWhy',
   'valPctNeedFetch', 'valPctApply', 'valPctHtml', 'valPctMerge', 'valPctLockNote',
@@ -99,7 +100,11 @@ export type FetchStat = Record<string, { ok: number; fail: number }>;
 export const fetchStatBump = NS.fetchStatBump as (stat: FetchStat | null, day: string, ok: boolean) => FetchStat;
 // deno-lint-ignore no-explicit-any
 export const trendPick = NS.trendPick as (prev: Record<string, any> | null, fresh: Record<string, any>) => Record<string, any> | null;
-export const secidOf = NS.secidOf as (code: string | null) => string | null;
+export const secidOf = NS.secidOf as (code: string | null, mkt?: number | string | null) => string | null;
+export const isUsCode = NS.isUsCode as (code: string | null) => boolean;
+export const normUsCode = NS.normUsCode as (code: string | null) => string;
+export const usMarketOf = NS.usMarketOf as (mkt: unknown) => number | null;
+export const isStockCode = NS.isStockCode as (code: string | null) => boolean;
 export const AUTH_TIMEOUT_MS = NS.AUTH_TIMEOUT_MS as number;
 export const TREND_LABEL_CN = NS.TREND_LABEL_CN as Record<'steady' | 'mixed' | 'broken', string>;
 export const TREND_NA_CN = NS.TREND_NA_CN as string;

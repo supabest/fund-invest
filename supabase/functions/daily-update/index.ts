@@ -1016,6 +1016,32 @@ export function runRow(summary: any, timings: string[], opts: RunRowOpts): Recor
   };
 }
 
+// 美股代码（2026-11-21 Phase 1）：1–5 位字母，可带 . / - / _ 的股份类别后缀（BRK.B）。
+// 东财行情代码把类别后缀写成下划线（BRK_B），交易所前缀 105=纳斯达克 / 106=纽交所 / 107=美交所。
+// 市场码由页面解析后随持仓存 s.mkt；老数据缺失时本端用东财 suggest 补一次（见 resolveUsSecid）。
+export const US_TICKER_RE = /^[A-Z]{1,5}(?:[.\-_][A-Z])?$/;
+export function isUsTicker(code: unknown): boolean {
+  return US_TICKER_RE.test(String(code === null || code === undefined ? '' : code).trim().toUpperCase());
+}
+export function usApiCode(code: unknown): string {
+  return String(code === null || code === undefined ? '' : code).trim().toUpperCase().replace(/[.\-]/g, '_');
+}
+export function usMktOf(v: unknown): number | null {
+  const m = Number(v);
+  return (m === 105 || m === 106 || m === 107) ? m : null;
+}
+// 与页面 secidOf 同口径：A股 6 位 / 港股 5 位 / 美股需市场码（缺码返回 null，由 resolveUsSecid 补）
+export function stockSecidOf(code: unknown, mkt?: unknown): string | null {
+  const c = String(code === null || code === undefined ? '' : code).trim();
+  if (/^\d{5}$/.test(c)) return '116.' + c;
+  if (/^\d{6}$/.test(c)) return (c.charAt(0) === '6' ? '1.' : '0.') + c;
+  if (isUsTicker(c)) {
+    const m = usMktOf(mkt);
+    return m === null ? null : m + '.' + usApiCode(c);
+  }
+  return null;
+}
+
 // 腾讯 gtimg 兜底源（2026-10-28）：东财 push2his 对 Edge 出口 IP 连续 3 晚拒连（error sending request，
 // 连接层被断），股票腿与指数腿同时全废——stock_latest 停在 10-24 20:31、index_history 停在 10-23。
 // 板块腿当年因同一问题迁到腾讯（见 sector-trend/tencent.ts 头注释）。本函数只在东财整段失败后补一次，
@@ -1177,8 +1203,28 @@ export async function handle(
     hkLotCache.set(code, lot);
     return lot;
   };
-  const fetchKline = async (secid: string, fqt: number, lmt: number): Promise<{ date: string; close: number; closes: number[]; name: string }> => {
-    // 归因位：镜像段试了几个、死法是什么、有没有被预算提前切断、兜底问到哪个 symbol。
+  // 美股交易所补解析（仅在 s.mkt 缺失时触发，同代码一轮只问一次）：页面首次取行情通常已把 mkt 存回云端。
+  const usMktCache = new Map<string, number | null>();
+  const resolveUsMkt = async (code: string): Promise<number | null> => {
+    const api = usApiCode(code);
+    if (usMktCache.has(api)) return usMktCache.get(api)!;
+    let mkt: number | null = null;
+    try {
+      const r = await fetchRetry('https://searchapi.eastmoney.com/api/suggest/get?input=' + encodeURIComponent(api)
+        + '&type=14&token=D43BF722C8E33BDC906FB84D85E326E8&count=8', { 'User-Agent': 'Mozilla/5.0' }, 2, 6000);
+      const j = await r.json();
+      const arr = (j && j.QuotationCodeTable && j.QuotationCodeTable.Data) || [];
+      for (const it of arr) {
+        const m = /^(105|106|107)\.(.+)$/.exec(String((it && it.QuoteID) || ''));
+        if (m && usApiCode(it.Code) === api) { mkt = Number(m[1]); break; }
+      }
+    } catch (e) {
+      logFailure('取数', '美股 ' + code + ' 交易所识别失败', e);
+    }
+    usMktCache.set(api, mkt);
+    return mkt;
+  };
+  const fetchKline = async (secid: string, fqt: number, lmt: number): Promise<{ date: string; close: number; closes: number[]; name: string }> => {    // 归因位：镜像段试了几个、死法是什么、有没有被预算提前切断、兜底问到哪个 symbol。
     // 东财镜像段硬预算：8 镜像 × 2 试最坏 ≈125s/标的，一个标的就能吃穿 150s 墙钟（现网 3 只股票 48s 全失败）。
     // 预算只限制"还在不在东财上耗"，不改变成功路径的口径；超时即转腾讯兜底。
     let hostsTried = 0;
@@ -1233,7 +1279,7 @@ export async function handle(
     await logRun('running');
 
     const fundJobs: { userId: string; code: string }[] = [];
-    const stockJobs: { userId: string; code: string }[] = [];
+    const stockJobs: { userId: string; code: string; mkt?: number }[] = [];
     const invalidStocks: Record<string, { code: string; name: string }[]> = {};
     const idxSet = new Set<string>();
     for (const st of states) {
@@ -1248,8 +1294,16 @@ export async function handle(
       for (const s of stocks) {
         const code = String(s.code || '').trim();
         if (/^\d{5,6}$/.test(code)) stockJobs.push({ userId: st.user_id, code });
+        else if (isUsTicker(code)) {
+          const mkt = usMktOf(s.mkt);
+          stockJobs.push({ userId: st.user_id, code, mkt: mkt === null ? undefined : mkt });
+        }
         else (invalidStocks[st.user_id] = invalidStocks[st.user_id] || []).push({ code: code || '(空)', name: s.name || '' });
       }
+    }
+    // 美股缺市场码（老数据 / 只手工填了代码）：同一代码只解析一次；解析不到留给股票腿报“交易所未识别”
+    for (const j of stockJobs) {
+      if (!j.mkt && isUsTicker(j.code)) j.mkt = (await resolveUsMkt(j.code)) || undefined;
     }
 
     // ma / avgDev 已提到模块级并导出（见文件头），此处直接使用模块级实现，保证双端一致性可测。
@@ -1436,7 +1490,7 @@ export async function handle(
       }
     }
 
-    // 4. 股票（A股/港股）：收盘价/均线/信号 + 分析报告数据
+    // 4. 股票（A股/港股/美股）：收盘价/均线/信号 + 分析报告数据
     const stockUniq = [...new Set(stockJobs.map(j => j.code))];
     const stockSignalRows: any[] = [];
     const stockReport: Record<string, any[]> = {};
@@ -1445,7 +1499,9 @@ export async function handle(
     // 先并发取 K 线，再串行算信号 + 落库（理由同基金：取数才是墙钟大户）。
     const stKMap = new Map<string, { k?: { date: string; close: number; closes: number[]; name: string }; err?: any }>();
     await mapPool(stockUniq, 3, async (code) => {
-      const secid = code.length === 5 ? ('116.' + code) : (code.startsWith('6') ? ('1.' + code) : ('0.' + code));
+      const mkt = (stockJobs.find(j => j.code === code) || {}).mkt;
+      const secid = stockSecidOf(code, mkt);
+      if (!secid) { stKMap.set(code, { err: new Error('美股交易所未识别（请在股票页点一次「自动获取行情」后重试）') }); return; }
       try { stKMap.set(code, { k: await fetchKline(secid, 1, 130) }); }
       catch (e) { stKMap.set(code, { err: e }); }
     });
@@ -1504,8 +1560,8 @@ export async function handle(
           const nextTier = profitNextTier(tiers, s.profitTaken || [], ret);
           // 2026-10-31 用户裁决：双腿（回撤达档 + 跌穿安全垫）齐备才进顶部抄底横幅，与页面同判据
           if (sGate.light) (stockDips[userId] = stockDips[userId] || []).push({ code, name: sname || code, ...sCostDip! });
-          // 手数：A股主板固定 100；港股按标的读（腾讯行情），取不到再回落页面同步来的 lotSize，仍无则不给金额
-          const lotSize = /^\d{5}$/.test(code) ? ((await fetchHkLot(code)) || Number(s.lotSize) || 0) : 100;
+          // 手数：A股主板固定 100；港股按标的读（腾讯行情）；美股按 1 股交易，取不到也不编
+          const lotSize = isUsTicker(code) ? 1 : (/^\d{5}$/.test(code) ? ((await fetchHkLot(code)) || Number(s.lotSize) || 0) : 100);
           const addPlan = sLadder ? stockAddPlan(sMv, close, sLadder.add, lotSize) : null;
           const sellPlan = sell ? stockSellPlan(sShare, close, sell.tier.sell, lotSize) : null;
           (stockReport[userId] = stockReport[userId] || []).push({
@@ -1532,7 +1588,7 @@ export async function handle(
           const arr = (stt && stt.data && stt.data.stocks) || [];
           const rec = arr.find((x: any) => String(x.code || '').trim() === code);
           const nm = (rec && rec.name) || '';
-          (stockReport[uid] = stockReport[uid] || []).push({ fetchError: '【' + code + (nm ? ' ' + nm : '') + '】行情抓取失败：' + msg + '（本次未纳入分析，下次运行会自动重试；若持续失败请核对该代码是否为有效 A股6位/港股5位）' });
+          (stockReport[uid] = stockReport[uid] || []).push({ fetchError: '【' + code + (nm ? ' ' + nm : '') + '】行情抓取失败：' + msg + '（本次未纳入分析，下次运行会自动重试；若持续失败请核对该代码是否为有效 A股6位/港股5位/美股字母代码）' });
         }
       }
     }
@@ -1608,7 +1664,7 @@ export async function handle(
 
       // 将“代码无效”的股票并入告警，确保误填代码不再被静默丢弃
       for (const iv of (invalidStocks[userId] || [])) {
-        (stockReport[userId] = stockReport[userId] || []).push({ fetchError: '【' + iv.code + (iv.name ? ' ' + iv.name : '') + '】代码格式无效（应为 A股6位/港股5位纯数字），未能获取行情，请在股票页修正' });
+        (stockReport[userId] = stockReport[userId] || []).push({ fetchError: '【' + iv.code + (iv.name ? ' ' + iv.name : '') + '】代码格式无效（应为 A股6位 / 港股5位 / 美股字母代码），未能获取行情，请在股票页修正' });
       }
       const stockWarnCount = (stockReport[userId] || []).filter((r: any) => r.fetchError).length;
       if (stockWarnCount > 0) items.push('⚠️ 有 ' + stockWarnCount + ' 只股票行情获取异常，详见下方股票分析');
@@ -1733,6 +1789,8 @@ export async function handle(
           + '</li>';
       }).join('');
 
+      const usHolding = ((((states.find((x: any) => x.user_id === userId) || {}).data || {}).stocks) || [])
+        .some((x: any) => isUsTicker(x.code));
       const html = '<div style="font-family:-apple-system,PingFang SC,Arial;max-width:600px;margin:0 auto;font-size:14px;color:#1B2436;line-height:1.7;">'
         + '<h2 style="font-size:18px;border-bottom:2px solid #A87C2E;padding-bottom:8px;">定投信号台 · ' + title + '</h2>'
         + '<p style="color:#707C8C;">' + dateStr + ' 收盘数据已自动更新</p>'
@@ -1745,6 +1803,7 @@ export async function handle(
         + '<h3 style="font-size:16px;margin:20px 0 12px;">📊 基金分析</h3>'
         + (fundBlock ? '<ul style="padding-left:0;list-style:none;">' + fundBlock + '</ul>' : '<p style="color:#707C8C;">暂无基金</p>')
         + '<h3 style="font-size:16px;margin:20px 0 12px;">💹 股票分析</h3>'
+        + (usHolding ? '<p style="color:#707C8C;font-size:12px;margin:-4px 0 8px;">美股按美元计价；股票市值与收益率按各市场币种数字直接相加，不做汇率折算。</p>' : '')
         + (stockBlock ? '<ul style="padding-left:0;list-style:none;">' + stockBlock + '</ul>' : '<p style="color:#707C8C;">暂无股票（可在股票标签页添加）</p>')
         + calendarSectionHtml(calItems, calToday)
         + '<div style="background:#F1EDE3;padding:14px;border-radius:8px;margin:16px 0;font-size:13px;">'

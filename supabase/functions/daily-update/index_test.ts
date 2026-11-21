@@ -11,6 +11,7 @@ Deno.env.set("SB_SERVICE_KEY", "svc-placeholder");
 const { handle, holdingsSummaryHtml, fundDipAlert, dipBannerHtml, runRow, txSource, parseTxKline, klineFailNote,
   ddAddPct, drawdownFrom, dipLadder, sellAlert, retChipHtml, baseSignalLabel,
   evalFundSignalServer, stockAddPlan, lotFromTxQuote, profitNextTier,
+  isUsTicker, usApiCode, usMktOf, stockSecidOf,
   calendarSectionHtml, fetchDisclosureCalendar, calPeriods, cstDateStr,
   CAL_WINDOW_DAYS, CAL_SOON_DAYS } = await import("./index.ts");
 
@@ -78,14 +79,14 @@ Deno.test("取数异常（dingtou_state 读失败）→ 500 且响应为约定 {
 
 Deno.test("发信异常（deps.sendMail 抛错）→ 非致命：仍返回 200 约定 summary、sent=false、mailError 记录 + [daily-update][发信] 可归因日志", async () => {
   const real = globalThis.fetch;
-  // 用一只非法股票代码（'XYZ' 不匹配 A股6位/港股5位正则）走通 invalidStocks → items.length>0 → 触发发信分支，
-  // 无需真实基金/股票行情链路（该链路对 fetch 桩要求更复杂）。
+  // 用一只非法股票代码（'!!!' 不匹配 A股6位/港股5位/美股字母代码）走通 invalidStocks → items.length>0 → 触发发信分支，
+  // 无需真实基金/股票行情链路（该链路对 fetch 桩要求更复杂）。注意不能用 'XYZ'——它是合法的美股 ticker。
   globalThis.fetch = ((input: string | URL | Request) => {
     const url = String(input);
     if (url.includes("dingtou_state")) {
       return Promise.resolve(Response.json([{
         user_id: "u1",
-        data: { stocks: [{ code: "XYZ", name: "非法代码测试" }] },
+        data: { stocks: [{ code: "!!!", name: "非法代码测试" }] },
       }]));
     }
     // signal_state / index_state 等读取一律空数组（不发信相关的写库）
@@ -905,6 +906,24 @@ function aLegStates() {
     },
   }];
 }
+
+Deno.test("美股（2026-11-21 Phase 1）：ticker / 类别后缀 / 市场码 / secid 归一", () => {
+  for (const c of ["AAPL", "ko", "BRK.B", "BF-B", "BRK_B", "F"]) assertEquals(isUsTicker(c), true, c);
+  for (const c of ["600031", "00700", "AAPL2", "A1", "BRK.BB", "", null]) assertEquals(isUsTicker(c), false, String(c));
+  assertEquals(usApiCode("brk.b"), "BRK_B", "东财代码把类别后缀写成下划线");
+  assertEquals(usApiCode("BF-B"), "BF_B");
+  assertEquals(usMktOf(105), 105);
+  assertEquals(usMktOf("106"), 106);
+  assertEquals(usMktOf(107), 107);
+  assertEquals(usMktOf(104), null);
+  assertEquals(stockSecidOf("600031"), "1.600031");
+  assertEquals(stockSecidOf("000001"), "0.000001");
+  assertEquals(stockSecidOf("00700"), "116.00700");
+  assertEquals(stockSecidOf("AAPL", 105), "105.AAPL");
+  assertEquals(stockSecidOf("BRK.B", 106), "106.BRK_B");
+  assertEquals(stockSecidOf("AAPL"), null, "缺市场码必须 null，绝不猜交易所");
+  assertEquals(stockSecidOf("!!!"), null);
+});
 
 Deno.test("A：txSource 映射 —— A股/港股/指数特判，腾讯无源的标的返回 null", () => {
   assertEquals(typeof txSource, "function", "txSource 必须先导出");

@@ -4,7 +4,7 @@ import { valueFmtPct, valueTierLabel, valueGateHtml, renderValueTop10,
   LEG_PAGE_SIZE, legOrderOpts, legFilter, legRange, legHasMore, legTiebreakCol,
   TREND_LOOKBACK, TREND_KLT, TREND_FQT, TREND_MIN_MONTHS, TREND_POSITION_MA, TREND_R2_STEADY, TREND_DD_RATIO_MIN,
   monthEndCloses, olsLogTrend, longTrendStats, longTrendLabel, brokenLegOf,
-  trendBadgeHtml, secidOf, AUTH_TIMEOUT_MS, authErrHint,
+  trendBadgeHtml, secidOf, isUsCode, normUsCode, usMarketOf, isStockCode, AUTH_TIMEOUT_MS, authErrHint,
   TREND_LABEL_CN, TREND_NA_CN,
   trendNaWhy, trendStaleHtml, trendStaleDays, fetchStatBump, trendPick,
   EM_VAL_MIN_ROWS, valPctSupported, emValUrl, valuationPctFromRows, valPctCaliber, valPctNaWhy,
@@ -436,6 +436,61 @@ Deno.test('secidOf：与 autoFetchStockData 既有口径同源（6→沪、其�
   assertEquals(secidOf(' 600031 '), '1.600031', '代码要 trim');
   assertEquals(secidOf('abc'), null);
   assertEquals(secidOf(null as never), null);
+});
+
+Deno.test('secidOf 美股（2026-11-21 Phase 1）：市场码 105/106/107，类别后缀 . / - 归一为东财下划线', () => {
+  assertEquals(secidOf('AAPL', 105), '105.AAPL');
+  assertEquals(secidOf('ko', 106), '106.KO', '小写代码要归一为大写');
+  assertEquals(secidOf('BRK.B', 106), '106.BRK_B', '股份类别后缀 . → 东财下划线');
+  assertEquals(secidOf('BF-B', 106), '106.BF_B', '股份类别后缀 - → 东财下划线');
+  assertEquals(secidOf(' BRK.B ', 106), '106.BRK_B', '代码要 trim');
+  assertEquals(secidOf('AAPL'), null, '缺市场码必须 null：secidOf 同步纯函数，绝不猜交易所');
+  assertEquals(secidOf('AAPL', 999), null, '非法市场码必须 null');
+  assertEquals(secidOf('AAPL', null), null);
+  assertEquals(secidOf('AAPL.XY', 105), null, '类别后缀只允许单个字母');
+  assertEquals(secidOf('A1', 105), null, '美股代码只允许字母');
+});
+
+Deno.test('美股接线（2026-11-21 Phase 1）：校验/交易所解析/每手 1 股/指数概览/计价披露都在', async () => {
+  const html = await Deno.readTextFile(new URL('../index.html', import.meta.url));
+  const fetchFn = html.slice(html.indexOf('async function autoFetchStockData('), html.indexOf('async function saveStockForm('));
+  assertEquals(fetchFn.includes('isStockCode(code)'), true, '自动获取必须走统一代码校验');
+  assertEquals(fetchFn.includes('resolveUsMarket(code)'), true, '美股必须解析交易所');
+  assertEquals(fetchFn.includes('target.mkt = mkt'), true, '市场码必须随持仓存下');
+  const refresh = html.slice(html.indexOf('async function autoRefreshStocks('), html.indexOf('let autoRefreshRunning'));
+  assertEquals(refresh.includes('isStockCode('), true, '自动刷新目标必须含美股');
+  assertEquals(refresh.includes('resolveUsMarket(code)'), true, '旧数据缺市场码时要补解析');
+  assertEquals(refresh.includes('s.lotSize = 1'), true, '美股每手 1 股');
+  const lot = html.slice(html.indexOf('function stockLotSizeOf('), html.indexOf('// 腾讯港股行情第 61 个字段'));
+  assertEquals(lot.includes('美股按 1 股交易'), true, '每手股数：美股按 1 股');
+  assertEquals(/if\(\/\^\[A-Za-z\]\{1,5\}/.test(lot), true, '美股 1 股规则要落在 stockLotSizeOf 内（不得跨块引用）');
+  for (const t of ['ensureUsIndexes()', 'renderUsIndexes()', "'100.NDX'", "'100.SPX'", 'usIndexGrid']) {
+    assertEquals(html.includes(t), true, '指数概览缺：' + t);
+  }
+  assertEquals(html.includes('美股按美元计价，不做汇率折算'), true, '计价口径披露缺失');
+  assertEquals(html.includes('maxlength="8"'), true, '代码框要容得下 BRK.B');
+  assertEquals(/\^\\d\+\\\.\[0-9A-Za-z\._\]\+\$/.test(html), true, 'K线 secid 守卫必须允许东财下划线类别后缀（106.BRK_B）');
+  const saveFn = html.slice(html.indexOf('async function saveStockForm('), html.indexOf('async function deleteStock('));
+  assertEquals(saveFn.includes('normUsCode(code) !== normUsCode(s.code)'), true, '保存时大小写不同不得清掉已解析的市场码');
+});
+
+Deno.test('美股代码判定与市场码：isUsCode / normUsCode / usMarketOf / isStockCode', () => {
+  for (const c of ['AAPL', 'ko', 'BRK.B', 'BF-B', 'BRK_B', 'GOOGL']) assertEquals(isUsCode(c), true, c);
+  for (const c of ['600519', '00700', 'AAPL2', 'A1', 'BRK.BB', '', null]) assertEquals(isUsCode(c as never), false, String(c));
+  assertEquals(normUsCode('brk.b'), 'BRK_B');
+  assertEquals(normUsCode('BF-B'), 'BF_B');
+  assertEquals(normUsCode('AAPL'), 'AAPL');
+  assertEquals(usMarketOf(105), 105);
+  assertEquals(usMarketOf('106'), 106);
+  assertEquals(usMarketOf(107), 107);
+  assertEquals(usMarketOf(104), null);
+  assertEquals(usMarketOf(null), null);
+  assertEquals(isStockCode('600519'), true);
+  assertEquals(isStockCode('00700'), true);
+  assertEquals(isStockCode('aapl'), true);
+  assertEquals(isStockCode('BRK.B'), true);
+  assertEquals(isStockCode('abc!'), false);
+  assertEquals(isStockCode(''), false);
 });
 
 Deno.test('命名：窗口真的换成上市至今，文案才配得上「长期」二字（旧“24月”前缀必须消失）', () => {

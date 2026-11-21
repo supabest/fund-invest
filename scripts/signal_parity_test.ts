@@ -664,6 +664,8 @@ Deno.test("港股整手股数：手数按标的取（100/200/400/500/1000），�
   assertEquals(pageStockLotSizeOf({ code: "00005" }), 0, "港股手数未知 → 0 → 不给金额");
   assertEquals(pageStockLotSizeOf({ code: "00005", lotSize: "abc" }), 0);
   assertEquals(pageStockLotSizeOf({ code: "00005", lotSize: -1 }), 0);
+  assertEquals(pageStockLotSizeOf({ code: "AAPL" }), 1, "美股按 1 股交易");
+  assertEquals(pageStockLotSizeOf({ code: "BRK.B" }), 1, "美股类别后缀也按 1 股");
   assertEquals(pageStockLotSizeOf({}), 100, "空记录按 A 股口径");
 });
 
@@ -1025,8 +1027,8 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
   // 港股手数必须真的去取（否则 stockLotSizeOf 永远为 0，卡片永远不出金额）：按标的读腾讯行情第 61 字段
   assert(/function fetchHkLot\(code\)\{/.test(html), "页面必须有港股每手股数取数函数 fetchHkLot");
   assert(/https:\/\/qt\.gtimg\.cn\/q=hk' \+ code/.test(html), "fetchHkLot 必须打腾讯港股行情（第 61 字段是每手股数）");
-  assert(/if\(!\/\^\\d\{5\}\$\/\.test\(String\(s\.code\|\|''\)\.trim\(\)\)\) continue;[\s\S]{0,200}await fetchHkLot\(String\(s\.code\)\.trim\(\)\)/.test(html),
-    "autoRefreshStocks 必须为 5 位（港股）代码取手数，A股跳过");
+  assert(/if\(isUsCode\(code\)\)\{ s\.lotSize = 1; continue; \}[\s\S]{0,200}if\(!\/\^\\d\{5\}\$\/\.test\(code\)\) continue;[\s\S]{0,200}await fetchHkLot\(String\(s\.code\)\.trim\(\)\)/.test(html),
+    "autoRefreshStocks 必须为 5 位（港股）代码取手数，A股/美股跳过");
   assert(/s\.lotSize = lot;/.test(html), "取到的手数必须落到本地状态（saveStocks 同步到云端，夜间邮件据此回落）");
   // 基金侧取消估值分位：表单不再有这个输入、卡片双信号条不再读它
   assert(/data-k="valuationPercentile"/.test(html) === false, "基金表单不得再有估值分位输入框");
@@ -1050,8 +1052,8 @@ Deno.test("接线守卫：页面卡片与夜间批处理都必须调用被比对
     "邮件股票腿必须走统一门槛的 dipLadder（股票侧保留高估否决）");
   assert(/const addPlan = sLadder \? stockAddPlan\(sMv, close, sLadder\.add, lotSize\) : null;/.test(server),
     "邮件股票腿必须按整体持仓市值（sMv）与标的整手股数折算");
-  assert(/const lotSize = \/\^\\d\{5\}\$\/\.test\(code\) \? \(\(await fetchHkLot\(code\)\) \|\| Number\(s\.lotSize\) \|\| 0\) : 100;/.test(server),
-    "港股手数必须按标的读（腾讯行情 → 状态 lotSize → 0），A股固定 100");
+  assert(/const lotSize = isUsTicker\(code\) \? 1 : \(\/\^\\d\{5\}\$\/\.test\(code\) \? \(\(await fetchHkLot\(code\)\) \|\| Number\(s\.lotSize\) \|\| 0\) : 100\);/.test(server),
+    "美股固定 1 股；港股按标的读（腾讯行情 → 状态 lotSize → 0），A股固定 100");
   assert(/buyMarkHtml\(r\.dipShout \? r\.ladder : null, r\.dipShout \? r\.addPlan : null\)/.test(server),
     "股票邮件卡片必须把整手计划传给 buyMarkHtml，且由「双腿齐备 + 非明显高位」驱动（2026-10-31 起不再无条件发指令）");
   assert(/buyMarkHtml\(r\.multiplier > 0 \? r\.ladder : null\)/.test(server),
