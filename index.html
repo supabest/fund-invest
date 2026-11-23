@@ -46,6 +46,7 @@
   .masthead .date{font-size:12px; color:var(--muted);}
   .goal-groups{display:block;}
   .stat-group{min-width:0;}
+  /* 2026-11-22：顶部仅恢复基金总市值/总收益率两项；股票统计在各版块卡内，不再显示目标/上限/进度 */
   .goal-row{display:flex; gap:22px; margin-top:18px; flex-wrap:wrap;}
   .goal-stat{flex:1; min-width:110px;}
   .goal-stat .num{font-size:26px; font-weight:600; line-height:1.1;}
@@ -81,7 +82,7 @@
   /* 概览行（2026-11-12 用户裁决 A）：一行 = 名称(+代码)/持仓市值/涨跌幅/行尾信号点，整行进整页详情。
      名称列 minmax(0,1fr) 可收缩 + 省略号：390px 下市值/涨跌幅/点优先占位，名称绝不撑破视口 */
   .ov-list{background:var(--panel); border:1px solid var(--line); border-radius:10px; overflow:hidden; margin-bottom:12px;}
-  .ov-legend{display:flex; gap:14px; align-items:center; font-size:11px; color:var(--muted); margin:0 0 8px 2px;}
+  .ov-legend{display:flex; gap:14px; align-items:center; flex-wrap:wrap; font-size:11px; color:var(--muted); margin:0 0 8px 2px;}
   .ov-legend .ov-dot{width:8px; height:8px;}
   .ov-row{display:grid; grid-template-columns:minmax(0,1fr) auto auto 12px; gap:12px; align-items:center; padding:12px 14px; border-bottom:1px solid var(--line); cursor:pointer; transition:background .15s ease;}
   .ov-row:last-child{border-bottom:none;}
@@ -91,6 +92,14 @@
   .ov-code{font-size:11px; color:var(--muted); font-weight:400; margin-left:6px;}
   .ov-mv{font-size:13px; white-space:nowrap; font-variant-numeric:tabular-nums;}
   .ov-ret{font-size:13px; font-weight:600; white-space:nowrap; font-variant-numeric:tabular-nums; text-align:right; min-width:56px;}
+  /* 仓位占比（2026-11-24）：仅股票三版块行渲染，基金行无此元素、列数不变 */
+  .ov-share{font-size:11.5px; color:var(--muted); white-space:nowrap; font-variant-numeric:tabular-nums; text-align:right; min-width:42px;}
+  /* 窄屏加列后收紧数值列，把宽度让给名称（避免「腾讯控股 00700」被截断） */
+  @media (max-width: 600px){
+    .mkt-board .ov-row{gap:7px;}
+    .mkt-board .ov-ret{min-width:50px; font-size:12.5px;}
+    .mkt-board .ov-share{min-width:37px; font-size:11px;}
+  }
   .ov-dot{width:9px; height:9px; border-radius:50%; justify-self:center;}
   .ov-dot.sell{background:var(--brick); box-shadow:0 0 7px rgba(191,68,60,.75);}
   .ov-dot.buy{background:var(--jade); box-shadow:0 0 7px rgba(63,150,113,.75);}
@@ -107,6 +116,26 @@
   @media (prefers-reduced-motion: reduce){
     .ov-dot.buy.buy-strong{animation:none; box-shadow:0 0 11px 2px rgba(63,150,113,.9);}
   }
+
+  /* ===== 三版块持仓（沪深京/美股/港股）+ 右侧三杠拖拽排序 ===== */
+  .mkt-board{background:var(--panel-2); border:1px solid var(--line); border-radius:12px; margin:0 0 14px; overflow:hidden;}
+  .mkt-head{padding:12px 14px 11px; border-bottom:1px solid var(--line);}
+  .mkt-title-row{display:flex; align-items:center; gap:8px; margin-bottom:10px;}
+  .mkt-title{font-size:14px; font-weight:700; color:var(--ivory);}
+  .mkt-badge{font-size:10.5px; font-weight:600; color:var(--gold); border:1px solid var(--gold); border-radius:999px; padding:1px 8px;}
+  .mkt-count{font-size:11.5px; color:var(--muted); margin-left:auto;}
+  .mkt-stats{display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px;}
+  .mkt-stat .k{font-size:10.5px; color:var(--muted); white-space:nowrap;}
+  .mkt-stat .v{font-size:14px; font-weight:700; margin-top:3px; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .mkt-board .ov-list{border:none; border-radius:0; margin:0;}
+  .mkt-empty{padding:18px 14px; text-align:center; font-size:12.5px; color:var(--muted);}
+  /* 6 列：名称 / 市值 / 收益率 / 仓位占比 / 信号点 / 拖拽手柄 */
+  .mkt-board .ov-row{grid-template-columns:minmax(0,1fr) auto auto auto 12px 22px; gap:9px;}
+  .drag-handle{flex:0 0 auto; width:22px; height:36px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px; cursor:grab; touch-action:none; -webkit-touch-action:none; border-radius:6px; margin:-6px -2px;}
+  .drag-handle:active{cursor:grabbing; background:var(--gold-dim);}
+  .drag-handle i{display:block; width:14px; height:2px; border-radius:2px; background:var(--line-strong); pointer-events:none;}
+  .drag-handle:active i{background:var(--gold);}
+  .ov-row.dragging{z-index:8; position:relative; background:var(--panel-2); box-shadow:0 8px 20px rgba(0,0,0,.28); opacity:.97;}
 
   /* 整页详情：概览退场、事实区在上 / 编辑表单在下。表单容器沿用 body-/sbody- 旧 id 与 .fund-body.open，
      保存/删除/一键获取/autoRefresh「打开即跳过」守卫全部不改；列表重绘只刷事实区，打字现场结构性保全 */
@@ -223,14 +252,6 @@
   .mkt-items{display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; flex:1; min-width:0;}
   .mkt-item{display:inline-flex; align-items:center; gap:5px;}
   .mkt-label{white-space:nowrap; color:var(--ivory);}
-
-  /* 美股指数概览（2026-11-21 Phase 1）：NDX/SPX 双卡，点位 + 日涨跌 + 均线档位 + 52周距离 */
-  .us-index-grid{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:10px;}
-  .us-index-card{background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:11px 13px; font-size:12.5px; color:var(--muted);}
-  .us-index-card .idx-head{display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
-  .us-index-card .idx-name{font-family:var(--serif); font-size:14px; color:var(--ivory); font-weight:600;}
-  .us-index-card .idx-close{font-family:var(--serif); font-size:21px; color:var(--ivory); margin-top:5px; letter-spacing:.4px;}
-  .us-index-card .idx-row{display:flex; gap:12px; flex-wrap:wrap; margin-top:5px;}
 
   .tabs-row{display:flex; gap:8px; padding:16px 18px 0;}
   .tab-btn{flex:1; padding:11px; border:1px solid var(--line-strong); background:var(--panel); border-radius:8px; font-size:14px; cursor:pointer; font-family:var(--sans); color:var(--muted);}
@@ -384,6 +405,7 @@
     .ov-code{font-size:12px;}
     .ov-mv{font-size:14px;}
     .ov-ret{font-size:15px; min-width:64px;}
+    .ov-share{font-size:12.5px; min-width:48px;}
     .ov-dot{width:10px; height:10px;}
     .detail-back{font-size:14px;}
     .detail-head{padding:4px 0 16px 0;}
@@ -461,19 +483,18 @@
   .add-row{display:flex;gap:8px;}
   .add-row .add-stock-btn{flex:1;}
 
-  /* 窄屏（手机/平板）：保留页签切换，顶部只显示当前页签那一组统计 */
+  /* 窄屏（手机/平板）：保留页签切换；顶部总计仅属基金端，切到股票 tab 时隐藏 */
   @media (max-width: 1099.98px){
     #tab-funds, #tab-stocks{display:none;}
     body[data-tab="funds"] #tab-funds{display:block;}
     body[data-tab="stocks"] #tab-stocks{display:block;}
-    body[data-tab="funds"] .stat-group[data-group="stocks"]{display:none;}
-    body[data-tab="stocks"] .stat-group[data-group="funds"]{display:none;}
+    body[data-tab="stocks"] .goal-groups{display:none;}
   }
-  /* 宽屏（电脑）：基金与股票并排同屏，页签退场，顶部统计左右分组对齐两列 */
+  /* 宽屏（电脑）：基金与股票并排同屏，页签退场；顶部股票总计已移除，基金组单列占满 */
   @media (min-width: 1100px){
     .masthead{max-width:1560px; margin:0 auto; padding:36px 24px 22px;}
     .tabs-row{display:none;}
-    .goal-groups{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:28px;}
+    .goal-groups{display:grid; grid-template-columns:minmax(0,1fr); gap:28px;}
     .panes{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:28px; align-items:start; max-width:1560px; margin:0 auto; padding:0 24px 40px;}
     .panes > #tab-funds > .section, .panes > #tab-stocks > .section{max-width:none; margin:0; padding-left:0; padding-right:0;}
     .detail-section{max-width:860px;}
@@ -498,29 +519,7 @@
           <div class="num" id="fundReturn">0%</div>
           <div class="lbl">基金收益率</div>
         </div>
-        <div class="goal-stat">
-          <div class="num" id="fundGoalPct">0%</div>
-          <div class="lbl" id="fundGoalLbl">20万目标进度</div>
-        </div>
       </div>
-      <div class="progress-track"><div class="progress-fill" id="fundBar" style="width:0%"></div></div>
-    </div>
-    <div class="stat-group" data-group="stocks">
-      <div class="goal-row">
-        <div class="goal-stat">
-          <div class="num" id="stockValue">¥0</div>
-          <div class="lbl">股票总市值</div>
-        </div>
-        <div class="goal-stat">
-          <div class="num" id="stockReturn">0%</div>
-          <div class="lbl">股票收益率</div>
-        </div>
-        <div class="goal-stat">
-          <div class="num" id="stockGoalPct">0%</div>
-          <div class="lbl" id="stockGoalLbl">仓位上限未设置</div>
-        </div>
-      </div>
-      <div class="progress-track"><div class="progress-fill" id="stockBar" style="width:0%"></div></div>
     </div>
   </div>
   <div class="mkt-strip" id="mktStrip">
@@ -543,18 +542,6 @@
 <div class="panes">
 <div id="tab-funds">
 <div class="section">
-  <div class="settings-row">
-    <span>基金目标总额（元）</span>
-    <input type="number" id="goalInput" placeholder="如 200000">
-    <span class="hint">主题上限 = 各主题百分比 × 目标总额；保存后自动同步云端</span>
-  </div>
-</div>
-<div class="section">
-  <div class="section-title">主题仓位 <span class="hint">市值 vs 金额上限（锚定目标总额）</span></div>
-  <table class="theme-table" id="themeTable"><tbody></tbody></table>
-</div>
-
-<div class="section">
   <div class="section-title"><span>板块轮动</span><span class="sector-title-right"><span class="hint">行业代表ETF均线五态 · 与个股评分口径分立，不合成</span><button class="sector-fold" id="sectorFoldBtn" aria-controls="sectorCardRoot" style="display:none;"></button></span></div>
   <div id="sectorCardRoot"></div>
 </div>
@@ -567,21 +554,6 @@
 </div>
 
 <div id="tab-stocks">
-<div class="section">
-  <div class="section-title">股票仓位 <span class="hint" id="stockCapText">未设置总额上限</span></div>
-  <div class="progress-track"><div class="progress-fill" id="stockCapTrack" style="width:0%"></div></div>
-</div>
-<div class="section">
-  <div class="settings-row">
-    <span>股票总仓位上限（元，0 = 不限）</span>
-    <input type="number" id="stockCapInput" placeholder="如 100000">
-    <span class="hint">超出上限时邮件提醒（按各市场现价计，不做汇率折算）</span>
-  </div>
-</div>
-<div class="section">
-  <div class="section-title">美股指数 <span class="hint">纳斯达克100 / 标普500 · 美元计价，不做汇率折算</span></div>
-  <div class="us-index-grid" id="usIndexGrid"><div class="empty">指数行情加载中…</div></div>
-</div>
 <div class="section">
   <div class="section-title">股票清单 <span class="hint" id="stockCountHint">数据每日自动更新</span></div>
   <div id="stockList"></div>
@@ -649,7 +621,10 @@ const GOAL = 200000;
 
 // Supabase 云同步配置（publishable key 设计为公开嵌入页面，安全靠登录+行级权限）
 // 直连地址只在 Pages 之外用；Pages 上 supabaseBaseUrl 会改成同源 /sb（国内直连常被断）
-const SUPABASE_DIRECT = 'https://sfauluwxmdginezbluvo.supabase.co';
+// 2026-11-22：本地 file:// / localhost 直连 *.supabase.co 在国内常被断流（登录报「连不上 Supabase」）。
+// 统一改走线上 Pages 同源反代（cloudflare/functions/sb/[[path]].ts），已验证可达且 CORS 允许回显 Origin。
+// .pages.dev 域名下 supabaseBaseUrl 仍会切回自身同源 /sb，行为不变；其余环境一律借这条反代。
+const SUPABASE_DIRECT = 'https://fund-invest888.pages.dev/sb';
 const SUPABASE_URL = supabaseBaseUrl(location.hostname, location.origin, SUPABASE_DIRECT);
 const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_ogx_OZOqR0tEgr24Dt1DSg_VZasrzuM';
 const TABLE_NAME = 'dingtou_state';
@@ -696,8 +671,23 @@ let mktFetching = {};
 
 // 股票持仓与设置
 let stocks = [];
-let goal = GOAL;      // 基金目标总额（可在页面调整，主题上限随之缩放）
-let stockCap = 0;     // 股票总仓位上限（0=不限）
+let goal = GOAL;      // 基金目标总额：界面已不展示，仅作「主题超限暂停」信号的内部基准（沿用云端/旧值或默认 GOAL）
+// 2026-11-22：股票各版块仓位上限指标已从界面移除；stockCaps 仅保留旧数据兼容加载，不再参与任何展示/计算。
+let stockCaps = {a:0, us:0, hk:0};
+
+// 归一化上限：兼容旧单一上限与各种脏数据；旧 stockCap 按人民币口径归入沪深京版块。
+function normStockCaps(raw, legacyCap){
+  const out = {a:0, us:0, hk:0};
+  if(raw && typeof raw==='object'){
+    out.a  = Math.max(0, parseFloat(raw.a)||0);
+    out.us = Math.max(0, parseFloat(raw.us)||0);
+    out.hk = Math.max(0, parseFloat(raw.hk)||0);
+    return out;
+  }
+  const v = Math.max(0, parseFloat(legacyCap)||0);
+  if(v>0) out.a = v;
+  return out;
+}
 
 // 量化评分（stock_score 最新批次）：null=尚未生成/加载失败，UI 优雅降级
 let scoreState = null; // { batch, rows: Map<code,row> }——量化初筛 Top10 卡已删（2026-11-16），rows 只服务持仓卡片评分明细
@@ -794,7 +784,7 @@ async function loadAll(){
     const r5 = await store.get(SETTINGS_KEY);
     const s = r5 ? JSON.parse(r5.value) : {};
     if(s.goal) goal = s.goal;
-    if(s.stockCap !== undefined) stockCap = s.stockCap || 0;
+    stockCaps = normStockCaps(s.stockCaps, s.stockCap);
   }catch(e){}
   migrateFunds();
   migrateStocks();
@@ -813,8 +803,6 @@ async function loadAll(){
   // 未登录/云端不可用时，打开页面稍后直接本地自动刷新；已登录时由 syncOnOpen 完成后触发
   setTimeout(()=>{ if(!sbUser && !cloudReady) autoRefreshAll(); }, 2000);
   setTimeout(()=>{ if(!sbUser) autoRefreshAll(); }, 4000);
-  try{ document.getElementById('goalInput').value = goal; }catch(e){}
-  try{ document.getElementById('stockCapInput').value = stockCap || ''; }catch(e){}
   try{
     const t = localStorage.getItem('dinvest_tab');
     if(t==='stocks'){ const b = document.querySelector('.tab-btn[data-tab="stocks"]'); if(b) b.click(); }
@@ -908,7 +896,7 @@ async function recordFundPositionEvent(id, type){
   refreshDetail(); // 登记后止盈参考的落袋行立即刷新（非详情视图时该函数空态直退）
 }
 async function saveSettings(){
-  try{ await store.set(SETTINGS_KEY, JSON.stringify({goal, stockCap})); }
+  try{ await store.set(SETTINGS_KEY, JSON.stringify({goal, stockCaps})); }
   catch(e){}
   pushCloud();
 }
@@ -3105,7 +3093,7 @@ async function syncOnOpen(){
       if(Array.isArray(d.stocks)) stocks = d.stocks;
       if(d.settings && typeof d.settings==='object'){
         if(d.settings.goal) goal = d.settings.goal;
-        if(d.settings.stockCap !== undefined) stockCap = d.settings.stockCap || 0;
+        stockCaps = normStockCaps(d.settings.stockCaps, d.settings.stockCap);
       }
       migrateFunds();
       migrateStocks();
@@ -3113,7 +3101,7 @@ async function syncOnOpen(){
         await store.set(STORE_KEY, JSON.stringify(funds));
         await store.set(THEME_CAP_KEY, JSON.stringify(themeCaps));
         await store.set(STOCKS_KEY, JSON.stringify(stocks));
-        await store.set(SETTINGS_KEY, JSON.stringify({goal, stockCap}));
+        await store.set(SETTINGS_KEY, JSON.stringify({goal, stockCaps}));
         await markLocalSaved();
       }catch(e){}
       console.log('[定投信号台] 同步完成，准备渲染');
@@ -3146,7 +3134,7 @@ async function pushCloud(silent){
   if(!cloudReady || !sbUser) return;
   syncState = 'syncing'; setSyncUI();
   try{
-    const { error } = await sb.from(TABLE_NAME).upsert({ user_id: sbUser.id, data: { funds, themeCaps, stocks, settings: { goal, stockCap } }, updated_at: new Date().toISOString() });
+    const { error } = await sb.from(TABLE_NAME).upsert({ user_id: sbUser.id, data: { funds, themeCaps, stocks, settings: { goal, stockCaps } }, updated_at: new Date().toISOString() });
     if(error) throw error;
     await markLocalSaved();
     syncState = 'ok'; syncErrMsg='';
@@ -3229,6 +3217,7 @@ function benchmarksInUse(){
   const set = new Set();
   funds.forEach(f=>{ const k = f.benchmark || 'HS300'; if(BENCHMARKS[k]) set.add(k); });
   if(set.size===0) set.add('HS300');
+  set.add('DJIA');   // 道琼斯常驻顶部「大盘参考」（2026-11-22）：与基金自选指数并列，不影响信号系数计算
   return [...set];
 }
 function ensureBenchmarkData(){
@@ -3348,66 +3337,6 @@ function renderMktStrip(){
   }).join('');
 }
 
-// 美股指数概览（2026-11-21 Phase 1）：NDX/SPX 走与个股同一条 K 线管线（日线 260 根）。
-// 只读展示，不进任何信号；5 分钟内不重复打点（自动刷新 60 秒一轮时也不至于连打东财）。
-let usIndexState = null;    // { NDX:{...}, SPX:{...} }
-let usIndexFetching = false;
-let usIndexAt = 0;
-function ensureUsIndexes(){
-  if(usIndexFetching) return;
-  if(usIndexState && Date.now() - usIndexAt < 5*60*1000) return;
-  usIndexFetching = true;
-  const th = { NDX: BENCHMARKS.NDX.th, SPX: BENCHMARKS.SPX.th };
-  Promise.all(['NDX','SPX'].map(k=>{
-    return fetchKlineJsonp(BENCHMARKS[k].secid, 1, 260).then(j=>{
-      const rows = ((j && j.data && j.data.klines) || []).map(kl=>String(kl).split(','))
-        .filter(a=>a.length>=2 && isFinite(parseFloat(a[1])));
-      if(rows.length < 2) return null;
-      const closes = rows.map(a=>parseFloat(a[1]));
-      const close = closes[closes.length-1], prev = closes[closes.length-2];
-      const ma60 = closes.length>=60 ? closes.slice(-60).reduce((a,x)=>a+x,0)/60 : null;
-      const ma120 = closes.length>=120 ? closes.slice(-120).reduce((a,x)=>a+x,0)/120 : null;
-      const hi = Math.max.apply(null, closes.slice(-250));
-      const devs = [];
-      if(ma60!==null) devs.push((close-ma60)/ma60*100);
-      if(ma120!==null) devs.push((close-ma120)/ma120*100);
-      const dev = devs.length ? devs.reduce((a,x)=>a+x,0)/devs.length : null;
-      const lv = dev===null ? {level:'neutral', label:'中性', coef:1} : marketLevel(dev, th[k]);
-      return { key:k, name:BENCHMARKS[k].name, date:String(rows[rows.length-1][0]), close, chg:(close-prev)/prev*100, hi, dev, level:lv.level, label:lv.label };
-    }).catch(()=>null);
-  })).then(list=>{
-    const next = Object.assign({}, usIndexState || {});
-    list.forEach(x=>{ if(x) next[x.key] = x; });   // 失败的那只保留上次成功值，不用“加载中”覆盖好数据
-    usIndexState = next;
-    usIndexAt = Date.now();
-    usIndexFetching = false;
-    renderUsIndexes();
-  });
-}
-function fmtIdxPoint(n){
-  return Number(n).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
-}
-function renderUsIndexes(){
-  const el = document.getElementById('usIndexGrid');
-  if(!el) return;
-  const keys = ['NDX','SPX'].filter(k=>usIndexState && usIndexState[k]);
-  if(!keys.length){
-    el.innerHTML = '<div class="empty">'+(usIndexAt ? '指数行情暂不可用（网络波动，稍后自动重试）' : '指数行情加载中…')+'</div>';
-    return;
-  }
-  el.innerHTML = keys.map(k=>{
-    const x = usIndexState[k];
-    const hiDist = (x.hi>0) ? (x.close/x.hi-1)*100 : null;
-    return '<div class="us-index-card"><div class="idx-head"><span class="idx-name">'+escapeHtml(x.name)+'</span>'
-      + '<span class="signal-pill '+mktPillClass(x.level)+'">'+escapeHtml(x.label)+'</span></div>'
-      + '<div class="idx-close">'+fmtIdxPoint(x.close)+'</div>'
-      + '<div class="idx-row"><span class="'+(x.chg>=0?'ret-pos':'ret-neg')+'">日 '+fmtSigned(x.chg,2)+'</span>'
-      + (hiDist!==null?'<span>距52周高 '+fmtSigned(hiDist,1)+'</span>':'')
-      + (x.dev!==null?'<span>双均线偏离 '+fmtSigned(x.dev,1)+'</span>':'')
-      + '<span>'+escapeHtml(x.date)+'</span></div></div>';
-  }).join('');
-}
-
 function showToast(msg){
   const t = document.getElementById('toast');
   t.textContent = msg;
@@ -3419,6 +3348,16 @@ function fmtMoney(n){
   if(isNaN(n)) return '¥0';
   return '¥' + Math.round(n).toLocaleString('zh-CN');
 }
+// 美股按美元计价、不做汇率折算：数值沿用 currentPrice（已是美元），只把符号由 ¥ 换为 $
+function fmtUsd(n){
+  if(isNaN(n)) return '$0';
+  return '$' + Math.round(n).toLocaleString('zh-CN');
+}
+// 港股按港币计价、不做汇率折算：数值沿用 currentPrice（已是港币），符号用 HK$
+function fmtHkd(n){
+  if(isNaN(n)) return 'HK$0';
+  return 'HK$' + Math.round(n).toLocaleString('zh-CN');
+}
 function fmtWan(n){
   if(isNaN(n)) return '¥0';
   if(n>=10000) return '¥'+(Math.round(n/1000)/10)+'万';
@@ -3428,6 +3367,15 @@ function fmtPct(n, digits=1){
   if(n===null || n===undefined || isNaN(n)) return '--';
   const s = n.toFixed(digits);
   return (n>0?'+':'') + s + '%';
+}
+// 2026-11-22 统一收益率口径：负成本是反复买卖摊薄后的正常业务状态（用户裁定），
+// 分母用 |成本|，现价减负成本自然为正收益。例：cost=-66.92, price=125.53 → +287.6%。
+// 正成本维持原口径不变；基金成本字段为 costBasis、现价为 currentNav，同样兼容。
+function positionRetPct(pos){
+  const cost = Number(pos && (pos.cost ?? pos.costBasis)) || 0;
+  const price = Number(pos && (pos.currentPrice ?? pos.currentNav)) || 0;
+  const denom = Math.abs(cost);
+  return (denom>0 && price>0) ? (price-cost)/denom*100 : null;
 }
 
 // 每份成本：优先用「持仓成本净值」；只填「持仓总成本」时按 份额=市值/当前净值 折算
@@ -3812,9 +3760,8 @@ function stockPadInfo(s, ret){
 function dipAlertStockCost(s, dev){
   if(!stockPadSet(s)) return null;
   const tdd = parseFloat(String(s.targetDrawdown));
-  const cost = parseFloat(s.cost), price = parseFloat(s.currentPrice);
-  if(!(cost>0) || !(price>0)) return null;
-  const ret = (price-cost)/cost*100;
+  const ret = positionRetPct(s);
+  if(ret===null) return null;
   const target = -Math.abs(tdd);
   if(ret > target + 1e-9) return null;
   const hot = (dev!==null && dev!==undefined && Number.isFinite(dev) && dev>=10);
@@ -4079,7 +4026,7 @@ function migrateStockPosition(s){
 // 基金（costBasis/currentNav）与股票（cost/currentPrice）共用同一套三率式。
 function positionReturnSummary(pos){
   const cost = Number(pos.cost ?? pos.costBasis)||0, price = Number(pos.currentPrice ?? pos.currentNav)||0, shares = Number(pos.shares)||0;
-  const ret = (cost>0 && price>0) ? (price-cost)/cost*100 : null;
+  const ret = positionRetPct(pos);
   const realized = Number(pos.realizedPnL)||0;
   const base = Number(pos.cumBuyCost)|| (cost*shares);
   const totalReturn = base>0 ? (realized + (price-cost)*shares)/base*100 : null;
@@ -4257,6 +4204,33 @@ function pillClass(level){
 }
 
 function stockMvOf(s){ return (parseFloat(s.shares)||0) * (parseFloat(s.currentPrice)||0); }
+// 三版块分类：沪深京(A股6位，含北交所) / 美股(字母代码) / 港股(5位数字)。与 exchangeLabel/secidOf 同口径，禁止另起一套正则。
+function stockMarketOf(s){
+  const code = String((s && s.code)||'').trim();
+  if(isUsCode(code)) return 'us';
+  if(/^\d{5}$/.test(code)) return 'hk';
+  return 'a';
+}
+const MARKET_META = [
+  {key:'a',  name:'沪深京', hint:'A股 · 含北交所', unit:'元'},
+  {key:'us', name:'美股',   hint:'美元计价 · 不折算', unit:'美元'},
+  {key:'hk', name:'港股',   hint:'港币计价 · 不折算', unit:'港币'}
+];
+// 单个版块的统计：总市值 / 收益率(含落袋，表头同口径)。仓位上限指标已于 2026-11-22 移除。
+// 收益率分母（2026-11-22）：有 cumBuyCost 用累计买入成本；否则用 |shares×cost|。
+// 负成本（反复买卖摊薄，如 NVDA/META）取自个股「现价−成本」÷|成本| 同口径，不再让分母为负而回落 0%。
+function stockGroupStats(list){
+  const mv = list.reduce((s,x)=> s + stockMvOf(x), 0);
+  const signedCost = list.reduce((s,x)=> s + (parseFloat(x.shares)||0)*(parseFloat(x.cost)||0), 0);
+  const realized = list.reduce((s,x)=> s + (Number(x.realizedPnL)||0), 0);
+  const base = list.reduce((s,x)=>{
+    const cum = Number(x.cumBuyCost)||0;
+    if(cum>0) return s + cum;
+    return s + Math.abs((parseFloat(x.shares)||0)*(parseFloat(x.cost)||0));
+  }, 0);
+  const ret = base>0 ? ((mv-signedCost)+realized)/base*100 : 0;
+  return {mv, ret};
+}
 function exchangeLabel(code, mkt){
   code = String(code||'');
   if(isUsCode(code)){
@@ -4271,19 +4245,15 @@ function exchangeLabel(code, mkt){
 function render(){
   document.getElementById('todayDate').textContent = new Date().toLocaleDateString('zh-CN', {year:'numeric', month:'2-digit', day:'2-digit'});
 
+  // 顶部总计（2026-11-22）：仅基金总市值 + 基金收益率两项，不显示占总目标金额比例；
+  // 收益率沿用含已落袋口径（分子=浮盈+已落袋，分母=累计买入成本）。股票统计在各版块卡内。
   const fundMv = funds.reduce((s,f)=> s + (parseFloat(f.marketValue)||0), 0);
-  const stockMv = stocks.reduce((s,x)=> s + stockMvOf(x), 0);
   const fundCost = funds.reduce((s,f)=>{
     const mv = parseFloat(f.marketValue)||0;
     const cost = effectiveCost(f);
     return s + ((mv>0 && f.currentNav>0 && cost>0) ? mv*cost/f.currentNav : mv);
   }, 0);
-  const stockCost = stocks.reduce((s,x)=> s + (parseFloat(x.shares)||0)*(parseFloat(x.cost)||0), 0);
-
-  // 2026-11-16 用户裁定：表头基金/股票收益率计入止盈落袋——分子 = 浮盈 + 已落袋；
-  // 分母 = 累计买入成本（已迁移行用 cumBuyCost，缺省行回落持仓成本，与邮件「持仓概览」同口径）。
   const fundRealized = funds.reduce((s,f)=> s + (Number(f.realizedPnL)||0), 0);
-  const stockRealized = stocks.reduce((s,x)=> s + (Number(x.realizedPnL)||0), 0);
   const fundBase = funds.reduce((s,f)=>{
     const cum = Number(f.cumBuyCost)||0;
     if(cum>0) return s + cum;
@@ -4291,72 +4261,15 @@ function render(){
     const cost = effectiveCost(f);
     return s + ((mv>0 && f.currentNav>0 && cost>0) ? mv*cost/f.currentNav : mv);
   }, 0);
-  const stockBase = stocks.reduce((s,x)=>{
-    const cum = Number(x.cumBuyCost)||0;
-    if(cum>0) return s + cum;
-    return s + (parseFloat(x.shares)||0)*(parseFloat(x.cost)||0);
-  }, 0);
-
-  // 顶部分左右两组统计，与宽屏两列对齐；窄屏由 CSS 按 body[data-tab] 隐藏另一组
   const fundRet = fundBase>0 ? ((fundMv-fundCost)+fundRealized)/fundBase*100 : 0;
-  const stockRet = stockBase>0 ? ((stockMv-stockCost)+stockRealized)/stockBase*100 : 0;
-  const fundBarPct = fundMv/goal*100;
-  const stockBarPct = stockCap>0 ? stockMv/stockCap*100 : null;
-  setStatGroup('fund', fundMv, fundRet, fundBarPct,
-    (goal>=10000 ? (Math.round(goal/1000)/10)+'万目标进度' : goal+'元目标进度'),
-    fundBarPct>=100 ? 'var(--jade)' : '',
-    fundRealized!==0 ? '总收益口径：分子含已落袋 '+fmtMoney(fundRealized)+'，分母=累计买入成本' : '');
-  setStatGroup('stock', stockMv, stockRet, stockBarPct,
-    stockBarPct===null ? '仓位上限未设置' : '股票仓位上限进度',
-    (stockBarPct!==null && stockBarPct>=100) ? 'var(--brick)' : '',
-    stockRealized!==0 ? '总收益口径：分子含已落袋 '+fmtMoney(stockRealized)+'，分母=累计买入成本' : '');
+  document.getElementById('fundValue').textContent = fmtMoney(fundMv);
+  const retEl = document.getElementById('fundReturn');
+  retEl.textContent = fmtPct(fundRet);
+  retEl.style.color = fundRet>=0 ? 'var(--jade)' : 'var(--brick)';
 
-  renderThemeTable();
   renderStockSection();
   renderFundList();
   renderMktStrip();
-}
-
-function setStatGroup(key, mv, ret, barPct, goalLbl, barColor, hint){
-  document.getElementById(key+'Value').textContent = fmtMoney(mv);
-  const retEl = document.getElementById(key+'Return');
-  retEl.textContent = fmtPct(ret);
-  retEl.style.color = ret>=0 ? 'var(--jade)' : 'var(--brick)';
-  retEl.title = hint || ''; // 落袋≠0 时悬停可读口径说明；无落袋为空（悬停无提示=纯浮盈口径）
-  const pctEl = document.getElementById(key+'GoalPct');
-  pctEl.textContent = barPct===null ? '--' : barPct.toFixed(1)+'%';
-  pctEl.style.color = barColor;
-  document.getElementById(key+'GoalLbl').textContent = goalLbl;
-  document.getElementById(key+'Bar').style.width = barPct===null ? '0%' : Math.min(100, barPct)+'%';
-}
-
-function renderThemeTable(){
-  const tbody = document.querySelector('#themeTable tbody');
-  tbody.innerHTML = '';
-  // 固定按新板块顺序展示全部主题（含暂无基金的），另附存量基金用到的其他主题
-  const themes = [...DEFAULT_THEMES, ...[...new Set(funds.map(f=>f.theme))].filter(t=>!DEFAULT_THEMES.includes(t))];
-  if(themes.length===0){
-    tbody.innerHTML = '<tr><td colspan="2" style="color:var(--muted); padding:14px 0;">添加基金后将显示主题仓位</td></tr>';
-    return;
-  }
-  themes.forEach(theme=>{
-    const mv = themeMarketValue(theme);
-    const capAmount = themeCapAmount(theme);
-    const capPct = themeCaps[theme] ?? 100;
-    const over = mv >= capAmount;
-    const progress = Math.min(100, mv/capAmount*100);
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>
-        <div class="theme-name">${theme}${over?'<span class="over-tag">已达上限</span>':''}</div>
-        <div class="theme-bar">
-          <div class="theme-bar-fill ${over?'over':''}" style="width:${progress}%"></div>
-        </div>
-      </td>
-      <td class="theme-pct">${fmtWan(mv)} / ${fmtWan(capAmount)}<span style="color:var(--muted); font-size:11px;">（${capPct}%）</span></td>
-    `;
-    tbody.appendChild(tr);
-  });
 }
 
 // ==== DETAIL_PURE_BEGIN ====
@@ -4399,7 +4312,9 @@ function detailHash(kind, id){
 let detailState = null;      // {kind:'fund'|'stock', id:string} | null
 let detailViaPush = false;   // 本次详情是否由页内点击推入（返回键 history.back；直刷进来则清 hash，不跳出站外）
 
-function overviewRowHtml(kind, item, mv, ret, dot, strong){
+// sharePct（2026-11-24）：可选「仓位占比」列，仅在股票三版块传入——口径为个股占本版块总市值比例。
+// 基金行不传该参数，行结构与列数保持不变。
+function overviewRowHtml(kind, item, mv, ret, dot, strong, withDrag, moneyFmt, sharePct){
   const name = escapeHtml(item.name || (kind==='fund' ? '未命名基金' : '未命名股票'));
   const code = String((kind==='fund' ? item.fundCode : item.code)||'').trim();
   const retCls = (ret!==null && ret>=0) ? 'ret-pos' : 'ret-neg';
@@ -4407,11 +4322,17 @@ function overviewRowHtml(kind, item, mv, ret, dot, strong){
   const dotTitle = dot==='sell' ? '止盈提醒'
     : strongBuy ? '强抄底信号 · 安全垫与历史最深回撤双双突破'
     : dot==='buy' ? '抄底提醒' : '暂无买卖提醒';
+  const grip = withDrag ? '<span class="drag-handle" data-drag="1" title="按住拖动调整顺序" aria-label="拖动调整顺序"><i></i><i></i><i></i></span>' : '';
+  const shareHtml = (sharePct===null || sharePct===undefined || isNaN(sharePct))
+    ? ''
+    : '<div class="ov-share" title="占本版块持仓市值 '+sharePct.toFixed(1)+'%">'+sharePct.toFixed(1)+'%</div>';
   return `<div class="ov-row" data-kind="${kind}" data-id="${escapeHtml(String(item.id))}" role="button" tabindex="0" title="查看详情">
     <div class="ov-name">${name}${code?'<span class="ov-code">'+escapeHtml(code)+'</span>':''}</div>
-    <div class="ov-mv">${fmtMoney(mv)}</div>
+    <div class="ov-mv">${(moneyFmt||fmtMoney)(mv)}</div>
     <div class="ov-ret ${retCls}">${fmtPct(ret,1)}</div>
+    ${shareHtml}
     <span class="ov-dot ${dot}${strongBuy?' buy-strong':''}" title="${dotTitle}" aria-label="${dotTitle}"></span>
+    ${grip}
   </div>`;
 }
 
@@ -4534,7 +4455,7 @@ function refreshDetail(){
   } else {
     const s = item;
     const dev = (s.ma60 && s.ma120) ? ((s.currentPrice-s.ma60)/s.ma60 + (s.currentPrice-s.ma120)/s.ma120)/2*100 : (s.ma60 ? (s.currentPrice-s.ma60)/s.ma60*100 : null);
-    const ret = (parseFloat(s.cost)>0 && s.currentPrice>0) ? (s.currentPrice-parseFloat(s.cost))/parseFloat(s.cost)*100 : null;
+    const ret = positionRetPct(s);
     const nextTier = nextProfitTier(s, ret);
     const sAlert = profitAlertFromRet(ret, s);
     const sDip = dipAlertStock(s);
@@ -4669,23 +4590,8 @@ function sectorStockStripHtml(){
 }
 
 function renderStockSection(){
-  ensureUsIndexes();   // 指数卡与持仓列表解耦：无美股持仓也照常显示（只读概览）
   const list = document.getElementById('stockList');
   document.getElementById('stockCountHint').textContent = (stocks.length ? '共 ' + stocks.length + ' 只 · ' : '') + '数据每日自动更新';
-  const stockMv = stocks.reduce((s,x)=> s + stockMvOf(x), 0);
-  const capTrack = document.getElementById('stockCapTrack');
-  const capText = document.getElementById('stockCapText');
-  if(capTrack && capText){
-    if(stockCap > 0){
-      capTrack.parentElement.style.display = '';
-      capTrack.style.width = Math.min(100, stockMv/stockCap*100) + '%';
-      capTrack.style.background = stockMv > stockCap ? 'var(--brick)' : 'var(--jade)';
-      capText.textContent = fmtMoney(stockMv) + ' / ' + fmtMoney(stockCap) + (stockMv > stockCap ? '（已超限，建议暂停买入）' : '');
-    } else {
-      capTrack.parentElement.style.display = 'none';
-      capText.textContent = '未设置总额上限（当前市值 ' + fmtMoney(stockMv) + '）';
-    }
-  }
   list.innerHTML = '';
   // 板块轮动概览条：股票列表最上一张卡（自上而下——先看行业方向，再看个股初筛）；无 sectorState 时返回空串不占位
   list.insertAdjacentHTML('beforeend', sectorStockStripHtml());
@@ -4705,23 +4611,125 @@ function renderStockSection(){
     refreshDetail();
     return;
   }
-  const rows = stocks.map(s=>{
-    const dev = (s.ma60 && s.ma120) ? ((s.currentPrice-s.ma60)/s.ma60 + (s.currentPrice-s.ma120)/s.ma120)/2*100 : (s.ma60 ? (s.currentPrice-s.ma60)/s.ma60*100 : null);
-    const ret = (parseFloat(s.cost)>0 && s.currentPrice>0) ? (s.currentPrice-parseFloat(s.cost))/parseFloat(s.cost)*100 : null;
-    const sAlert = profitAlertFromRet(ret, s);
-    const sDip = dipAlertStock(s);
-    const dCostStock = dipAlertStockCost(s, dev);
-    const sDipGate = stockDipGate(sDip, dCostStock, stockPadSet(s));
-    const dot = signalDotState(!!sAlert, sDipGate.light);
-    return overviewRowHtml('stock', s, stockMvOf(s), ret, dot);
-  }).join('');
-  list.insertAdjacentHTML('beforeend', '<div class="ov-legend"><span class="ov-dot sell"></span>止盈 <span class="ov-dot buy"></span>抄底 <span class="ov-dot hold"></span>暂无提醒 · 点行进详情</div><div class="ov-list">'+rows+'</div>');
-  list.querySelectorAll('.ov-row').forEach(row=>{
+  // 三版块持仓（沪深京 / 美股 / 港股）：每个版块顶端只显示总市值/收益率，不做三版块总计。
+  // 顺序沿用 stocks 全局数组：分组时按数组原序过滤，拖拽后按 DOM 新序回写数组并持久化。
+  const mkGroups = {a:[], us:[], hk:[]};
+  stocks.forEach(s=> mkGroups[stockMarketOf(s)].push(s));
+  const legend = '<div class="ov-legend"><span class="ov-dot sell"></span>止盈 <span class="ov-dot buy"></span>抄底 <span class="ov-dot hold"></span>暂无提醒 · 点行进详情 · 右侧三杠拖动排序 · 仓位占比 = 个股占本版块市值</div>';
+  let boardsHtml = legend;
+  MARKET_META.forEach(meta=>{
+    const arr = mkGroups[meta.key];
+    const st = stockGroupStats(arr);
+    const mvFmt = meta.key==='us' ? fmtUsd : meta.key==='hk' ? fmtHkd : fmtMoney;  // 美股$/港股HK$直接计价；沪深京沿用¥
+    let body;
+    if(arr.length===0){
+      body = '<div class="mkt-empty">暂无'+meta.name+'持仓</div>';
+    }else{
+      const rows = arr.map(s=>{
+        const dev = (s.ma60 && s.ma120) ? ((s.currentPrice-s.ma60)/s.ma60 + (s.currentPrice-s.ma120)/s.ma120)/2*100 : (s.ma60 ? (s.currentPrice-s.ma60)/s.ma60*100 : null);
+        const ret = positionRetPct(s);
+        const sAlert = profitAlertFromRet(ret, s);
+        const sDip = dipAlertStock(s);
+        const dCostStock = dipAlertStockCost(s, dev);
+        const sDipGate = stockDipGate(sDip, dCostStock, stockPadSet(s));
+        const dot = signalDotState(!!sAlert, sDipGate.light);
+        // 仓位占比：个股占本版块总市值的比例（三版块本币各自计价、不跨版块折算）。
+        const mv = stockMvOf(s);
+        const sharePct = st.mv>0 ? mv/st.mv*100 : null;
+        return overviewRowHtml('stock', s, mv, ret, dot, undefined, true, mvFmt, sharePct);
+      }).join('');
+      body = '<div class="ov-list">'+rows+'</div>';
+    }
+    boardsHtml += '<section class="mkt-board" data-mk="'+meta.key+'">'
+      + '<div class="mkt-head">'
+        + '<div class="mkt-title-row"><span class="mkt-title">'+meta.name+'</span><span class="mkt-badge">'+meta.hint+'</span><span class="mkt-count">'+arr.length+' 只</span></div>'
+        + '<div class="mkt-stats">'
+          + '<div class="mkt-stat"><div class="k">股票总市值</div><div class="v">'+mvFmt(st.mv)+'</div></div>'
+          + '<div class="mkt-stat"><div class="k">股票收益率</div><div class="v '+(st.ret>=0?'ret-pos':'ret-neg')+'">'+fmtPct(st.ret,1)+'</div></div>'
+        + '</div>'
+      + '</div>' + body + '</section>';
+  });
+  list.insertAdjacentHTML('beforeend', boardsHtml);
+  list.querySelectorAll('.mkt-board .ov-row').forEach(row=>{
     const go = ()=> gotoDetail(row.dataset.kind, row.dataset.id);
-    row.addEventListener('click', go);
+    row.addEventListener('click', (ev)=>{ if(ev.target && ev.target.closest && ev.target.closest('[data-drag]')) return; go(); });
     row.addEventListener('keydown', (ev)=>{ if(ev.key==='Enter' || ev.key===' '){ ev.preventDefault(); go(); } });
   });
+  bindStockDragSort(list);
   refreshDetail();
+}
+
+// 三版块持股顺序持久化：按 DOM（版块顺序 a/us/hk + 版块内新序）重排 stocks 全局数组后落盘并推云
+async function persistStockOrder(listEl){
+  const order = [];
+  listEl.querySelectorAll('.mkt-board').forEach(board=>{
+    board.querySelectorAll('.ov-row[data-id]').forEach(row=> order.push(String(row.dataset.id)));
+  });
+  const byId = new Map(stocks.map(s=>[String(s.id), s]));
+  const next = order.map(id=>byId.get(id)).filter(Boolean);
+  stocks.forEach(s=>{ if(!order.includes(String(s.id))) next.push(s); }); // 兜底：异常未渲染的追加到末尾
+  stocks = next;
+  await saveStocks();
+}
+
+// 右侧「三」杠拖拽手柄：触屏/鼠标均可，仅在所属版块列表内就地调整顺序。
+// 事件挂在 document 上而非手柄：DOM 因 insertBefore 重排时不会丢失 pointer 流（指针捕获在重排后可能失效）。
+function bindStockDragSort(listEl){
+  let dragEl=null, startY=0, pointerId=null, handle=null, active=false;
+  function onDown(e){
+    if(active) return;
+    if(e.pointerType==='mouse' && e.button!==0) return;
+    const h = e.currentTarget.closest('[data-drag]');
+    if(!h) return;
+    handle = h;
+    dragEl = h.closest('.ov-row');
+    if(!dragEl || dragEl.parentElement.querySelectorAll('.ov-row').length<2) return;
+    active = true;
+    startY = e.clientY;
+    pointerId = e.pointerId;
+    dragEl.classList.add('dragging');
+    document.addEventListener('pointermove', onMove, {passive:false});
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+    e.preventDefault(); e.stopPropagation();
+  }
+  function onMove(e){
+    if(!active || !dragEl || (pointerId!==null && e.pointerId!==pointerId)) return;
+    e.preventDefault();
+    dragEl.style.transform = 'translateY('+(e.clientY-startY)+'px)';
+    let dragRect = dragEl.getBoundingClientRect();
+    const container = dragEl.parentElement;
+    // 只与直接上下邻居比较：越过邻居中线即交换 DOM 顺序，并补偿 startY 让视觉位置连续
+    const prev = dragEl.previousElementSibling;
+    if(prev && prev.classList.contains('ov-row')){
+      const r = prev.getBoundingClientRect();
+      if(dragRect.top < r.top + r.height/2){
+        container.insertBefore(dragEl, prev);
+        startY -= r.height;
+        dragRect = dragEl.getBoundingClientRect();
+      }
+    }
+    const next = dragEl.nextElementSibling;
+    if(next && next.classList.contains('ov-row')){
+      const r = next.getBoundingClientRect();
+      if(dragRect.bottom > r.top + r.height/2){
+        container.insertBefore(next, dragEl);
+        startY += r.height;
+      }
+    }
+    dragEl.style.transform = 'translateY('+(e.clientY-startY)+'px)';
+  }
+  function onUp(e){
+    if(!active) return;
+    active = false;
+    if(dragEl){ dragEl.style.transform=''; dragEl.classList.remove('dragging'); }
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    document.removeEventListener('pointercancel', onUp);
+    dragEl=null; handle=null; pointerId=null;
+    persistStockOrder(listEl);
+  }
+  listEl.querySelectorAll('.mkt-board .drag-handle').forEach(h=> h.addEventListener('pointerdown', onDown));
 }
 
 function stockFormHtml(s){
@@ -5594,20 +5602,6 @@ document.querySelectorAll('.tab-btn').forEach(b=>b.addEventListener('click', ()=
   try{ localStorage.setItem('dinvest_tab', b.dataset.tab); }catch(e){}
   render();
 }));
-document.getElementById('goalInput').addEventListener('change', async (e)=>{
-  const v = parseFloat(e.target.value);
-  if(!v || v<=0){ showToast('目标总额需为正数'); e.target.value = goal; return; }
-  goal = v;
-  await saveSettings();
-  render();
-  showToast('基金目标总额已更新为 '+fmtMoney(goal));
-});
-document.getElementById('stockCapInput').addEventListener('change', async (e)=>{
-  stockCap = parseFloat(e.target.value)||0;
-  await saveSettings();
-  render();
-  showToast(stockCap>0 ? '股票总额上限已更新为 '+fmtMoney(stockCap) : '已取消股票总额上限');
-});
 document.getElementById('addStockBtn').addEventListener('click', async ()=>{
   const s = { id:'s'+Math.random().toString(36).slice(2,10), code:'', name:'', shares:0, cost:0,
     currentPrice:0, priceDate:'', belowStreak:0,
