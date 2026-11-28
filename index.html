@@ -485,10 +485,11 @@
 
   /* 窄屏（手机/平板）：保留页签切换；顶部总计仅属基金端，切到股票 tab 时隐藏 */
   @media (max-width: 1099.98px){
-    #tab-funds, #tab-stocks{display:none;}
+    #tab-funds, #tab-stocks, #tab-assets{display:none;}
     body[data-tab="funds"] #tab-funds{display:block;}
     body[data-tab="stocks"] #tab-stocks{display:block;}
-    body[data-tab="stocks"] .goal-groups{display:none;}
+    body[data-tab="assets"] #tab-assets{display:block;}
+    body[data-tab="stocks"] .goal-groups, body[data-tab="assets"] .goal-groups{display:none;}
   }
   /* 宽屏（电脑）：基金与股票并排同屏，页签退场；顶部股票总计已移除，基金组单列占满 */
   @media (min-width: 1100px){
@@ -497,8 +498,58 @@
     .goal-groups{display:grid; grid-template-columns:minmax(0,1fr); gap:28px;}
     .panes{display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:28px; align-items:start; max-width:1560px; margin:0 auto; padding:0 24px 40px;}
     .panes > #tab-funds > .section, .panes > #tab-stocks > .section{max-width:none; margin:0; padding-left:0; padding-right:0;}
+    #tab-assets{grid-column:1 / -1;}
     .detail-section{max-width:860px;}
   }
+
+  /* ===== 理财版块（债券基金/银行理财/定期储蓄/活期现金流，纯手工录入） ===== */
+  .asset-card{background:var(--panel); border:1px solid var(--line); border-radius:10px; margin-bottom:12px; overflow:hidden;}
+  .asset-head{display:flex; justify-content:space-between; align-items:center; padding:13px 16px; border-bottom:1px solid var(--line);}
+  .asset-head h3{font-family:var(--serif); font-size:14px; font-weight:600; margin:0;}
+  .asset-head .asset-sub{font-size:11.5px; color:var(--muted);}
+  .asset-sum{display:flex; gap:22px; padding:11px 16px; background:var(--panel-2); flex-wrap:wrap;}
+  .asset-stat .k{font-size:11px; color:var(--muted);}
+  .asset-stat .v{font-size:15px; font-weight:600; font-variant-numeric:tabular-nums;}
+  .asset-row{display:flex; justify-content:space-between; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); font-size:13px; gap:10px; flex-wrap:wrap;}
+  .asset-row:last-of-type{border-bottom:none;}
+  .asset-line{display:flex; gap:14px; flex-wrap:wrap; align-items:center;}
+  .asset-line .nm{font-weight:500;}
+  .asset-line .code{font-size:11.5px; color:var(--muted);}
+  .asset-line .amt{font-variant-numeric:tabular-nums;}
+  .asset-line .meta{font-size:11.5px; color:var(--muted);}
+  .asset-ops{white-space:nowrap; flex:0 0 auto;}
+  .asset-ops .op{background:transparent; border:none; color:var(--muted); font-size:12px; cursor:pointer; padding:2px 5px; font-family:var(--sans);}
+  .asset-ops .op:hover{color:var(--gold);}
+  .asset-ops .op.del:hover{color:var(--brick);}
+  .asset-add{width:calc(100% - 32px); margin:10px 16px 14px; padding:10px; border:1px dashed var(--line-strong); border-radius:8px; background:transparent; color:var(--muted); font-size:12.5px; cursor:pointer; font-family:var(--sans);}
+  .asset-add:hover{border-color:var(--gold); color:var(--gold);}
+  .asset-empty{padding:16px; text-align:center; color:var(--muted); font-size:12px;}
+  .fx-row{display:flex; gap:14px; align-items:flex-end; flex-wrap:wrap; padding:12px 16px; background:var(--panel-2); border-radius:10px; margin-bottom:14px;}
+  .fx-row .field{min-width:150px;}
+  .fx-row .fx-hint{font-size:11px; color:var(--muted); flex:1; min-width:200px; line-height:1.6;}
+  .fx-row .fx-tip{font-size:11px; color:var(--gold);}
+  .alloc-total{font-size:13px; padding:8px 0 2px; color:var(--muted);}
+  .alloc-total b{font-size:17px; color:var(--ivory); font-variant-numeric:tabular-nums;}
+  .alloc-bar{display:flex; height:12px; border-radius:6px; overflow:hidden; margin:6px 0 12px; background:var(--panel-2);}
+  .alloc-bar i{display:block; height:100%;}
+  .alloc-grid{display:grid; grid-template-columns:repeat(3,1fr); gap:10px;}
+  @media(max-width:640px){.alloc-grid{grid-template-columns:repeat(2,1fr);}}
+  .alloc-cell{background:var(--panel-2); border-radius:8px; padding:10px 12px;}
+  .alloc-cell .nm{font-size:11px; color:var(--muted); display:flex; align-items:center; gap:6px;}
+  .alloc-cell .sw{width:9px; height:9px; border-radius:2px; flex:0 0 9px;}
+  .alloc-cell .amt{font-size:14px; font-weight:600; margin-top:3px; font-variant-numeric:tabular-nums;}
+  .alloc-cell .pc{font-size:11px; color:var(--muted); margin-top:1px;}
+  .ai-report{background:var(--panel-2); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-top:12px; font-size:12.5px; line-height:1.8; display:none;}
+  .ai-report.show{display:block;}
+  .ai-report h4{font-family:var(--serif); font-size:13px; margin:14px 0 6px; color:var(--gold);}
+  .ai-report h4:first-child{margin-top:0;}
+  .ai-report ul{margin:4px 0 4px 18px; padding:0;}
+  .ai-report .warn{color:var(--brick);}
+  .ai-report .good{color:var(--jade);}
+  .ai-report .hl{background:var(--gold-dim); color:var(--gold); padding:1px 5px; border-radius:4px; font-weight:600;}
+  .ai-report table{width:100%; border-collapse:collapse; margin-top:6px; font-size:12px;}
+  .ai-report th,.ai-report td{padding:6px 8px; border-bottom:1px solid var(--line); text-align:left;}
+  .ai-report th{color:var(--muted); font-weight:400;}
 </style>
 </head>
 <body data-tab="funds">
@@ -537,6 +588,7 @@
 <div class="tabs-row">
   <button class="tab-btn active" data-tab="funds">基金</button>
   <button class="tab-btn" data-tab="stocks">股票</button>
+  <button class="tab-btn" data-tab="assets">理财</button>
 </div>
 
 <div class="panes">
@@ -587,6 +639,35 @@
 </div>
 </div>
 
+<div id="tab-assets">
+<div class="section">
+  <div class="section-title">六版块全景 <span class="hint" id="allocHint">所有资产折算人民币后计算占比</span></div>
+  <div class="fx-row">
+    <div class="field"><label>美元汇率 (1 USD = ? CNY)</label><input type="number" id="fxUsd" step="0.0001" placeholder="如 7.25"></div>
+    <div class="field"><label>港币汇率 (1 HKD = ? CNY)</label><input type="number" id="fxHkd" step="0.0001" placeholder="如 0.93"></div>
+    <button class="btn primary" id="saveFxBtn" style="flex:0 0 auto; padding:10px 16px;">保存汇率</button>
+    <div class="fx-hint" id="fxHint">填汇率后美股/港股折算成人民币参与占比；留空则按本币单列、不并入人民币总计。<span class="fx-tip">汇率手工录入，随账号云同步。</span></div>
+  </div>
+  <div class="alloc-total" id="allocTotal"></div>
+  <div class="alloc-bar" id="allocBar"></div>
+  <div class="alloc-grid" id="allocGrid"></div>
+</div>
+
+<div class="section">
+  <div class="section-title">手工录入版块 <span class="hint">债券基金 · 银行理财 · 定期储蓄 · 活期现金流</span></div>
+  <div id="assetCards"></div>
+</div>
+
+<div class="section">
+  <div class="section-title">AI 理财优化建议 <span class="hint">按六版块占比与持仓生成</span></div>
+  <div class="btn-row">
+    <button class="btn primary" id="genAdviceBtn">生成理财建议</button>
+    <button class="btn ghost" id="copyBriefBtn">复制材料给 AI 深度分析</button>
+  </div>
+  <div class="ai-report" id="aiReport"></div>
+</div>
+</div>
+
 <div id="detailView" style="display:none;">
   <div class="section detail-section">
     <button type="button" class="detail-back" id="detailBackBtn">← 返回概览</button>
@@ -607,6 +688,15 @@
   </div>
 </div>
 
+<div class="modal-backdrop" id="assetModalBackdrop">
+  <div class="modal">
+    <h2 id="assetModalTitle">添加持仓</h2>
+    <div class="field-grid" id="assetModalFields"></div>
+    <div class="btn-row"><button class="btn primary" id="assetModalSave">保存</button><button class="btn ghost" id="assetModalCancel">取消</button></div>
+    <div class="small-note" id="assetModalMsg" style="color:var(--brick);"></div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script src="./supabase-js.js" async></script>
@@ -615,6 +705,7 @@ const STORE_KEY = 'dinvest_funds_v1';
 const THEME_CAP_KEY = 'dinvest_theme_caps_v1';
 const SYNC_TS_KEY = 'dinvest_sync_ts_v1';
 const STOCKS_KEY = 'dinvest_stocks_v1';
+const MANUAL_KEY = 'dinvest_manual_v1';   // 理财版块（债券基金/银行理财/定期储蓄/活期现金流），纯手工录入
 const SETTINGS_KEY = 'dinvest_settings_v1';
 const LOGIN_EMAIL_KEY = 'dinvest_login_email';   // 只记邮箱：会话靠 SDK 自持久化，密码不落盘
 const GOAL = 200000;
@@ -671,9 +762,43 @@ let mktFetching = {};
 
 // 股票持仓与设置
 let stocks = [];
+
+// 理财版块（纯手工录入）：四类资产，各自一个数组
+const MANUAL_CATS = ['bondFund','wealth','deposit','cash'];
+const MANUAL_META = {
+  bondFund:{name:'债券基金', icon:'🛡️', color:'#3F8A68', amtKey:'amount', rateKey:'rate',
+    fields:[
+      {k:'code', l:'基金代码', t:'text', ph:'如 110027'},
+      {k:'name', l:'基金名称', t:'text', ph:'如 易方达增强回报债'},
+      {k:'amount', l:'持仓金额(元)', t:'number', ph:'0.00'},
+      {k:'rate', l:'年化收益率(%)', t:'number', ph:'如 4.2'}
+    ]},
+  wealth:{name:'银行理财', icon:'🏦', color:'#A87C2E', amtKey:'amount', rateKey:'rate',
+    fields:[
+      {k:'name', l:'产品名称', t:'text', ph:'如 稳盈30天'},
+      {k:'rate', l:'预期收益率(%)', t:'number', ph:'如 3.1'},
+      {k:'amount', l:'持仓金额(元)', t:'number', ph:'0.00'}
+    ]},
+  deposit:{name:'定期储蓄', icon:'🔒', color:'#B14A34', amtKey:'amount', rateKey:'rate',
+    fields:[
+      {k:'name', l:'存款名称/银行', t:'text', ph:'如 招行三年定存'},
+      {k:'amount', l:'持有金额(元)', t:'number', ph:'0.00'},
+      {k:'rate', l:'定期利率(%)', t:'number', ph:'如 2.6'},
+      {k:'maturity', l:'到期日', t:'date'}
+    ]},
+  cash:{name:'活期现金流', icon:'💵', color:'#707C8C', amtKey:'amount', rateKey:null,
+    fields:[
+      {k:'bank', l:'银行名称', t:'text', ph:'如 工商银行'},
+      {k:'amount', l:'存款金额(元)', t:'number', ph:'0.00'}
+    ]}
+};
+function seedManual(){ const o={}; MANUAL_CATS.forEach(k=>o[k]=[]); return o; }
+let manualAssets = seedManual();
 let goal = GOAL;      // 基金目标总额：界面已不展示，仅作「主题超限暂停」信号的内部基准（沿用云端/旧值或默认 GOAL）
 // 2026-11-22：股票各版块仓位上限指标已从界面移除；stockCaps 仅保留旧数据兼容加载，不再参与任何展示/计算。
 let stockCaps = {a:0, us:0, hk:0};
+// 汇率（手工录入）：1 美元/港币 兑 多少人民币；null 表示未设置→该币种不折算，退为本币口径
+let fxRates = {usd:null, hkd:null};
 
 // 归一化上限：兼容旧单一上限与各种脏数据；旧 stockCap 按人民币口径归入沪深京版块。
 function normStockCaps(raw, legacyCap){
@@ -778,6 +903,11 @@ async function loadAll(){
     const r4 = await store.get(STOCKS_KEY);
     stocks = r4 ? JSON.parse(r4.value) : [];
   }catch(e){ stocks = []; }
+  try{
+    const rm = await store.get(MANUAL_KEY);
+    const m = rm ? JSON.parse(rm.value) : null;
+    if(m && typeof m==='object'){ MANUAL_CATS.forEach(k=>{ if(Array.isArray(m[k])) manualAssets[k]=m[k]; }); }
+  }catch(e){ manualAssets = seedManual(); }
   // 清除历史污染：名称为纯数字的（曾被代码兜底），置空等待云端/手动修复
   stocks.forEach(s=>{ if(/^\d+$/.test(String(s.name||'').trim())) s.name=''; });
   try{
@@ -785,6 +915,11 @@ async function loadAll(){
     const s = r5 ? JSON.parse(r5.value) : {};
     if(s.goal) goal = s.goal;
     stockCaps = normStockCaps(s.stockCaps, s.stockCap);
+    if(s.fx && typeof s.fx==='object'){
+      const u=parseFloat(s.fx.usd), h=parseFloat(s.fx.hkd);
+      fxRates.usd = (isFinite(u)&&u>0)?u:null;
+      fxRates.hkd = (isFinite(h)&&h>0)?h:null;
+    }
   }catch(e){}
   migrateFunds();
   migrateStocks();
@@ -817,6 +952,12 @@ async function saveFunds(){
 }
 async function saveStocks(){
   try{ await store.set(STOCKS_KEY, JSON.stringify(stocks)); }
+  catch(e){ showToast('保存失败，请重试'); }
+  pushCloud();
+}
+// 理财版块保存：本地落盘 + 推云（与基金/股票同一套同步范式）
+async function saveManual(){
+  try{ await store.set(MANUAL_KEY, JSON.stringify(manualAssets)); }
   catch(e){ showToast('保存失败，请重试'); }
   pushCloud();
 }
@@ -896,7 +1037,7 @@ async function recordFundPositionEvent(id, type){
   refreshDetail(); // 登记后止盈参考的落袋行立即刷新（非详情视图时该函数空态直退）
 }
 async function saveSettings(){
-  try{ await store.set(SETTINGS_KEY, JSON.stringify({goal, stockCaps})); }
+  try{ await store.set(SETTINGS_KEY, JSON.stringify({goal, stockCaps, fx:fxRates})); }
   catch(e){}
   pushCloud();
 }
@@ -3091,9 +3232,17 @@ async function syncOnOpen(){
       if(d.themeCaps && typeof d.themeCaps==='object') themeCaps = {...DEFAULT_CAPS, ...d.themeCaps};
       migrateThemeCaps();
       if(Array.isArray(d.stocks)) stocks = d.stocks;
+      if(d.manualAssets && typeof d.manualAssets==='object'){
+        MANUAL_CATS.forEach(k=>{ if(Array.isArray(d.manualAssets[k])) manualAssets[k]=d.manualAssets[k]; });
+      }
       if(d.settings && typeof d.settings==='object'){
         if(d.settings.goal) goal = d.settings.goal;
         stockCaps = normStockCaps(d.settings.stockCaps, d.settings.stockCap);
+        if(d.settings.fx && typeof d.settings.fx==='object'){
+          const u=parseFloat(d.settings.fx.usd), h=parseFloat(d.settings.fx.hkd);
+          fxRates.usd = (isFinite(u)&&u>0)?u:null;
+          fxRates.hkd = (isFinite(h)&&h>0)?h:null;
+        }
       }
       migrateFunds();
       migrateStocks();
@@ -3101,7 +3250,8 @@ async function syncOnOpen(){
         await store.set(STORE_KEY, JSON.stringify(funds));
         await store.set(THEME_CAP_KEY, JSON.stringify(themeCaps));
         await store.set(STOCKS_KEY, JSON.stringify(stocks));
-        await store.set(SETTINGS_KEY, JSON.stringify({goal, stockCaps}));
+        await store.set(MANUAL_KEY, JSON.stringify(manualAssets));
+        await store.set(SETTINGS_KEY, JSON.stringify({goal, stockCaps, fx:fxRates}));
         await markLocalSaved();
       }catch(e){}
       console.log('[定投信号台] 同步完成，准备渲染');
@@ -3134,7 +3284,7 @@ async function pushCloud(silent){
   if(!cloudReady || !sbUser) return;
   syncState = 'syncing'; setSyncUI();
   try{
-    const { error } = await sb.from(TABLE_NAME).upsert({ user_id: sbUser.id, data: { funds, themeCaps, stocks, settings: { goal, stockCaps } }, updated_at: new Date().toISOString() });
+    const { error } = await sb.from(TABLE_NAME).upsert({ user_id: sbUser.id, data: { funds, themeCaps, stocks, settings: { goal, stockCaps, fx:fxRates }, manualAssets }, updated_at: new Date().toISOString() });
     if(error) throw error;
     await markLocalSaved();
     syncState = 'ok'; syncErrMsg='';
@@ -4270,6 +4420,7 @@ function render(){
   renderStockSection();
   renderFundList();
   renderMktStrip();
+  renderAssetSection();
 }
 
 // ==== DETAIL_PURE_BEGIN ====
@@ -5708,6 +5859,285 @@ document.getElementById('detailBackBtn').addEventListener('click', ()=>{
   if(detailViaPush) history.back();   // 页内点进来的：退回上一条历史（概览）
   else location.hash = '';            // 直开/刷新落在详情的：清 hash 回概览，不留死历史
 });
+
+
+// ===================== 理财版块（纯手工录入） =====================
+// 说明：本块独立于 SIGNAL_PURE / DETAIL_PURE 测试门禁块之外，不参与信号一致性比对。
+var assetEditing = null; // {cat, idx} idx=-1 为新增
+
+function escAsset(v){
+  return String(v==null?'':v).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function manualSum(cat){
+  const meta = MANUAL_META[cat];
+  return (manualAssets[cat]||[]).reduce((s,it)=>s+(parseFloat(it[meta.amtKey])||0),0);
+}
+function manualRate(cat){
+  const meta = MANUAL_META[cat];
+  if(!meta.rateKey) return null;
+  const tot = manualSum(cat);
+  if(!tot) return null;
+  return (manualAssets[cat]||[]).reduce((s,it)=>s+(parseFloat(it[meta.amtKey])||0)*(parseFloat(it[meta.rateKey])||0),0)/tot;
+}
+// 六版块金额：基金市值(元) / 股票三版块各自本币 / 四个手工版块(元)
+function sixBlockAmounts(){
+  const fundMv = funds.reduce((s,f)=>s+(parseFloat(f.marketValue)||0),0);
+  const grp = {a:0,us:0,hk:0};
+  stocks.forEach(st=>{ const m = stockMarketOf(st); grp[m] = (grp[m]||0) + (parseFloat(st.marketValue)||0); });
+  return {
+    fund:fundMv, stock:grp,
+    bondFund:manualSum('bondFund'), wealth:manualSum('wealth'),
+    deposit:manualSum('deposit'), cash:manualSum('cash')
+  };
+}
+// 汇率折算：输入本币金额与市场，返回人民币金额。汇率未设置时该外币返回 null（不参与折算口径）。
+function fxToCny(v, market){
+  const n = parseFloat(v)||0;
+  if(market==='us') return fxRates.usd!=null ? n*fxRates.usd : null;
+  if(market==='hk') return fxRates.hkd!=null ? n*fxRates.hkd : null;
+  return n; // 人民币资产
+}
+// 六版块统一折算人民币口径。返回各版块人民币金额、总计、以及是否所有资产都已折算。
+function sixBlockCny(){
+  const a = sixBlockAmounts();
+  const us = fxToCny(a.stock.us,'us'), hk = fxToCny(a.stock.hk,'hk');
+  const parts = [
+    {name:'股票基金', color:'#B14A34', v:a.fund},
+    {name:'股票(沪深京)', color:'#C0563F', v:a.stock.a},
+    {name:'股票(美股)', color:'#D07A5E', v:us},
+    {name:'股票(港股)', color:'#D99579', v:hk},
+    {name:'债券基金', color:'#3F8A68', v:a.bondFund},
+    {name:'银行理财', color:'#A87C2E', v:a.wealth},
+    {name:'定期储蓄', color:'#8B5A2E', v:a.deposit},
+    {name:'活期现金流', color:'#707C8C', v:a.cash}
+  ];
+  const allConverted = (a.stock.us===0 || us!==null) && (a.stock.hk===0 || hk!==null);
+  const total = parts.reduce((s,x)=>s+(x.v||0),0);
+  return {raw:a, parts, total, allConverted, usCny:us, hkCny:hk};
+}
+
+function renderAssetSection(){
+  const cards = document.getElementById('assetCards');
+  if(!cards) return;
+  cards.innerHTML = MANUAL_CATS.map(cat=>{
+    const meta = MANUAL_META[cat], list = manualAssets[cat]||[];
+    const sum = manualSum(cat), rate = manualRate(cat);
+    const rows = list.length ? list.map((it,idx)=>{
+      const cells = meta.fields.map(f=>{
+        let v = it[f.k];
+        if(f.t==='number'){
+          if(f.k===meta.amtKey) return '<span class="amt">'+escAsset(fmtMoney(parseFloat(v)||0))+'</span>';
+          if(f.k===meta.rateKey){ const n=parseFloat(v)||0; return '<span class="'+(n>=0?'good':'warn')+'">'+fmtPct(n,2)+'</span>'; }
+        }
+        return '<span class="'+(f.k==='name'||f.k==='bank'?'nm':'meta')+'">'+escAsset(v||'—')+'</span>';
+      }).join('');
+      return '<div class="asset-row"><div class="asset-line">'+cells+'</div>'
+        +'<div class="asset-ops"><button class="op" data-asset-edit="'+cat+'" data-idx="'+idx+'">编辑</button>'
+        +'<button class="op del" data-asset-del="'+cat+'" data-idx="'+idx+'">删除</button></div></div>';
+    }).join('') : '<div class="asset-empty">暂无持仓，点击下方按钮手工录入</div>';
+    const rateStat = meta.rateKey
+      ? '<div class="asset-stat"><div class="k">'+(cat==='bondFund'?'加权年化':cat==='wealth'?'加权预期收益':'加权利率')+'</div><div class="v '+(rate==null?'':(rate>=0?'good':'warn'))+'">'+(rate==null?'—':fmtPct(rate,2))+'</div></div>'
+      : '';
+    return '<div class="asset-card">'
+      +'<div class="asset-head"><h3>'+meta.icon+' '+meta.name+'</h3><span class="asset-sub">'+list.length+' 笔 · 手工录入</span></div>'
+      +'<div class="asset-sum"><div class="asset-stat"><div class="k">持仓金额</div><div class="v">'+escAsset(fmtMoney(sum))+'</div></div>'+rateStat+'</div>'
+      +rows
+      +'<button class="asset-add" data-asset-add="'+cat+'">+ 添加'+meta.name+'</button>'
+      +'</div>';
+  }).join('');
+  cards.querySelectorAll('[data-asset-add]').forEach(b=>b.addEventListener('click',()=>openAssetModal(b.dataset.assetAdd,-1)));
+  cards.querySelectorAll('[data-asset-edit]').forEach(b=>b.addEventListener('click',()=>openAssetModal(b.dataset.assetEdit,parseInt(b.dataset.idx,10))));
+  cards.querySelectorAll('[data-asset-del]').forEach(b=>b.addEventListener('click',()=>delAsset(b.dataset.assetDel,parseInt(b.dataset.idx,10))));
+  renderAllocation();
+}
+
+function renderAllocation(){
+  const bar = document.getElementById('allocBar'), grid = document.getElementById('allocGrid');
+  if(!bar || !grid) return;
+  // 回填汇率输入框
+  const fu=document.getElementById('fxUsd'), fh=document.getElementById('fxHkd');
+  if(fu) fu.value = fxRates.usd!=null ? fxRates.usd : '';
+  if(fh) fh.value = fxRates.hkd!=null ? fxRates.hkd : '';
+  const fxHint=document.getElementById('fxHint');
+  if(fxHint){
+    fxHint.innerHTML = (fxRates.usd!=null||fxRates.hkd!=null)
+      ? '已设置汇率：美股/港股折算人民币参与占比。修改后点「保存汇率」生效。<span class="fx-tip">汇率随账号云同步。</span>'
+      : '填汇率后美股/港股折算成人民币参与占比；留空则按本币单列、不并入人民币总计。<span class="fx-tip">汇率手工录入，随账号云同步。</span>';
+  }
+  const x = sixBlockCny();
+  const totalEl = document.getElementById('allocTotal');
+  if(totalEl){
+    totalEl.innerHTML = '折算人民币总资产 <b>'+escAsset(fmtMoney(x.total))+'</b>'
+      + (x.allConverted ? '' : ' <span style="color:var(--gold);font-size:11px;">（部分外币未设汇率，未计入总计）</span>');
+  }
+  const partsForBar = x.parts.filter(p=>p.v>0);
+  bar.innerHTML = partsForBar.map(p=>{
+    const pct = x.total>0 ? p.v/x.total*100 : 0;
+    return '<i style="width:'+pct+'%;background:'+p.color+'" title="'+p.name+' '+pct.toFixed(1)+'%"></i>';
+  }).join('');
+  const a = x.raw;
+  grid.innerHTML = x.parts.map(p=>{
+    const isUs=p.name.indexOf('美股')>=0, isHk=p.name.indexOf('港股')>=0;
+    const nativeV = isUs?a.stock.us : isHk?a.stock.hk : p.v;
+    const pct = x.total>0 && p.v!=null ? (p.v/x.total*100) : null;
+    let amtHtml;
+    if(isUs||isHk){
+      const sym=isUs?'$':'HK$';
+      const cnyTag = p.v!=null ? '<div class="pc">≈ ¥'+Math.round(p.v).toLocaleString('zh-CN')+(pct!=null?' · 占 '+pct.toFixed(1)+'%':'')+'</div>'
+        : '<div class="pc" style="color:var(--gold);">未设汇率 · 未折算</div>';
+      amtHtml = '<div class="amt">'+sym+Math.round(nativeV).toLocaleString('zh-CN')+'</div>'+cnyTag;
+    } else {
+      amtHtml = '<div class="amt">¥'+Math.round(p.v).toLocaleString('zh-CN')+'</div><div class="pc">'+(pct!=null?'占 '+pct.toFixed(1)+'%':'—')+'</div>';
+    }
+    return '<div class="alloc-cell"><div class="nm"><span class="sw" style="background:'+p.color+'"></span>'+p.name+'</div>'+amtHtml+'</div>';
+  }).join('');
+}
+
+function openAssetModal(cat, idx){
+  const meta = MANUAL_META[cat];
+  assetEditing = {cat, idx};
+  document.getElementById('assetModalTitle').textContent = (idx>=0?'编辑':'添加')+meta.name;
+  document.getElementById('assetModalMsg').textContent='';
+  const it = idx>=0 ? (manualAssets[cat][idx]||{}) : {};
+  document.getElementById('assetModalFields').innerHTML = meta.fields.map(f=>
+    '<div class="field"><label>'+f.l+'</label><input type="'+f.t+'" data-mk="'+f.k+'" value="'+escAsset(it[f.k]||'')+'" placeholder="'+escAsset(f.ph||'')+'"'+(f.t==='number'?' step="any"':'')+'></div>'
+  ).join('');
+  document.getElementById('assetModalBackdrop').classList.add('open');
+}
+function closeAssetModal(){ document.getElementById('assetModalBackdrop').classList.remove('open'); assetEditing=null; }
+async function saveAssetModal(){
+  if(!assetEditing) return;
+  const {cat,idx} = assetEditing, meta = MANUAL_META[cat];
+  const body = document.getElementById('assetModalFields'), obj={};
+  for(const f of meta.fields){
+    const el = body.querySelector('[data-mk="'+f.k+'"]');
+    const v = el ? el.value.trim() : '';
+    if(f.t==='number'){
+      if(v!=='' && isNaN(parseFloat(v))){ document.getElementById('assetModalMsg').textContent=f.l+' 需填数字'; return; }
+      obj[f.k] = v===''?0:parseFloat(v);
+    } else obj[f.k] = v;
+  }
+  if(!(parseFloat(obj[meta.amtKey])>0)){ document.getElementById('assetModalMsg').textContent='请填写有效的持仓金额'; return; }
+  if(idx>=0) manualAssets[cat][idx]=obj; else manualAssets[cat].push(obj);
+  await saveManual();
+  closeAssetModal(); renderAssetSection(); showToast('已保存');
+}
+function delAsset(cat, idx){
+  if(!confirm('确认删除这笔持仓？')) return;
+  manualAssets[cat].splice(idx,1);
+  saveManual().then(()=>{ renderAssetSection(); showToast('已删除'); });
+}
+
+// ---------- AI 建议 ----------
+function buildBriefText(){
+  const a = sixBlockAmounts();
+  const fundMv = a.fund;
+  const fundCost = funds.reduce((s,f)=>{
+    const mv=parseFloat(f.marketValue)||0, cost=effectiveCost(f);
+    return s+((mv>0&&f.currentNav>0&&cost>0)?mv*cost/f.currentNav:mv);
+  },0);
+  const fundRealized = funds.reduce((s,f)=>s+(Number(f.realizedPnL)||0),0);
+  const fundBase = funds.reduce((s,f)=>{
+    const cum=Number(f.cumBuyCost)||0; if(cum>0) return s+cum;
+    const mv=parseFloat(f.marketValue)||0, cost=effectiveCost(f);
+    return s+((mv>0&&f.currentNav>0&&cost>0)?mv*cost/f.currentNav:mv);
+  },0);
+  const fundRet = fundBase>0?((fundMv-fundCost)+fundRealized)/fundBase*100:null;
+  let s = '以下是我的个人理财组合持仓（数据来自「定投信号台」，部分版块为手工录入）。请作为专业理财顾问，结合六版块占比与持仓情况，给出详细的优化建议与具体调仓方案。\n\n';
+  s += '【股票基金】合计 '+fmtMoney(fundMv)+(fundRet!=null?'，加权收益率 '+fmtPct(fundRet,2):'')+'\n';
+  funds.forEach(f=>{ s+='  · '+(f.name||'未命名')+'（'+(f.fundCode||'')+'）市值 '+fmtMoney(parseFloat(f.marketValue)||0)+'\n'; });
+  const xb = sixBlockCny();
+  const usNote = xb.usCny!=null ? '（折合 ¥'+Math.round(xb.usCny)+'）' : '（未设汇率，未折算）';
+  const hkNote = xb.hkCny!=null ? '（折合 ¥'+Math.round(xb.hkCny)+'）' : '（未设汇率，未折算）';
+  s += '\n【股票】沪深京 '+fmtMoney(a.stock.a)+' / 美股 $'+Math.round(a.stock.us||0)+usNote+' / 港股 HK$'+Math.round(a.stock.hk||0)+hkNote+'\n';
+  s += '汇率设置：USD/CNY='+(fxRates.usd!=null?fxRates.usd:'未设置')+'，HKD/CNY='+(fxRates.hkd!=null?fxRates.hkd:'未设置')+'\n';
+  stocks.forEach(st=>{ const m=stockMarketOf(st); const sym=m==='us'?'$':m==='hk'?'HK$':'¥'; s+='  · '+(st.name||st.code||'')+'（'+st.code+'）'+sym+Math.round(parseFloat(st.marketValue)||0)+'\n'; });
+  MANUAL_CATS.forEach(cat=>{
+    const meta=MANUAL_META[cat], list=manualAssets[cat]||[], sum=manualSum(cat), rate=manualRate(cat);
+    s+='\n【'+meta.name+'】合计 '+fmtMoney(sum)+(rate!=null?'，加权收益率 '+fmtPct(rate,2):'')+'\n';
+    if(list.length){
+      const labels=meta.fields.map(f=>f.l);
+      s+='  '+labels.join(' | ')+'\n';
+      list.forEach(it=>{ s+='  '+meta.fields.map(f=>(it[f.k]==null?'':it[f.k])).join(' | ')+'\n'; });
+    } else s+='  （无持仓）\n';
+  });
+  s+='\n请从以下角度分析：1）六版块配置结构是否合理（权益/固收/现金）；2）收益率与风险匹配度；3）流动性与应急资金；4）集中度与到期风险；5）给出可执行的调仓清单（含具体金额）。占比已按汇率折算成人民币统一计算（汇率设置见上文），若外币未设汇率则该部分未计入人民币总计。';
+  return s;
+}
+
+function generateAdvice(){
+  const x = sixBlockCny();
+  const a = x.raw;
+  const totalCny = x.total;
+  if(totalCny<=0){ showToast('请先录入持仓数据'); return; }
+  const pct = n => totalCny>0 && n!=null ? (n/totalCny*100) : 0;
+  const vOf = name => { const p=x.parts.find(q=>q.name===name); return p?p.v:0; };
+  // 权益 = 股票基金 + 股票三版块（折算后）；固收 = 债券基金+银行理财+定期储蓄；现金 = 活期
+  const equityV = vOf('股票基金')+vOf('股票(沪深京)')+(vOf('股票(美股)')||0)+(vOf('股票(港股)')||0);
+  const equity = pct(equityV);
+  const fixed = pct(vOf('债券基金'))+pct(vOf('银行理财'))+pct(vOf('定期储蓄'));
+  const cash = pct(vOf('活期现金流'));
+  let h='';
+  h+='<h4>① 配置结构（折算人民币口径，总计 '+escAsset(fmtMoney(totalCny))+'）</h4><ul>';
+  h+='<li>权益类（股票基金+股票三版块）<span class="hl">'+equity.toFixed(1)+'%</span> · 固收三类（债券基金+银行理财+定期储蓄）<span class="hl">'+fixed.toFixed(1)+'%</span> · 活期现金流 <span class="hl">'+cash.toFixed(1)+'%</span></li>';
+  if(!x.allConverted) h+='<li class="warn">部分外币持仓未设汇率，未计入人民币总计；填汇率后可得到完整占比。</li>';
+  h+='<li>'+(equity>60?'<span class="warn">权益类偏高，波动风险较大，可考虑向固收类再平衡。</span>':equity<10?'权益类偏低，长期增值动力偏弱。':'权益类占比处于常见区间。')+'</li>';
+  h+='<li>'+(cash<8?'<span class="warn">活期现金流偏低，建议保留相当于 3–6 个月开支的应急资金。</span>':cash>25?'活期资金偏多，可考虑将超出部分配置到债券基金或定期以提高收益。':'流动性储备较充足。')+'</li>';
+  h+='</ul>';
+  h+='<h4>② 收益表现</h4><ul>';
+  MANUAL_CATS.forEach(cat=>{
+    const meta=MANUAL_META[cat], rate=manualRate(cat);
+    if(meta.rateKey && rate!=null) h+='<li>'+meta.name+' 加权收益率 '+fmtPct(rate,2)+'（持仓 '+fmtMoney(manualSum(cat))+'）</li>';
+  });
+  h+='</ul>';
+  h+='<h4>③ 风险与到期提示</h4><ul>';
+  let maxV=0,maxName='';
+  MANUAL_CATS.forEach(cat=>{ (manualAssets[cat]||[]).forEach(it=>{ const v=parseFloat(it[MANUAL_META[cat].amtKey])||0; if(v>maxV){maxV=v;maxName=it.name||it.bank||MANUAL_META[cat].name;} }); });
+  funds.forEach(f=>{ const v=parseFloat(f.marketValue)||0; if(v>maxV){maxV=v;maxName=f.name||'未命名基金';} });
+  // 集中度统一按折算人民币口径重算
+  let maxCny=0,maxCnyName='';
+  x.parts.forEach(p=>{ if(p.v>maxCny){maxCny=p.v;maxCnyName=p.name;} });
+  funds.forEach(f=>{ const cny=fxToCny(f.marketValue,'a')||0; if(cny>maxCny){maxCny=cny;maxCnyName=f.name||'未命名基金';} });
+  stocks.forEach(st=>{ const cny=fxToCny(st.marketValue,stockMarketOf(st))||0; if(cny>maxCny){maxCny=cny;maxCnyName=st.name||st.code||'股票';} });
+  MANUAL_CATS.forEach(cat=>{ (manualAssets[cat]||[]).forEach(it=>{ const cny=fxToCny(it[MANUAL_META[cat].amtKey],'a')||0; if(cny>maxCny){maxCny=cny;maxCnyName=it.name||it.bank||MANUAL_META[cat].name;} }); });
+  if(maxCny>0 && totalCny>0){ const p=maxCny/totalCny*100; h+='<li>单一最大持仓「'+escAsset(maxCnyName)+'」占折算人民币资产 <span class="hl">'+p.toFixed(1)+'%</span>。'+(p>25?'<span class="warn">集中度偏高，建议分散。</span>':'集中度可接受。')+'</li>'; }
+  const today=new Date(); const soon=[];
+  (manualAssets.deposit||[]).forEach(it=>{ if(it.maturity){ const d=new Date(it.maturity); const days=(d-today)/86400000; if(days>=0&&days<=90) soon.push('「'+(it.name||'定期')+'」'+Math.round(days)+'天后到期（'+fmtMoney(parseFloat(it.amount)||0)+'）'); } });
+  if(soon.length) h+='<li class="warn">到期提醒：'+soon.join('；')+'。建议提前规划续存或转配。</li>';
+  h+='</ul>';
+  h+='<h4>④ 调仓方向（参考，需人工复核）</h4><ul>';
+  h+='<li>权益/固收/现金参考比例随年龄与风险偏好而变，建议先明确目标配置再机械再平衡。</li>';
+  h+='<li>活期现金流与银行理财的收益率差、定期储蓄的到期时点，是低成本优化的两个抓手。</li>';
+  h+='<li class="warn">以上为规则化初步分析，不构成投资建议；未到期定存、封闭理财等锁定资产不应强制调整。</li>';
+  h+='</ul><div class="small-note">如需结合市场与个人情况的深度建议，请点「复制材料给 AI 深度分析」。</div>';
+  const rep=document.getElementById('aiReport'); rep.innerHTML=h; rep.classList.add('show');
+  setTimeout(()=>rep.scrollIntoView({behavior:'smooth',block:'nearest'}),80);
+}
+
+function copyBrief(){
+  const txt=buildBriefText();
+  navigator.clipboard.writeText(txt).then(()=>showToast('已复制，可粘贴给 AI 深度分析')).catch(()=>{
+    const ta=document.createElement('textarea'); ta.value=txt; document.body.appendChild(ta); ta.select();
+    try{document.execCommand('copy');showToast('已复制');}catch(e){showToast('复制失败，请手动选择');}
+    ta.remove();
+  });
+}
+
+document.getElementById('assetModalSave').addEventListener('click', saveAssetModal);
+document.getElementById('assetModalCancel').addEventListener('click', closeAssetModal);
+document.getElementById('assetModalBackdrop').addEventListener('click', e=>{ if(e.target.id==='assetModalBackdrop') closeAssetModal(); });
+document.getElementById('genAdviceBtn').addEventListener('click', generateAdvice);
+document.getElementById('copyBriefBtn').addEventListener('click', copyBrief);
+document.getElementById('saveFxBtn').addEventListener('click', async ()=>{
+  const u=parseFloat(document.getElementById('fxUsd').value);
+  const h=parseFloat(document.getElementById('fxHkd').value);
+  fxRates.usd = (isFinite(u)&&u>0)?u:null;
+  fxRates.hkd = (isFinite(h)&&h>0)?h:null;
+  await saveSettings();
+  renderAssetSection();
+  showToast('汇率已保存'+(fxRates.usd!=null||fxRates.hkd!=null?'，占比已按折算人民币计算':'，未设汇率的币种按本币单列'));
+});
+
 
 loadAll();
 </script>
